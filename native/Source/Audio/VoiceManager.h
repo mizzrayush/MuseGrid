@@ -41,7 +41,8 @@ public:
                         float velocity,
                         float durationSeconds,
                         float damping = 0.5f,
-                        float pluckPos = 0.5f);
+                        float pluckPos = 0.5f,
+                        int fxChainId = 0);
 
     void noteOnVocal(const juce::String& trackId,
                      int noteId,
@@ -51,13 +52,17 @@ public:
                      const juce::String& vowel = "a",
                      float tractLength = 1.0f,
                      float breathiness = 0.1f,
-                     float tension = 0.85f);
+                     float tension = 0.85f,
+                     int fxChainId = 0);
 
     void noteOff(const juce::String& trackId, int noteId);
     void allNotesOff();
     void killAllNotesOnTrack(const juce::String& trackId);
 
-    void renderVoices(const juce::String& trackId, float* leftOut, float* rightOut, int numSamples, float trackPan, float trackVol);
+    // chainId 0 renders the voices that use the track FX rack; any other value renders only
+    // the voices routed to that per-note chain.
+    void renderVoices(const juce::String& trackId, float* leftOut, float* rightOut, int numSamples,
+                      float trackPan, float trackVol, int fxChainId = 0);
 
 private:
     double currentSampleRate = 44100.0;
@@ -69,18 +74,21 @@ private:
     struct TrackedVoice
     {
         juce::String trackId;
+        int fxChainId = 0;
         SynthVoice voice;
     };
 
     struct TrackedPhysVoice
     {
         juce::String trackId;
+        int fxChainId = 0;
         PhysicalModelVoice voice;
     };
 
     struct TrackedVocalVoice
     {
         juce::String trackId;
+        int fxChainId = 0;
         VocalModelVoice voice;
     };
 

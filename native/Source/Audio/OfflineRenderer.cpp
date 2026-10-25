@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <set>
 #include <vector>
 
 namespace
@@ -283,8 +284,22 @@ void OfflineRenderer::dispatchNoteOn(AudioEngine& engine, const juce::var& comma
     expression.vibratoFadeSeconds = readFloat(obj, "vibratoFade", 0.0f);
     expression.vibratoWave = (int)readFloat(obj, "vibratoWave", 0.0f);
     expression.tremoloWave = (int)readFloat(obj, "tremoloWave", 0.0f);
+    if (obj->hasProperty("overrideKind"))
+        expression.overrideKind = obj->getProperty("overrideKind").toString();
+    if (obj->hasProperty("overrideValue"))
+        expression.overrideValue = obj->getProperty("overrideValue").toString();
 
-    engine.playNote(obj->getProperty("trackId").toString(),
+    const auto trackId = obj->getProperty("trackId").toString();
+    if (obj->hasProperty("fxChainId"))
+        expression.fxChainId = (int)readFloat(obj, "fxChainId", 0.0f);
+    if (expression.fxChainId != 0 && obj->hasProperty("fxChainEffects"))
+    {
+        engine.ensureNoteFxChain(trackId, expression.fxChainId,
+                                 obj->hasProperty("fxChainSignature") ? obj->getProperty("fxChainSignature").toString() : juce::String(),
+                                 obj->getProperty("fxChainEffects"));
+    }
+
+    engine.playNote(trackId,
                     readFloat(obj, "pitch", 60.0f),
                     readFloat(obj, "velocity", 1.0f),
                     readFloat(obj, "duration", 0.25f),
@@ -374,6 +389,23 @@ OfflineRenderer::Result OfflineRenderer::renderToFile(const RenderJob& job, Audi
     engine.prepareForRate(job.sampleRate, kOfflineBlockSize);
     engine.setMasterLimiterDeferred(job.metronome.enabled);
     engine.allNotesOff();
+
+    // Per-note VST3 overrides need their extra instance before the render starts.
+    {
+        std::set<juce::String> loaded;
+        for (const auto& ev : events)
+        {
+            auto* obj = ev.getDynamicObject();
+            if (obj == nullptr) continue;
+            if (obj->getProperty("overrideKind").toString() != "vst3") continue;
+            const juce::String trackId = obj->getProperty("trackId").toString();
+            const juce::String pluginId = obj->getProperty("overrideValue").toString();
+            const juce::String key = trackId + "::" + pluginId;
+            if (loaded.count(key) > 0) continue;
+            loaded.insert(key);
+            engine.ensureNoteVst3Instrument(trackId, pluginId);
+        }
+    }
 
     juce::AudioBuffer<float> block(2, kOfflineBlockSize);
     float* const blockPointers[2] = { block.getWritePointer(0), block.getWritePointer(1) };

@@ -78,6 +78,7 @@ void VoiceManager::noteOnSynth(const juce::String& trackId,
 
     auto& tv = synthVoices[index];
     tv.trackId = trackId;
+    tv.fxChainId = expression.fxChainId;
 
     if (presetName.isNotEmpty() && presetName != "custom")
     {
@@ -109,7 +110,8 @@ void VoiceManager::noteOnPhysical(const juce::String& trackId,
                                   float velocity,
                                   float durationSeconds,
                                   float damping,
-                                  float pluckPos)
+                                  float pluckPos,
+                                  int fxChainId)
 {
     int index = nextPhysVoiceIndex;
     for (int i = 0; i < MAX_PHYS_VOICES; ++i)
@@ -125,6 +127,7 @@ void VoiceManager::noteOnPhysical(const juce::String& trackId,
 
     auto& pv = physVoices[index];
     pv.trackId = trackId;
+    pv.fxChainId = fxChainId;
     pv.voice.triggerPluck(noteId, pitchMidi, velocity, durationSeconds, damping, pluckPos);
 }
 
@@ -136,7 +139,8 @@ void VoiceManager::noteOnVocal(const juce::String& trackId,
                                const juce::String& vowel,
                                float tractLength,
                                float breathiness,
-                               float tension)
+                               float tension,
+                               int fxChainId)
 {
     int index = nextVocalVoiceIndex;
     for (int i = 0; i < MAX_VOCAL_VOICES; ++i)
@@ -152,6 +156,7 @@ void VoiceManager::noteOnVocal(const juce::String& trackId,
 
     auto& vv = vocalVoices[index];
     vv.trackId = trackId;
+    vv.fxChainId = fxChainId;
     vv.voice.triggerVocal(noteId, pitchMidi, velocity, durationSeconds, vowel, tractLength, breathiness, tension);
 }
 
@@ -197,25 +202,26 @@ void VoiceManager::killAllNotesOnTrack(const juce::String& trackId)
         if (vv.trackId == trackId) vv.voice.stopImmediately();
 }
 
-void VoiceManager::renderVoices(const juce::String& trackId, float* leftOut, float* rightOut, int numSamples, float trackPan, float trackVol)
+void VoiceManager::renderVoices(const juce::String& trackId, float* leftOut, float* rightOut, int numSamples,
+                                float trackPan, float trackVol, int fxChainId)
 {
     for (auto& tv : synthVoices)
     {
-        if (tv.trackId == trackId && tv.voice.isActive())
+        if (tv.trackId == trackId && tv.fxChainId == fxChainId && tv.voice.isActive())
         {
             tv.voice.renderBlock(leftOut, rightOut, numSamples, trackPan, trackVol);
         }
     }
     for (auto& pv : physVoices)
     {
-        if (pv.trackId == trackId && pv.voice.isActive())
+        if (pv.trackId == trackId && pv.fxChainId == fxChainId && pv.voice.isActive())
         {
             pv.voice.renderBlock(leftOut, rightOut, numSamples, trackPan, trackVol);
         }
     }
     for (auto& vv : vocalVoices)
     {
-        if (vv.trackId == trackId && vv.voice.isActive())
+        if (vv.trackId == trackId && vv.fxChainId == fxChainId && vv.voice.isActive())
         {
             vv.voice.renderBlock(leftOut, rightOut, numSamples, trackPan, trackVol);
         }

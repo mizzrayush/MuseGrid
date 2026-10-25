@@ -562,7 +562,8 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
       }
 
       let noteSynth = synth
-      if (note.instrumentOverride) {
+      // VST3 overrides are hosted by JUCE only; the Tone bounce keeps the track synth.
+      if (note.instrumentOverride && !note.instrumentOverride.startsWith('vst3:')) {
         const synthPreset = note.instrumentOverride as SynthPreset
         if (!overrideSynthsCached[synthPreset]) {
           overrideSynthsCached[synthPreset] = createSynthForPreset(synthPreset).connect(trackInput)

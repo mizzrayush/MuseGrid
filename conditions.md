@@ -1198,3 +1198,112 @@ sounds the same in both engines.
 - The Tone fallback still maps vibrato depth through `Tone.Vibrato`'s 0..1 range (≈100 cents ceiling);
   the native engine accepts arbitrary cents.
 - Stepped glide quantises to semitones; microtonal stepping would need a separate step size.
+
+## 16. PER-NOTE SOUND, PER-NOTE FX, GRID GLIDE — 2026-10-25
+
+### 16.1 Instrument Override (Note Inspector)
+
+- The dropdown at `RightPane.tsx:1312` now mirrors the track card: active VST3 instruments first
+  (drum/synth filtered by plugin tags), then built-in synth presets or drum kits, plus the current
+  VST3 when it is no longer in the active list and a "Use Track Default" entry.
+- VST3 selections are stored as `instrumentOverride = "vst3:<identifier>"`; presets/kits store the
+  plain name. Mixing notes with different overrides shows "Mixed Overrides".
+- Native routing (`AudioEngine::playNote`, `native/Source/Audio/AudioEngine.cpp:788`):
+  `vst3` → per-track note VST3 slot, `kit` → `DrumEngine::triggerHit` with a kit override,
+  `preset` → `noteOnSynth` / `noteOnVocal` / `noteOnPhysical`.
+- Slots are registered ahead of playback by `AudioEngine.syncNoteVst3Overrides()` →
+  `ensureNoteVst3Instrument`; `OfflineRenderer.cpp:406` does the same for export.
+- Tone fallback: `audioRender.ts` refuses to cast a `vst3:` string to a synth preset, so a browser
+  bounce keeps the track synth instead of producing a wrong instrument.
+
+### 16.2 Per-note FX chain
+
+- Data: `Note.fxInstances` + `Note.fxSettings` (`store.ts`). A note with instances owns a private rack
+  that replaces the track rack for that note.
+- `noteFxChain.ts` builds a deterministic chain id (FNV-1a of track+note), a signature, and effect
+  specs. Built-in defaults match the track cards; VST3 effects keep plugin id, bypass and wet;
+  custom JS effects are omitted because native cannot execute them.
+- UI (`NoteFxChainSection`, `RightPane.tsx:169`): collapsible `<details>` sleeve, add menu
+  (VST3 FX / built-ins / custom JS), drag reorder, bypass, duplicate, delete, per-effect sliders
+  using the same flat card/row tokens as the track card, plus "Clear Note Chain". Structural edits
+  commit history; slider edits do not spam undo.
+- Native: `NoteFxStep`/`NoteFxChain` in `AudioEngine.h:105`, registry at `AudioEngine.h:131`,
+  `ensureNoteFxChain` (`AudioEngine.cpp:509`) builds every processor/VST3 outside the track lock and
+  swaps it in by signature. Voice and drum-voice structs carry `fxChainId`; `renderBlock` renders
+  tagged voices into `noteFxBuffer`, runs steps in UI order, applies the fader, and adds the result
+  after the track built-in rack and track VST3 rack (`AudioEngine.cpp:1427`).
+- Registration: `AudioEngine.ensureNoteFxChain` before the first note, and `syncNoteVst3Overrides`
+  walks all notes so chains exist before transport start. `OfflineRenderer.cpp:297` registers the
+  same chain for every bounced note.
+- Limits: per-note chains are bypassed for sampler voices, track-level VST3 instrument notes and
+  per-note VST3-instrument notes (those paths return before a chain id is attached). Note FX VST3
+  has wet/bypass but no plugin editor; native reverb ignores pre-delay; chain registry entries are
+  not reclaimed when a note is deleted.
+
+### 16.3 Multi-note glide from the grid
+
+- With two or more notes selected, the grid context menu gains **Link Glides...**
+  (`GridCanvas.tsx:3748`). The submenu chooses order (time, reverse time, pitch ascending,
+  pitch descending), curve (line, S-curve, ease in/out, exp, log, sigmoid, custom `t` equation),
+  length (full, 3/4, 1/2, fixed ticks), extend-legato and loop-last, then applies to the selection
+  or clears existing glides.
+- `applyGlideChain` writes `pitchSlide`, `pitchSlideTime`, `pitchSlideRamp`,
+  `pitchSlideCustomCurve` and the new `glideToNoteId`; `clearNoteGlides` clears them.
+- The canvas draws connectors before the notes (`GridCanvas.tsx:1407`): straight line for linear,
+  bezier for ease/S shapes matching the ramp, track colour, endpoint dots, culled with the viewport.
+- Both actions call `commitHistory()` first, so a whole chain is one undo step.
+
+### Verification
+
+- `npx tsc --noEmit -p tsconfig.app.json` clean.
+- `npx vite build` succeeded; `dist` copied to `bin/dist`.
+- `npm run dev:web` + browser load: no console errors. The in-app browser reported a zero-size
+  viewport, so the grid canvas did not mount and the right-click flow could not be driven headlessly;
+  verify the glide menu visually in the native app.
+- Native build: `scripts\build_native.bat` run after the per-note FX changes.
+
+## 17. NATIVE ENGINE COVERAGE AUDIT — 2026-10-25
+
+Scope: live JUCE playback and the native offline bounce (`OfflineRenderer`). The Tone/WebAudio path
+is the browser fallback and is not authoritative.
+
+### Wired end-to-end
+
+| Area | Status |
+| :--- | :--- |
+| Built-in synth presets, drum engine + kits, sampler | Yes, including per-note kit/preset overrides. |
+| VST3 instruments (track and per-note override) | Yes; note slots registered before playback and in export. |
+| Per-note glide, vibrato (wave/delay/fade), tremolo, filter sweep, detune/pitch offset | Yes, via `NoteExpression` LUTs; identical maths to the UI preview. |
+| Microtonal EDO pitches, drum pitch offsets/punch/resonance, per-hit decay | Yes. |
+| Track built-in FX (eq, filter, distortion, bitcrush, chorus, phaser, delay, dpreverb, reverb, freeverb) and VST3 FX | Yes, both live and offline; bypass is emulated per type. |
+| Per-note FX chains (built-ins + VST3) | Yes for synth, physical, vocal and drum voices. |
+| Transport, loop, metronome, offline export | Yes. |
+
+### Not wired, or different in native
+
+1. **Master Volume** — `studioSettings.masterVolume` only moves `Tone.Destination`; JUCE never reads
+   it (`AudioEngine.h:261` declares an unused `masterVolume`, no bridge command exists).
+2. **Limiter on/off and threshold** — the native limiter is always on with its own fixed settings;
+   the Engine-panel values are Tone-only.
+3. **Track FX order and duplicates** — native applies a fixed
+   `eq → distortion → bitcrush → filter → chorus → phaser → delay → dpreverb → reverb → freeverb`
+   sequence (`AudioEngine.cpp:1356`) and keeps one instance per type, so drag-reordering and adding
+   the same effect twice are not reproduced.
+4. **Reverb pre-delay / damping** — `reverbPreDelay` is never sent and the native reverb has no
+   pre-delay stage; reverb decay is converted to room size. DPreverb decay/shape are approximated
+   from `tail` only.
+5. **Phaser octaves** — exposed in the card but not sent; native maps wet/rate/base frequency only.
+6. **Custom JS FX** — browser-only. Native maps `custom-bitcrusher` to the built-in bitcrusher and
+   ignores every other custom effect, including inside note chains.
+7. **Track-level `vocal` / `physical` presets** — `SynthVoice::setPreset` has no case for them, so a
+   track set to those presets falls back to the generic synth in JUCE. Only the per-note instrument
+   override reaches `VocalModelVoice` / `PhysicalModelVoice`.
+8. **Per-note FX on some voices** — chains are ignored for sampler voices, notes using the track
+   VST3 instrument, and notes using a per-note VST3 instrument override.
+9. **Note-FX VST3 editor and exact params** — no plugin GUI for note-chain VST3; native parameter
+   mapping is approximate (reverb pre-delay, dpreverb shape).
+10. **Note-FX lifecycle** — chains are keyed by note id and not deleted when a note is removed; a
+    long editing session accumulates dormant chain objects until the track is deleted.
+11. **Groups** — `groups` are organisational only; neither engine routes audio through group buses,
+    so this is an app-level gap rather than a native regression.
+

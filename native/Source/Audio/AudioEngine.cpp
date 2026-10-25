@@ -55,6 +55,8 @@ void AudioEngine::prepareForRate(double sampleRate, int blockSize)
     fxWetBuffer.setSize(2, 4096);
     vst3InstBuffer.setSize(2, 4096);
     masterBuffer.setSize(2, 4096);
+    noteFxBuffer.setSize(2, 4096);
+    noteFxMixBuffer.setSize(2, 4096);
 
     std::lock_guard<std::recursive_mutex> lock(trackMutex);
     for (auto& t : tracks)
@@ -85,6 +87,20 @@ void AudioEngine::prepareForRate(double sampleRate, int blockSize)
                 juce::Logger::writeToLog("[AudioEngine] Warning: VST3 instrument prepareToPlay failed on track " + t->id);
             }
         }
+        for (auto& slot : t->noteVst3Slots)
+        {
+            if (slot->plugin == nullptr) continue;
+            try
+            {
+                slot->plugin->enableAllBuses();
+                slot->plugin->setRateAndBufferSizeDetails(currentSampleRate, currentBlockSize);
+                slot->plugin->prepareToPlay(currentSampleRate, currentBlockSize);
+            }
+            catch (...)
+            {
+                juce::Logger::writeToLog("[AudioEngine] Warning: per-note VST3 prepareToPlay failed for " + slot->identifier);
+            }
+        }
         for (auto& fx : t->vst3FxChain)
         {
             if (fx->plugin != nullptr)
@@ -98,6 +114,36 @@ void AudioEngine::prepareForRate(double sampleRate, int blockSize)
                 catch (...)
                 {
                     juce::Logger::writeToLog("[AudioEngine] Warning: VST3 FX prepareToPlay failed: " + fx->pluginName);
+                }
+            }
+        }
+
+        for (auto& chainEntry : t->noteFxChains)
+        {
+            for (auto& step : chainEntry.second->steps)
+            {
+                if (step->eq) step->eq->prepare(currentSampleRate, currentBlockSize);
+                if (step->filter) step->filter->prepare(currentSampleRate, currentBlockSize);
+                if (step->distortion) step->distortion->prepare(currentSampleRate, currentBlockSize);
+                if (step->bitcrush) step->bitcrush->prepare(currentSampleRate, currentBlockSize);
+                if (step->chorus) step->chorus->prepare(currentSampleRate, currentBlockSize);
+                if (step->phaser) step->phaser->prepare(currentSampleRate, currentBlockSize);
+                if (step->delay) step->delay->prepare(currentSampleRate, currentBlockSize);
+                if (step->dpreverb) step->dpreverb->prepare(currentSampleRate, currentBlockSize);
+                if (step->reverb) step->reverb->prepare(currentSampleRate, currentBlockSize);
+                if (step->freeverb) step->freeverb->prepare(currentSampleRate, currentBlockSize);
+                if (step->vst3 != nullptr)
+                {
+                    try
+                    {
+                        step->vst3->enableAllBuses();
+                        step->vst3->setRateAndBufferSizeDetails(currentSampleRate, currentBlockSize);
+                        step->vst3->prepareToPlay(currentSampleRate, currentBlockSize);
+                    }
+                    catch (...)
+                    {
+                        juce::Logger::writeToLog("[AudioEngine] Warning: note FX VST3 prepare failed: " + step->pluginName);
+                    }
                 }
             }
         }
@@ -460,6 +506,179 @@ void AudioEngine::setTrackFxParam(const juce::String& trackId, const juce::Strin
     }
 }
 
+bool AudioEngine::ensureNoteFxChain(const juce::String& trackId, int chainId,
+                                    const juce::String& signature, const juce::var& effects)
+{
+    auto* effectsArray = effects.getArray();
+    if (chainId == 0 || effectsArray == nullptr || effectsArray->isEmpty())
+        return false;
+
+    // Fast path: the chain is already built and its settings did not change.
+    {
+        std::lock_guard<std::recursive_mutex> lock(trackMutex);
+        for (auto& t : tracks)
+        {
+            if (t->id != trackId) continue;
+            auto it = t->noteFxChains.find(chainId);
+            if (it != t->noteFxChains.end() && it->second->signature == signature)
+                return true;
+            break;
+        }
+    }
+
+    // Building VST3 plugins can be slow, so do it outside the track lock.
+    auto chain = std::make_unique<TrackState::NoteFxChain>();
+    chain->signature = signature;
+
+    for (const auto& ev : *effectsArray)
+    {
+        auto* obj = ev.getDynamicObject();
+        if (obj == nullptr) continue;
+
+        auto step = std::make_unique<TrackState::NoteFxStep>();
+        step->type = obj->getProperty("type").toString().toLowerCase();
+        if (obj->hasProperty("bypassed"))
+        {
+            const auto b = obj->getProperty("bypassed");
+            step->bypassed = b.isBool() ? (bool)b : (float)b > 0.5f;
+        }
+        if (obj->hasProperty("wet"))
+            step->wet = juce::jlimit(0.0f, 1.0f, (float)obj->getProperty("wet"));
+
+        auto* params = obj->getProperty("params").getDynamicObject();
+        auto param = [params](const char* name, float fallback) -> float
+        {
+            if (params == nullptr || !params->hasProperty(name)) return fallback;
+            return (float)params->getProperty(name);
+        };
+
+        const auto type = step->type;
+        if (type == "eq")
+        {
+            step->eq = std::make_unique<EQEffect>();
+            step->eq->prepare(currentSampleRate, currentBlockSize);
+            step->eq->setLowGainDb(param("lowGain", 0.0f));
+            step->eq->setMidGainDb(param("midGain", 0.0f));
+            step->eq->setHighGainDb(param("highGain", 0.0f));
+        }
+        else if (type == "filter")
+        {
+            step->filter = std::make_unique<FilterEffect>();
+            step->filter->prepare(currentSampleRate, currentBlockSize);
+            step->filter->setCutoff(param("cutoff", 20000.0f));
+            step->filter->setResonance(param("resonance", 0.7f));
+        }
+        else if (type == "distortion")
+        {
+            step->distortion = std::make_unique<DistortionEffect>();
+            step->distortion->prepare(currentSampleRate, currentBlockSize);
+            step->distortion->setDrive(param("amount", param("drive", 0.4f)));
+            step->distortion->setMix(param("wet", param("mix", 0.0f)));
+        }
+        else if (type == "bitcrush" || type == "bitcrusher")
+        {
+            step->bitcrush = std::make_unique<BitcrushEffect>();
+            step->bitcrush->prepare(currentSampleRate, currentBlockSize);
+            step->bitcrush->setDrive(param("drive", 4.0f));
+            step->bitcrush->setBits(param("bits", 8.0f));
+            step->bitcrush->setDive(param("dive", 0.0f));
+            step->bitcrush->setMix(param("wet", param("mix", 0.0f)));
+        }
+        else if (type == "chorus")
+        {
+            step->chorus = std::make_unique<ChorusEffect>();
+            step->chorus->prepare(currentSampleRate, currentBlockSize);
+            step->chorus->setWet(param("wet", 0.0f));
+            step->chorus->setRate(param("frequency", 1.5f));
+            step->chorus->setDepth(param("depth", 0.7f));
+            step->chorus->setDelayTime(param("delayTime", 3.5f));
+        }
+        else if (type == "phaser")
+        {
+            step->phaser = std::make_unique<PhaserEffect>();
+            step->phaser->prepare(currentSampleRate, currentBlockSize);
+            step->phaser->setWet(param("wet", 0.0f));
+            step->phaser->setRate(param("frequency", 0.5f));
+            step->phaser->setBaseFrequency(param("baseFreq", 350.0f));
+        }
+        else if (type == "delay")
+        {
+            step->delay = std::make_unique<DelayEffect>();
+            step->delay->prepare(currentSampleRate, currentBlockSize);
+            step->delay->setTime(param("time", 0.25f));
+            step->delay->setFeedback(param("feedback", 0.25f));
+            step->delay->setWet(param("wet", 0.0f));
+        }
+        else if (type == "dpreverb")
+        {
+            step->dpreverb = std::make_unique<ReverbEffect>();
+            step->dpreverb->prepare(currentSampleRate, currentBlockSize);
+            step->dpreverb->setWet(param("wet", 0.0f));
+            step->dpreverb->setRoomSize(param("tail", param("decay", 2.0f)) > 1.0f ? 0.75f : 0.5f);
+            step->dpreverb->setDamping(param("tone", 0.55f));
+        }
+        else if (type == "reverb")
+        {
+            step->reverb = std::make_unique<ReverbEffect>();
+            step->reverb->prepare(currentSampleRate, currentBlockSize);
+            step->reverb->setWet(param("wet", 0.0f));
+            const float decay = param("decay", 2.5f);
+            step->reverb->setRoomSize(param("roomSize", juce::jlimit(0.05f, 1.0f, decay / 10.0f)));
+            step->reverb->setDamping(param("damping", 0.5f));
+        }
+        else if (type == "freeverb")
+        {
+            step->freeverb = std::make_unique<ReverbEffect>();
+            step->freeverb->prepare(currentSampleRate, currentBlockSize);
+            step->freeverb->setWet(param("wet", 0.0f));
+            step->freeverb->setRoomSize(param("roomSize", 0.7f));
+            const float damp = param("dampening", param("damping", 4000.0f));
+            step->freeverb->setDamping(damp > 1.0f ? damp / 10000.0f : damp);
+        }
+        else if (type == "vst3")
+        {
+            const auto pluginId = obj->getProperty("pluginId").toString();
+            if (pluginId.isEmpty()) continue;
+            juce::String errorMsg;
+            auto plugin = vst3Host.instantiatePlugin(pluginId, currentSampleRate, currentBlockSize, errorMsg);
+            if (plugin == nullptr)
+            {
+                juce::Logger::writeToLog("[AudioEngine] Note FX VST3 failed (" + pluginId + "): " + errorMsg);
+                continue;
+            }
+            try
+            {
+                plugin->enableAllBuses();
+                plugin->setRateAndBufferSizeDetails(currentSampleRate, currentBlockSize);
+                plugin->prepareToPlay(currentSampleRate, currentBlockSize);
+            }
+            catch (...) {}
+            step->pluginName = plugin->getName();
+            step->pluginIdentifier = pluginId;
+            step->vst3 = std::move(plugin);
+        }
+        else
+        {
+            // Custom JS FX only exist in the browser engine.
+            continue;
+        }
+
+        chain->steps.push_back(std::move(step));
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(trackMutex);
+    for (auto& t : tracks)
+    {
+        if (t->id != trackId) continue;
+        auto it = t->noteFxChains.find(chainId);
+        if (it != t->noteFxChains.end() && it->second->signature == signature)
+            return true;
+        t->noteFxChains[chainId] = std::move(chain);
+        return true;
+    }
+    return false;
+}
+
 void AudioEngine::setTrackDrumKit(const juce::String& trackId, const juce::String& kitName)
 {
     std::lock_guard<std::recursive_mutex> lock(trackMutex);
@@ -566,6 +785,81 @@ void AudioEngine::playNote(const juce::String& trackId,
 
     juce::String inst = targetTrack->instrument.isNotEmpty() ? targetTrack->instrument : "synth";
 
+    // Per-note sound override takes precedence over the track instrument.
+    if (expression.overrideKind.isNotEmpty() && expression.overrideValue.isNotEmpty())
+    {
+        if (expression.overrideKind == "vst3")
+        {
+            TrackState::NoteVst3Slot* slot = nullptr;
+            for (auto& s : targetTrack->noteVst3Slots)
+                if (s->identifier == expression.overrideValue && s->plugin != nullptr) { slot = s.get(); break; }
+
+            if (slot != nullptr)
+            {
+                std::lock_guard<std::mutex> midiLock(slot->midiMutex);
+                int rawPitch = (int)(pitchMidi + 0.5f);
+                int midiPitch = rawPitch;
+                if (inst == "drum" && rawPitch >= 0 && rawPitch < 16)
+                {
+                    static const int padToGmMidi[16] = {
+                        36, 38, 42, 46, 39, 45, 47, 50, 49, 51, 56, 54, 64, 63, 75, 37
+                    };
+                    midiPitch = padToGmMidi[rawPitch];
+                }
+                midiPitch = juce::jlimit(0, 127, midiPitch);
+                int midiVel = juce::jlimit(1, 127, (int)(velocity * 127.0f));
+                slot->pendingMidi.addEvent(juce::MidiMessage::noteOn(1, midiPitch, (juce::uint8)midiVel), 0);
+                if (durationSeconds > 0.0f)
+                {
+                    int samples = std::max(1, (int)(durationSeconds * currentSampleRate));
+                    slot->scheduledNoteOffs.push_back({ midiPitch, samples });
+                }
+            }
+            else
+            {
+                juce::Logger::writeToLog("[AudioEngine] Per-note VST3 slot not loaded: " + expression.overrideValue);
+            }
+            return;
+        }
+
+        if (expression.overrideKind == "kit")
+        {
+            targetTrack->drumEngine.triggerHit((int)pitchMidi, velocity, pitchOffsetSemitones,
+                                               drumDecay, slideSemitones, slideTimeSeconds,
+                                               punchOctaves, resonanceHz, expression.overrideValue,
+                                               expression.fxChainId);
+            return;
+        }
+
+        if (expression.overrideKind == "preset")
+        {
+            if (expression.overrideValue == "vocal")
+            {
+                voiceManager.noteOnVocal(trackId, noteId, pitchMidi, velocity, durationSeconds, lyric,
+                                         1.0f, 0.1f, 0.85f, expression.fxChainId);
+            }
+            else if (expression.overrideValue == "physical")
+            {
+                voiceManager.noteOnPhysical(trackId, noteId, pitchMidi, velocity, durationSeconds,
+                                            0.5f, 0.5f, expression.fxChainId);
+            }
+            else
+            {
+                // -1 oscType / negative ADSR keeps the preset's own envelope instead of the track's.
+                voiceManager.noteOnSynth(trackId, noteId, pitchMidi, velocity, durationSeconds,
+                                         expression.overrideValue,
+                                         (SynthVoice::OscType)-1, -1.0f, -1.0f, 0.0f, 0.0f,
+                                         targetPitchMidi, slideTimeSeconds,
+                                         vibratoDepthCents, vibratoRateHz,
+                                         tremoloDepth, tremoloRateHz,
+                                         filterStartHz, filterEndHz, filterSweepTimeSeconds,
+                                         nullptr, nullptr,
+                                         expression);
+            }
+            return;
+        }
+    }
+
     if (targetTrack->samplerEnabled && targetTrack->vst3Instrument == nullptr)
     {
         targetTrack->sampleEngine.noteOn(noteId, pitchMidi, velocity, durationSeconds, pitchOffsetSemitones);
@@ -609,15 +903,15 @@ void AudioEngine::playNote(const juce::String& trackId,
     }
     else if (inst == "drum")
     {
-        targetTrack->drumEngine.triggerHit((int)pitchMidi, velocity, pitchOffsetSemitones, drumDecay, slideSemitones, slideTimeSeconds, punchOctaves, resonanceHz);
+        targetTrack->drumEngine.triggerHit((int)pitchMidi, velocity, pitchOffsetSemitones, drumDecay, slideSemitones, slideTimeSeconds, punchOctaves, resonanceHz, {}, expression.fxChainId);
     }
     else if (inst == "physical")
     {
-        voiceManager.noteOnPhysical(trackId, noteId, pitchMidi, velocity, durationSeconds);
+        voiceManager.noteOnPhysical(trackId, noteId, pitchMidi, velocity, durationSeconds, 0.5f, 0.5f, expression.fxChainId);
     }
     else if (inst == "vocal")
     {
-        voiceManager.noteOnVocal(trackId, noteId, pitchMidi, velocity, durationSeconds, lyric);
+        voiceManager.noteOnVocal(trackId, noteId, pitchMidi, velocity, durationSeconds, lyric, 1.0f, 0.1f, 0.85f, expression.fxChainId);
     }
     else // Default "synth"
     {
@@ -644,6 +938,35 @@ void AudioEngine::noteOff(const juce::String& trackId, int noteId)
         {
             if (t->samplerEnabled)
                 t->sampleEngine.noteOff(noteId);
+
+            for (auto& slot : t->noteVst3Slots)
+            {
+                std::lock_guard<std::mutex> midiLock(slot->midiMutex);
+                if (noteId > 0)
+                {
+                    int rawPitch = (int)(noteId / 100.0f + 0.5f);
+                    int midiPitch = rawPitch;
+                    if (t->instrument == "drum" && rawPitch >= 0 && rawPitch < 16)
+                    {
+                        static const int padToGmMidi[16] = {
+                            36, 38, 42, 46, 39, 45, 47, 50, 49, 51, 56, 54, 64, 63, 75, 37
+                        };
+                        midiPitch = padToGmMidi[rawPitch];
+                    }
+                    midiPitch = juce::jlimit(0, 127, midiPitch);
+                    slot->pendingMidi.addEvent(juce::MidiMessage::noteOff(1, midiPitch), 0);
+                    for (auto it = slot->scheduledNoteOffs.begin(); it != slot->scheduledNoteOffs.end(); )
+                    {
+                        if (it->midiPitch == midiPitch) it = slot->scheduledNoteOffs.erase(it);
+                        else ++it;
+                    }
+                }
+                else
+                {
+                    slot->pendingMidi.addEvent(juce::MidiMessage::allNotesOff(1), 0);
+                    slot->scheduledNoteOffs.clear();
+                }
+            }
             break;
         }
     }
@@ -701,6 +1024,14 @@ void AudioEngine::allNotesOff()
             t->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(1), 0);
             t->scheduledNoteOffs.clear();
         }
+
+        for (auto& slot : t->noteVst3Slots)
+        {
+            std::lock_guard<std::mutex> midiLock(slot->midiMutex);
+            slot->pendingMidi.addEvent(juce::MidiMessage::allNotesOff(1), 0);
+            slot->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(1), 0);
+            slot->scheduledNoteOffs.clear();
+        }
     }
 }
 
@@ -725,6 +1056,14 @@ void AudioEngine::killAllNotesOnTrack(const juce::String& trackId)
             t->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(1), 0);
         }
         t->scheduledNoteOffs.clear();
+
+        for (auto& slot : t->noteVst3Slots)
+        {
+            std::lock_guard<std::mutex> midiLock(slot->midiMutex);
+            slot->pendingMidi.addEvent(juce::MidiMessage::allNotesOff(1), 0);
+            slot->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(1), 0);
+            slot->scheduledNoteOffs.clear();
+        }
         break;
     }
 }
@@ -783,6 +1122,8 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
     std::fill(outR, outR + numSamples, 0.0f);
 
     trackBuffer.setSize(2, numSamples, false, false, true);
+    noteFxBuffer.setSize(2, numSamples, false, false, true);
+    noteFxMixBuffer.setSize(2, numSamples, false, false, true);
 
     std::lock_guard<std::recursive_mutex> lock(trackMutex);
 
@@ -799,6 +1140,7 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
         if (hasSolo && !t->soloed) continue;
 
         trackBuffer.clear();
+        noteFxMixBuffer.clear();
         float* trackL = trackBuffer.getWritePointer(0);
         float* trackR = trackBuffer.getWritePointer(1);
 
@@ -865,8 +1207,148 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
         }
         else
         {
-            voiceManager.renderVoices(t->id, trackL, trackR, numSamples, t->pan, t->volume);
-            t->drumEngine.renderBlock(trackL, trackR, numSamples, t->pan, t->volume);
+            voiceManager.renderVoices(t->id, trackL, trackR, numSamples, t->pan, t->volume, 0);
+            t->drumEngine.renderBlock(trackL, trackR, numSamples, t->pan, t->volume, 0);
+        }
+
+        // Per-note VST3 instrument overrides render into the same track bus.
+        if (!t->noteVst3Slots.empty())
+        {
+            float leftGain = t->volume * std::cos((t->pan + 1.0f) * juce::MathConstants<float>::pi * 0.25f);
+            float rightGain = t->volume * std::sin((t->pan + 1.0f) * juce::MathConstants<float>::pi * 0.25f);
+
+            for (auto& slot : t->noteVst3Slots)
+            {
+                if (slot->plugin == nullptr) continue;
+
+                juce::MidiBuffer midiForBlock;
+                {
+                    std::lock_guard<std::mutex> midiLock(slot->midiMutex);
+                    midiForBlock.swapWith(slot->pendingMidi);
+                    for (auto it = slot->scheduledNoteOffs.begin(); it != slot->scheduledNoteOffs.end(); )
+                    {
+                        if (it->sampleCountdown <= numSamples)
+                        {
+                            int offset = std::clamp(it->sampleCountdown, 0, numSamples - 1);
+                            midiForBlock.addEvent(juce::MidiMessage::noteOff(1, it->midiPitch), offset);
+                            it = slot->scheduledNoteOffs.erase(it);
+                        }
+                        else
+                        {
+                            it->sampleCountdown -= numSamples;
+                            ++it;
+                        }
+                    }
+                }
+
+                int outCh = slot->plugin->getTotalNumOutputChannels();
+                int inCh = slot->plugin->getTotalNumInputChannels();
+                int reqCh = std::max({ 2, inCh, outCh });
+                vst3InstBuffer.setSize(reqCh, numSamples, false, false, true);
+                vst3InstBuffer.clear();
+
+                if (safePluginProcessBlock(slot->plugin.get(), vst3InstBuffer, midiForBlock))
+                {
+                    vst3InstBuffer.applyGain(0, 0, numSamples, leftGain);
+                    vst3InstBuffer.applyGain(outCh >= 2 ? 1 : 0, 0, numSamples, rightGain);
+                    trackBuffer.addFrom(0, 0, vst3InstBuffer, 0, 0, numSamples);
+                    trackBuffer.addFrom(1, 0, vst3InstBuffer, outCh >= 2 ? 1 : 0, 0, numSamples);
+                }
+            }
+        }
+
+        // Per-note FX chains render outside the track rack: their voices never enter
+        // trackBuffer, so a note with its own chain bypasses the track FX entirely.
+        if (!t->noteFxChains.empty())
+        {
+            const float leftGain = t->volume * std::cos((t->pan + 1.0f) * juce::MathConstants<float>::pi * 0.25f);
+            const float rightGain = t->volume * std::sin((t->pan + 1.0f) * juce::MathConstants<float>::pi * 0.25f);
+            float* chainL = noteFxBuffer.getWritePointer(0);
+            float* chainR = noteFxBuffer.getWritePointer(1);
+
+            for (auto& chainEntry : t->noteFxChains)
+            {
+                auto& chain = *chainEntry.second;
+                noteFxBuffer.clear();
+
+                // Pre-fader so the chain hears the instrument at unity, like a per-note insert.
+                voiceManager.renderVoices(t->id, chainL, chainR, numSamples, 0.0f, 1.0f, chainEntry.first);
+                t->drumEngine.renderBlock(chainL, chainR, numSamples, 0.0f, 1.0f, chainEntry.first);
+
+                if (chain.steps.empty())
+                    continue;
+
+                juce::dsp::AudioBlock<float> chainBlock(noteFxBuffer);
+                for (auto& step : chain.steps)
+                {
+                    if (step->bypassed) continue;
+
+                    if (step->vst3 != nullptr)
+                    {
+                        int inCh = step->vst3->getTotalNumInputChannels();
+                        int outCh = step->vst3->getTotalNumOutputChannels();
+                        int reqCh = std::max({ 2, inCh, outCh });
+                        fxWetBuffer.setSize(reqCh, numSamples, false, false, true);
+                        fxWetBuffer.clear();
+
+                        if (inCh >= 2)
+                        {
+                            fxWetBuffer.copyFrom(0, 0, noteFxBuffer, 0, 0, numSamples);
+                            fxWetBuffer.copyFrom(1, 0, noteFxBuffer, 1, 0, numSamples);
+                        }
+                        else if (inCh == 1)
+                        {
+                            auto* monoIn = fxWetBuffer.getWritePointer(0);
+                            const auto* l = noteFxBuffer.getReadPointer(0);
+                            const auto* r = noteFxBuffer.getReadPointer(1);
+                            for (int s = 0; s < numSamples; ++s)
+                                monoIn[s] = 0.5f * (l[s] + r[s]);
+                        }
+                        else
+                        {
+                            fxWetBuffer.copyFrom(0, 0, noteFxBuffer, 0, 0, numSamples);
+                            if (reqCh >= 2)
+                                fxWetBuffer.copyFrom(1, 0, noteFxBuffer, 1, 0, numSamples);
+                        }
+
+                        juce::MidiBuffer emptyChainMidi;
+                        if (safePluginProcessBlock(step->vst3.get(), fxWetBuffer, emptyChainMidi))
+                        {
+                            const float wetAmt = juce::jlimit(0.0f, 1.0f, step->wet);
+                            const float dryAmt = 1.0f - wetAmt;
+                            const float* wetL = fxWetBuffer.getReadPointer(0);
+                            const float* wetR = (outCh >= 2) ? fxWetBuffer.getReadPointer(1) : wetL;
+                            float* destL = noteFxBuffer.getWritePointer(0);
+                            float* destR = noteFxBuffer.getWritePointer(1);
+                            for (int s = 0; s < numSamples; ++s)
+                            {
+                                destL[s] = destL[s] * dryAmt + wetL[s] * wetAmt;
+                                destR[s] = destR[s] * dryAmt + wetR[s] * wetAmt;
+                            }
+                        }
+                        else
+                        {
+                            step->bypassed = true;
+                            juce::Logger::writeToLog("[AudioEngine] Note FX VST3 crashed: " + step->pluginName);
+                        }
+                    }
+                    else if (step->eq) step->eq->process(noteFxBuffer);
+                    else if (step->distortion) step->distortion->process(chainBlock);
+                    else if (step->bitcrush) step->bitcrush->process(noteFxBuffer);
+                    else if (step->filter) step->filter->process(chainBlock);
+                    else if (step->chorus) step->chorus->process(noteFxBuffer);
+                    else if (step->phaser) step->phaser->process(noteFxBuffer);
+                    else if (step->delay) step->delay->process(chainBlock);
+                    else if (step->dpreverb) step->dpreverb->process(chainBlock);
+                    else if (step->reverb) step->reverb->process(chainBlock);
+                    else if (step->freeverb) step->freeverb->process(chainBlock);
+                }
+
+                noteFxBuffer.applyGain(0, 0, numSamples, leftGain);
+                noteFxBuffer.applyGain(1, 0, numSamples, rightGain);
+                noteFxMixBuffer.addFrom(0, 0, noteFxBuffer, 0, 0, numSamples);
+                noteFxMixBuffer.addFrom(1, 0, noteFxBuffer, 1, 0, numSamples);
+            }
         }
 
         // Process Track Native FX Rack
@@ -941,6 +1423,10 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
                 }
             }
         }
+
+        // Per-note chain output bypasses the track rack, so it joins the mix here.
+        trackBuffer.addFrom(0, 0, noteFxMixBuffer, 0, 0, numSamples);
+        trackBuffer.addFrom(1, 0, noteFxMixBuffer, 1, 0, numSamples);
 
         // Mix into Master output
         const float* finalTrackL = trackBuffer.getReadPointer(0);
@@ -1056,6 +1542,76 @@ void AudioEngine::removeTrackVst3Instrument(const juce::String& trackId)
             }
             break;
         }
+    }
+}
+
+bool AudioEngine::ensureNoteVst3Instrument(const juce::String& trackId, const juce::String& pluginIdentifier)
+{
+    if (pluginIdentifier.isEmpty()) return false;
+
+    {
+        std::lock_guard<std::recursive_mutex> lock(trackMutex);
+        for (auto& t : tracks)
+        {
+            if (t->id != trackId) continue;
+            for (auto& slot : t->noteVst3Slots)
+                if (slot->identifier == pluginIdentifier && slot->plugin != nullptr)
+                    return true;
+            break;
+        }
+    }
+
+    juce::String errorMsg;
+    auto inst = vst3Host.instantiatePlugin(pluginIdentifier, currentSampleRate, currentBlockSize, errorMsg);
+    if (inst == nullptr)
+    {
+        juce::Logger::writeToLog("[AudioEngine] Failed to instantiate per-note VST3 " + pluginIdentifier + ": " + errorMsg);
+        return false;
+    }
+    inst->enableAllBuses();
+    inst->setRateAndBufferSizeDetails(currentSampleRate, currentBlockSize);
+    inst->prepareToPlay(currentSampleRate, currentBlockSize);
+
+    std::lock_guard<std::recursive_mutex> lock(trackMutex);
+    TrackState* targetTrack = nullptr;
+    for (auto& t : tracks)
+        if (t->id == trackId) { targetTrack = t.get(); break; }
+
+    if (targetTrack == nullptr)
+    {
+        addTrack(trackId, "synth");
+        for (auto& t : tracks)
+            if (t->id == trackId) { targetTrack = t.get(); break; }
+    }
+    if (targetTrack == nullptr) return false;
+
+    for (auto& slot : targetTrack->noteVst3Slots)
+        if (slot->identifier == pluginIdentifier && slot->plugin != nullptr)
+            return true;
+
+    auto slot = std::make_unique<TrackState::NoteVst3Slot>();
+    slot->identifier = pluginIdentifier;
+    slot->name = inst->getName();
+    slot->plugin = std::move(inst);
+    targetTrack->noteVst3Slots.push_back(std::move(slot));
+    juce::Logger::writeToLog("[AudioEngine] Loaded per-note VST3: " + pluginIdentifier);
+    return true;
+}
+
+void AudioEngine::releaseNoteVst3Instruments(const juce::String& trackId)
+{
+    std::lock_guard<std::recursive_mutex> lock(trackMutex);
+    for (auto& t : tracks)
+    {
+        if (t->id != trackId) continue;
+        for (auto& slot : t->noteVst3Slots)
+        {
+            std::lock_guard<std::mutex> midiLock(slot->midiMutex);
+            slot->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(1), 0);
+            slot->scheduledNoteOffs.clear();
+        }
+        t->noteVst3Slots.clear();
+        break;
     }
 }
 

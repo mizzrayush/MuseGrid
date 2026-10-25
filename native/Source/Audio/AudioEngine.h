@@ -85,8 +85,50 @@ struct TrackState
     };
     std::vector<ScheduledNoteOff> scheduledNoteOffs;
 
+    // Extra VST3 instrument instances used by per-note instrument overrides.
+    struct NoteVst3Slot
+    {
+        juce::String identifier;
+        juce::String name;
+        std::unique_ptr<juce::AudioPluginInstance> plugin;
+        juce::MidiBuffer pendingMidi;
+        std::mutex midiMutex;
+        std::vector<ScheduledNoteOff> scheduledNoteOffs;
+    };
+    std::vector<std::unique_ptr<NoteVst3Slot>> noteVst3Slots;
+
     // VST3 FX Chain
     std::vector<std::unique_ptr<TrackVst3Fx>> vst3FxChain;
+
+    // Per-note FX chains. Each note with its own chain owns one of these; voices tagged
+    // with the chain id are rendered through it and skip the track FX rack.
+    struct NoteFxStep
+    {
+        juce::String type;
+        bool bypassed = false;
+        float wet = 1.0f; // VST3 steps only; built-in wet lives in their own parameters
+        std::unique_ptr<EQEffect> eq;
+        std::unique_ptr<FilterEffect> filter;
+        std::unique_ptr<DistortionEffect> distortion;
+        std::unique_ptr<BitcrushEffect> bitcrush;
+        std::unique_ptr<ChorusEffect> chorus;
+        std::unique_ptr<PhaserEffect> phaser;
+        std::unique_ptr<DelayEffect> delay;
+        std::unique_ptr<ReverbEffect> dpreverb;
+        std::unique_ptr<ReverbEffect> reverb;
+        std::unique_ptr<ReverbEffect> freeverb;
+        std::unique_ptr<juce::AudioPluginInstance> vst3;
+        juce::String pluginIdentifier;
+        juce::String pluginName;
+    };
+
+    struct NoteFxChain
+    {
+        juce::String signature;
+        std::vector<std::unique_ptr<NoteFxStep>> steps;
+    };
+
+    std::map<int, std::unique_ptr<NoteFxChain>> noteFxChains;
 };
 
 class AudioEngine : public juce::AudioIODeviceCallback
@@ -172,7 +214,14 @@ public:
     Vst3Host& getVst3Host() { return vst3Host; }
     bool setTrackVst3Instrument(const juce::String& trackId, const juce::String& pluginIdentifier);
     void removeTrackVst3Instrument(const juce::String& trackId);
+    bool ensureNoteVst3Instrument(const juce::String& trackId, const juce::String& pluginIdentifier);
+    void releaseNoteVst3Instruments(const juce::String& trackId);
     void openTrackVst3InstrumentEditor(const juce::String& trackId);
+
+    // Registers (or refreshes) the per-note FX chain used by noteOn fxChainId. The effect
+    // spec is an array of objects: { type, bypassed?, wet?, pluginId?, params? }.
+    bool ensureNoteFxChain(const juce::String& trackId, int chainId, const juce::String& signature,
+                           const juce::var& effects);
 
     bool addTrackVst3Fx(const juce::String& trackId, const juce::String& fxId, const juce::String& pluginIdentifier);
     void removeTrackVst3Fx(const juce::String& trackId, const juce::String& fxId);
@@ -230,4 +279,6 @@ private:
     juce::AudioBuffer<float> fxWetBuffer;
     juce::AudioBuffer<float> vst3InstBuffer;
     juce::AudioBuffer<float> masterBuffer;
+    juce::AudioBuffer<float> noteFxBuffer;
+    juce::AudioBuffer<float> noteFxMixBuffer;
 };

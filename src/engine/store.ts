@@ -2,6 +2,9 @@ import { create } from 'zustand'
 import type { DrumKit, SynthPreset } from '../utils/instruments'
 import { BUILT_IN_FX_LABELS, getTrackFxInstances, isBuiltInFxType } from './fxDefaults'
 
+/** Per-note sound override: a built-in preset, a drum kit, or a hosted VST3 instrument. */
+export type InstrumentOverride = SynthPreset | DrumKit | `vst3:${string}`
+
 export interface Note {
   id: string
   trackId: string
@@ -10,7 +13,10 @@ export interface Note {
   pitch: number
   velocity: number
   bpm?: number
-  instrumentOverride?: SynthPreset | DrumKit
+  instrumentOverride?: InstrumentOverride
+  /** Per-note FX chain. When present this replaces the track rack for this note. */
+  fxInstances?: FxInstance[]
+  fxSettings?: Record<string, Record<string, number>>
   velocityInspectorModified?: boolean
   completeNotesOnPause?: boolean
   detune?: number
@@ -34,7 +40,9 @@ export interface Note {
   filterSweepRamp?: 'linear' | 'exponential' | 'logarithmic' | 'sigmoid';
   tremoloDepth?: number;    // Percentage of volume dip (0 to 1)
   tremoloRate?: number;     // Speed of tremolo (Hz)
-  tremoloWave?: 'sine' | 'triangle' | 'square';
+  tremoloWave?: 'sine' | 'triangle' | 'square'
+  /** Target of a multi-note glide chain, used to draw the on-grid connector. */
+  glideToNoteId?: string;
 
   // Vocal properties
   lyric?: string            // Syllable/phonetic text (e.g. "la", "do")

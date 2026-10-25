@@ -1188,6 +1188,7 @@ export function applyGlideChain(notes: Note[], options: GlideChainOptions = {}):
       current.pitchSlide = semitones
       current.pitchSlideTime = slideTicks
       current.pitchSlideRamp = rampType
+      current.glideToNoteId = target.id
       if (customCurve) {
         current.pitchSlideCustomCurve = customCurve
       } else {
@@ -1199,6 +1200,7 @@ export function applyGlideChain(notes: Note[], options: GlideChainOptions = {}):
       current.pitchSlideTime = undefined
       current.pitchSlideRamp = undefined
       current.pitchSlideCustomCurve = undefined
+      current.glideToNoteId = undefined
     }
 
     modifiedMap.set(current.id, current)
@@ -1218,6 +1220,7 @@ export function clearNoteGlides(notes: Note[]): Note[] {
     pitchSlideTime: undefined,
     pitchSlideRamp: undefined,
     pitchSlideCustomCurve: undefined,
+    glideToNoteId: undefined,
   }))
 }
 

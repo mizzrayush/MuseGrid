@@ -35,6 +35,9 @@ public:
         juce::uint32 noiseSeed = 54321;
         float filterState = 0.0f;
         float filterState2 = 0.0f;
+
+        // 0 = track FX rack; otherwise this hit renders through a per-note FX chain.
+        int fxChainId = 0;
     };
 
     DrumEngine();
@@ -55,12 +58,12 @@ public:
         if (pad >= 0 && pad < 16) padCurves[pad].setTension(tension);
     }
 
-    void triggerHit(int drumPad, float velocity = 1.0f, float pitchOffsetSemitones = 0.0f, float customDecaySeconds = -1.0f, float slideSemitones = 0.0f, float slideTime = 0.0f, float punchOctaves = -1.0f, float resonanceHz = -1.0f);
+    void triggerHit(int drumPad, float velocity = 1.0f, float pitchOffsetSemitones = 0.0f, float customDecaySeconds = -1.0f, float slideSemitones = 0.0f, float slideTime = 0.0f, float punchOctaves = -1.0f, float resonanceHz = -1.0f, const juce::String& kitOverride = {}, int fxChainId = 0);
     void allNotesOff()
     {
         for (auto& v : voices) v.active = false;
     }
-    void renderBlock(float* leftOut, float* rightOut, int numSamples, float trackPan, float trackVol);
+    void renderBlock(float* leftOut, float* rightOut, int numSamples, float trackPan, float trackVol, int fxChainId = 0);
     bool hasActiveVoices() const
     {
         for (const auto& v : voices)

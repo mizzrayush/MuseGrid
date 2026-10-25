@@ -1,4 +1,5 @@
 #pragma once
+#include <juce_core/juce_core.h>
 #include <array>
 
 namespace musegrid
@@ -22,5 +23,14 @@ namespace musegrid
         int filterCurveSize = 0;
 
         int tremoloWave = 0; // 0 sine, 1 triangle, 2 square
+
+        // Per-note sound override: "preset" | "kit" | "vst3"; value is the preset, kit
+        // name or VST3 plugin identifier. Empty kind keeps the track instrument.
+        juce::String overrideKind;
+        juce::String overrideValue;
+
+        // 0 = the track FX rack applies. Non-zero renders this voice through its own
+        // registered per-note chain instead, so track FX are bypassed for this note.
+        int fxChainId = 0;
     };
 }

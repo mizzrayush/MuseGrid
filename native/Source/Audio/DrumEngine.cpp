@@ -38,14 +38,19 @@ void DrumEngine::reset()
     }
 }
 
-void DrumEngine::setKitByName(const juce::String& kitName)
+static DrumEngine::KitType parseKitName(const juce::String& kitName)
 {
     auto lower = kitName.toLowerCase();
-    if (lower.contains("tight"))        currentKit = KitType::Tight;
-    else if (lower.contains("808") || lower.contains("eightoh")) currentKit = KitType::EightOhEight;
-    else if (lower.contains("electro")) currentKit = KitType::Electro;
-    else if (lower.contains("tabla"))   currentKit = KitType::Tabla;
-    else                                currentKit = KitType::Default;
+    if (lower.contains("tight"))        return DrumEngine::KitType::Tight;
+    if (lower.contains("808") || lower.contains("eightoh")) return DrumEngine::KitType::EightOhEight;
+    if (lower.contains("electro"))      return DrumEngine::KitType::Electro;
+    if (lower.contains("tabla"))        return DrumEngine::KitType::Tabla;
+    return DrumEngine::KitType::Default;
+}
+
+void DrumEngine::setKitByName(const juce::String& kitName)
+{
+    currentKit = parseKitName(kitName);
 }
 
 float DrumEngine::nextNoise(juce::uint32& seed)
@@ -83,8 +88,9 @@ static inline int normalizeDrumPad(int pad)
     return ((pad % 16) + 16) % 16;
 }
 
-void DrumEngine::triggerHit(int drumPad, float velocity, float pitchOffsetSemitones, float customDecaySeconds, float slideSemitones, float slideTime, float punchOctaves, float resonanceHz)
+void DrumEngine::triggerHit(int drumPad, float velocity, float pitchOffsetSemitones, float customDecaySeconds, float slideSemitones, float slideTime, float punchOctaves, float resonanceHz, const juce::String& kitOverride, int fxChainId)
 {
+    const KitType kit = kitOverride.isNotEmpty() ? parseKitName(kitOverride) : currentKit;
     // Find free or oldest voice
     int bestIndex = 0;
     float maxElapsed = -1.0f;
@@ -105,6 +111,7 @@ void DrumEngine::triggerHit(int drumPad, float velocity, float pitchOffsetSemito
 
     auto& v = voices[bestIndex];
     v.active = true;
+    v.fxChainId = fxChainId;
     v.drumPad = normalizeDrumPad(drumPad);
     v.velocity = juce::jlimit(0.0f, 1.0f, velocity);
     v.elapsedSeconds = 0.0f;
@@ -125,17 +132,17 @@ void DrumEngine::triggerHit(int drumPad, float velocity, float pitchOffsetSemito
     switch (v.drumPad)
     {
         case 0: // Kick
-            if (currentKit == KitType::EightOhEight) {
+            if (kit == KitType::EightOhEight) {
                 v.startFreq = 160.0f * pitchMultiplier;
                 v.endFreq = 38.0f * pitchMultiplier;
                 v.pitchDecay = 0.09f;
                 v.durationSeconds = 0.8f;
-            } else if (currentKit == KitType::Tight) {
+            } else if (kit == KitType::Tight) {
                 v.startFreq = 180.0f * pitchMultiplier;
                 v.endFreq = 55.0f * pitchMultiplier;
                 v.pitchDecay = 0.03f;
                 v.durationSeconds = 0.25f;
-            } else if (currentKit == KitType::Tabla) { // Bayan (Bass Ghe)
+            } else if (kit == KitType::Tabla) { // Bayan (Bass Ghe)
                 v.startFreq = 70.0f * pitchMultiplier;
                 v.endFreq = 95.0f * pitchMultiplier; // Upward pitch modulation
                 v.pitchDecay = 0.2f;
@@ -149,19 +156,19 @@ void DrumEngine::triggerHit(int drumPad, float velocity, float pitchOffsetSemito
             break;
 
         case 1: // Snare
-            v.durationSeconds = (currentKit == KitType::Tight) ? 0.15f : 0.3f;
+            v.durationSeconds = (kit == KitType::Tight) ? 0.15f : 0.3f;
             v.startFreq = 220.0f * pitchMultiplier;
             v.endFreq = 140.0f * pitchMultiplier;
             v.pitchDecay = 0.03f;
             break;
 
         case 2: // Closed Hi-Hat
-            v.durationSeconds = (currentKit == KitType::Tight) ? 0.04f : 0.07f;
+            v.durationSeconds = (kit == KitType::Tight) ? 0.04f : 0.07f;
             v.startFreq = 8000.0f * pitchMultiplier;
             break;
 
         case 3: // Open Hi-Hat
-            v.durationSeconds = (currentKit == KitType::EightOhEight) ? 0.65f : 0.4f;
+            v.durationSeconds = (kit == KitType::EightOhEight) ? 0.65f : 0.4f;
             v.startFreq = 7500.0f * pitchMultiplier;
             break;
 
@@ -256,7 +263,7 @@ void DrumEngine::triggerHit(int drumPad, float velocity, float pitchOffsetSemito
     }
 }
 
-void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, float trackPan, float trackVol)
+void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, float trackPan, float trackVol, int fxChainId)
 {
     const float sampleTime = 1.0f / (float)currentSampleRate;
     const float panAngle = (trackPan + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
@@ -265,7 +272,7 @@ void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
 
     for (auto& v : voices)
     {
-        if (!v.active) continue;
+        if (!v.active || v.fxChainId != fxChainId) continue;
 
         for (int i = 0; i < numSamples; ++i)
         {

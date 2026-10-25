@@ -1,6 +1,7 @@
 import * as Tone from 'tone'
 import { useStore, type Track } from './store'
 import { buildCurveLut } from '../utils/glideCurves'
+import { buildNoteFxChain, type NoteFxEffectSpec } from '../utils/noteFxChain'
 
 export interface NativeNoteOnCommand {
   type: 'noteOn'
@@ -25,6 +26,13 @@ export interface NativeNoteOnCommand {
   filterEnd?: number
   filterSweepTime?: number
   filterCurve?: number[]
+  /** Per-note sound override. Kind tells JUCE which engine to route the note to. */
+  overrideKind?: 'preset' | 'kit' | 'vst3'
+  overrideValue?: string
+  /** Per-note FX chain, registered by JUCE before the note is triggered. */
+  fxChainId?: number
+  fxChainSignature?: string
+  fxChainEffects?: NoteFxEffectSpec[]
   lyric: string
   pitchOffset: number
   drumDecay: number
@@ -88,6 +96,21 @@ export function buildNativeNoteOnCommand(src: NoteCommandSource): NativeNoteOnCo
 
   const totalPitchOffset = (noteData?.pitchOffset ?? 0) + (detune ? detune / 100 : 0) + (track?.transpose ?? 0) + (src.extraPitchOffset ?? 0)
 
+  const rawOverride = noteData?.instrumentOverride
+  let overrideKind: 'preset' | 'kit' | 'vst3' | undefined
+  let overrideValue: string | undefined
+  if (typeof rawOverride === 'string' && rawOverride.length > 0) {
+    if (rawOverride.startsWith('vst3:')) {
+      overrideKind = 'vst3'
+      overrideValue = rawOverride.slice(5)
+    } else {
+      overrideKind = (track?.instrument === 'drum' || type === 'drum') ? 'kit' : 'preset'
+      overrideValue = rawOverride
+    }
+  }
+
+  const fxChain = noteData?.fxInstances?.length ? buildNoteFxChain(noteData) : undefined
+
   return {
     type: 'noteOn',
     trackId,
@@ -111,6 +134,11 @@ export function buildNativeNoteOnCommand(src: NoteCommandSource): NativeNoteOnCo
     filterEnd: noteData?.filterEnd,
     filterSweepTime: noteData?.filterSweepTime ? Tone.Time(noteData.filterSweepTime + 'i').toSeconds() : undefined,
     filterCurve: hasFilterSweep ? buildCurveLut(noteData?.filterSweepRamp) : undefined,
+    overrideKind,
+    overrideValue,
+    fxChainId: fxChain?.chainId,
+    fxChainSignature: fxChain?.signature,
+    fxChainEffects: fxChain?.effects,
     lyric: noteData?.lyric || 'a',
     pitchOffset: totalPitchOffset,
     drumDecay: noteData?.decay ?? -1,

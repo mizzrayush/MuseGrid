@@ -14,7 +14,10 @@ import {
   applyStrum,
   applyChop,
   applyHumanize,
-  applyFlipHorizontal
+  applyFlipHorizontal,
+  applyGlideChain,
+  clearNoteGlides,
+  type GlideChainOptions
 } from '../utils/midiEditing'
 import { getEdoStepInfo } from '../utils/edoNomenclature'
 
@@ -341,7 +344,14 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   }
   const [dragAutomationPointId, setDragAutomationPointId] = useState<string | null>(null)
   const [dragVelocityNoteId, setDragVelocityNoteId] = useState<string | null>(null)
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tick: number; mode: 'main' | 'subtrack_parent' } | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tick: number; mode: 'main' | 'subtrack_parent' | 'glide' } | null>(null)
+  const [glideMenu, setGlideMenu] = useState<GlideChainOptions>({
+    order: 'time',
+    curve: 'cubicInOut',
+    durationMode: 'full',
+    extendLegato: true,
+    loopLastNote: false
+  })
   const contextMenuRef = useRef<HTMLDivElement | null>(null)
   useContextMenuDismissal(contextMenu !== null, setContextMenu, contextMenuRef)
 
@@ -1394,6 +1404,73 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         overlapTotals.set(key, (overlapTotals.get(key) ?? 0) + 1)
       })
 
+      // Draw glide connectors underneath the notes
+      const glideSources = notes.filter(n => n.glideToNoteId)
+      if (glideSources.length > 0) {
+        const notesById = new Map(notes.map(n => [n.id, n]))
+        glideSources.forEach(note => {
+          const target = notesById.get(note.glideToNoteId as string)
+          if (!target) return
+          const x1 = tickToX(note.time + note.duration)
+          const x2 = tickToX(target.time)
+          if (Math.max(x1, x2) < minVisibleX || Math.min(x1, x2) > maxVisibleX) return
+          const sourcePitch = note.pitchEnd !== undefined ? note.pitchEnd : note.pitch
+          const y1 = TIMELINE_HEIGHT + getPitchY(sourcePitch) + gridSizeY * 0.5
+          const y2 = TIMELINE_HEIGHT + getPitchY(target.pitch) + gridSizeY * 0.5
+          if (y1 < TIMELINE_HEIGHT || y2 < TIMELINE_HEIGHT) return
+
+          const color = trackMap.get(note.trackId)?.color || '#4dabf7'
+          const dx = x2 - x1
+
+          let shape: 'line' | 'easeIn' | 'easeOut' | 'sCurve' = 'sCurve'
+          if (note.pitchSlideRamp === 'linear') shape = 'line'
+          else if (note.pitchSlideRamp === 'exponential') shape = 'easeIn'
+          else if (note.pitchSlideRamp === 'logarithmic') shape = 'easeOut'
+          else if (note.pitchSlideRamp === 'custom') {
+            const equation = (note.pitchSlideCustomCurve || '').replace(/\s+/g, ' ')
+            if (equation.startsWith('1 - Math.pow(1 - t, 3)')) shape = 'easeOut'
+            else if (equation.startsWith('t * t * t')) shape = 'easeIn'
+          }
+
+          ctx.save()
+          ctx.strokeStyle = color
+          ctx.fillStyle = color
+          ctx.globalAlpha = selectedNoteSet.has(note.id) ? 0.95 : (note.trackId === targetTrackId ? 0.7 : 0.4)
+          ctx.lineWidth = 1.5 / zoom
+          ctx.beginPath()
+          ctx.moveTo(x1, y1)
+          if (shape === 'line') {
+            ctx.lineTo(x2, y2)
+          } else {
+            let cp1x = x1 + dx * 0.5
+            let cp1y = y1
+            let cp2x = x1 + dx * 0.5
+            let cp2y = y2
+            if (shape === 'easeIn') {
+              cp1x = x1 + dx * 0.6
+              cp1y = y1
+              cp2x = x1 + dx * 0.9
+              cp2y = y2
+            } else if (shape === 'easeOut') {
+              cp1x = x1 + dx * 0.1
+              cp1y = y1
+              cp2x = x1 + dx * 0.4
+              cp2y = y2
+            }
+            ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2)
+          }
+          ctx.stroke()
+
+          ctx.beginPath()
+          ctx.arc(x1, y1, 1.6, 0, Math.PI * 2)
+          ctx.fill()
+          ctx.beginPath()
+          ctx.arc(x2, y2, 2.2, 0, Math.PI * 2)
+          ctx.fill()
+          ctx.restore()
+        })
+      }
+
       // Draw Notes
       visibleNotes.forEach(note => {
         const key = `${note.time}|${note.pitch}|${note.duration}`
@@ -2173,6 +2250,66 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
     setSelectedNoteIds([])
     setContextMenu(null)
   }
+
+  const handleApplyGlideChain = () => {
+    const state = useStore.getState()
+    const selected = state.notes.filter(n => selectedNoteIds.includes(n.id) &&
+      state.tracks.find(t => t.id === n.trackId)?.instrument !== 'drum')
+    if (selected.length < 2) {
+      state.showToast('Select at least two synth notes to link', 'error')
+      setContextMenu(null)
+      return
+    }
+    state.commitHistory()
+    const updated = applyGlideChain(selected, glideMenu)
+    const byId = new Map(updated.map(n => [n.id, n]))
+    useStore.setState(s => ({ notes: s.notes.map(n => byId.get(n.id) ?? n) }))
+    const linked = updated.filter(n => n.glideToNoteId).length
+    state.showToast(`Glide chain: ${linked} link${linked === 1 ? '' : 's'} created`, 'success')
+    setContextMenu(null)
+  }
+
+  const handleClearGlideChain = () => {
+    const state = useStore.getState()
+    const selected = state.notes.filter(n => selectedNoteIds.includes(n.id))
+    if (selected.length === 0) return
+    state.commitHistory()
+    const updated = clearNoteGlides(selected)
+    const byId = new Map(updated.map(n => [n.id, n]))
+    useStore.setState(s => ({ notes: s.notes.map(n => byId.get(n.id) ?? n) }))
+    state.showToast('Glide chain cleared', 'success')
+    setContextMenu(null)
+  }
+
+  const glideCandidateCount = useMemo(() => {
+    const drumTrackIds = new Set(tracks.filter(t => t.instrument === 'drum').map(t => t.id))
+    return allNotes.filter(n => selectedNoteIds.includes(n.id) && !drumTrackIds.has(n.trackId)).length
+  }, [allNotes, selectedNoteIds, tracks])
+
+  const renderGlideChip = (label: string, active: boolean, onClick: () => void, title?: string) => (
+    <button
+      title={title}
+      onClick={onClick}
+      style={{
+        padding: '4px 7px',
+        borderRadius: '4px',
+        border: `1px solid ${active ? 'rgba(218,119,242,0.45)' : 'rgba(255,255,255,0.07)'}`,
+        background: active ? 'rgba(218,119,242,0.16)' : 'rgba(255,255,255,0.03)',
+        color: active ? '#da77f2' : '#8a8a95',
+        fontSize: '9px',
+        fontWeight: 700,
+        cursor: 'pointer',
+        lineHeight: 1.2,
+        whiteSpace: 'nowrap'
+      }}
+    >
+      {label}
+    </button>
+  )
+
+  const glideGroupLabel = (text: string) => (
+    <div style={{ fontSize: '8px', fontWeight: 800, color: '#666', letterSpacing: '0.06em', marginBottom: '4px' }}>{text}</div>
+  )
 
   const renderParentTracksSelectionTree = () => {
     const rootTracks = tracks.filter(t => !t.parentId)
@@ -3534,13 +3671,13 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         <div
           style={{
             position: 'fixed',
-            top: contextMenu.y,
-            left: contextMenu.x,
+            top: contextMenu.mode === 'glide' ? Math.max(8, Math.min(contextMenu.y, window.innerHeight - 360)) : contextMenu.y,
+            left: contextMenu.mode === 'glide' ? Math.max(8, Math.min(contextMenu.x, window.innerWidth - 260)) : contextMenu.x,
             background: '#14141c',
             border: '1px solid rgba(255, 255, 255, 0.08)',
             borderRadius: '8px',
             zIndex: 9999,
-            minWidth: '180px',
+            minWidth: contextMenu.mode === 'glide' ? '248px' : '180px',
             boxShadow: '0 10px 30px rgba(0,0,0,0.6)',
             overflow: 'hidden'
           }}
@@ -3601,6 +3738,17 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                     <IconPlus size={13} /> Create Subtrack of...
                   </button>
 
+                  {selectedNoteIds.length >= 2 && (
+                    <button
+                      style={{ width: '100%', padding: '8px 12px', background: 'none', border: 'none', color: '#da77f2', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600 }}
+                      onClick={() => setContextMenu(prev => prev ? { ...prev, mode: 'glide' } : null)}
+                      onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}
+                      onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                    >
+                      <IconMusic size={13} /> Link Glides...
+                    </button>
+                  )}
+
                   <div style={{ height: '1px', background: 'rgba(255,255,255,0.05)', margin: '4px 0' }} />
 
                   <button
@@ -3612,6 +3760,150 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                     <IconTrash size={13} /> Delete Selected Notes
                   </button>
                 </>
+              )}
+            </div>
+          ) : contextMenu.mode === 'glide' ? (
+            <div style={{ padding: '6px 0' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 12px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                <button
+                  onClick={() => setContextMenu(prev => prev ? { ...prev, mode: 'main' } : null)}
+                  style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: 0 }}
+                >
+                  <IconChevronLeft size={13} />
+                </button>
+                <span style={{ fontSize: '9px', color: '#888', textTransform: 'uppercase', fontWeight: 800 }}>Glide Chain</span>
+                <span style={{ marginLeft: 'auto', fontSize: '9px', color: '#666', fontWeight: 600 }}>
+                  {glideCandidateCount} note{glideCandidateCount === 1 ? '' : 's'}
+                </span>
+              </div>
+
+              {glideCandidateCount < 2 ? (
+                <div style={{ padding: '10px 12px', fontSize: '10px', color: '#666' }}>
+                  Select at least two synth notes to link.
+                </div>
+              ) : (
+                <div style={{ padding: '8px 12px 6px', display: 'flex', flexDirection: 'column', gap: '9px' }}>
+                  <div>
+                    {glideGroupLabel('ORDER')}
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                      {renderGlideChip('Time', (glideMenu.order || 'time') === 'time', () => setGlideMenu(m => ({ ...m, order: 'time' })))}
+                      {renderGlideChip('Reverse', glideMenu.order === 'reverseTime', () => setGlideMenu(m => ({ ...m, order: 'reverseTime' })))}
+                      {renderGlideChip('Pitch ↑', glideMenu.order === 'pitchAscending', () => setGlideMenu(m => ({ ...m, order: 'pitchAscending' })))}
+                      {renderGlideChip('Pitch ↓', glideMenu.order === 'pitchDescending', () => setGlideMenu(m => ({ ...m, order: 'pitchDescending' })))}
+                    </div>
+                  </div>
+
+                  <div>
+                    {glideGroupLabel('CURVE')}
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                      {renderGlideChip('Line', glideMenu.curve === 'linear', () => setGlideMenu(m => ({ ...m, curve: 'linear' })))}
+                      {renderGlideChip('S-Curve', (glideMenu.curve || 'cubicInOut') === 'cubicInOut', () => setGlideMenu(m => ({ ...m, curve: 'cubicInOut' })))}
+                      {renderGlideChip('Ease In', glideMenu.curve === 'cubicIn', () => setGlideMenu(m => ({ ...m, curve: 'cubicIn' })))}
+                      {renderGlideChip('Ease Out', glideMenu.curve === 'cubicOut', () => setGlideMenu(m => ({ ...m, curve: 'cubicOut' })))}
+                      {renderGlideChip('Exp', glideMenu.curve === 'exponential', () => setGlideMenu(m => ({ ...m, curve: 'exponential' })))}
+                      {renderGlideChip('Log', glideMenu.curve === 'logarithmic', () => setGlideMenu(m => ({ ...m, curve: 'logarithmic' })))}
+                      {renderGlideChip('Sig', glideMenu.curve === 'sigmoid', () => setGlideMenu(m => ({ ...m, curve: 'sigmoid' })))}
+                      {renderGlideChip('Math', glideMenu.curve === 'custom', () => setGlideMenu(m => ({ ...m, curve: 'custom' })))}
+                    </div>
+                    {glideMenu.curve === 'custom' && (
+                      <input
+                        type="text"
+                        value={glideMenu.customEquation || ''}
+                        placeholder="e.g. t * t, Math.sin(t * Math.PI / 2)"
+                        onChange={e => setGlideMenu(m => ({ ...m, customEquation: e.target.value }))}
+                        style={{
+                          width: '100%',
+                          marginTop: '5px',
+                          background: '#191b21',
+                          border: '1px solid rgba(255,255,255,0.08)',
+                          color: '#da77f2',
+                          borderRadius: '4px',
+                          padding: '5px 8px',
+                          fontSize: '10px',
+                          fontFamily: 'monospace',
+                          outline: 'none',
+                          boxSizing: 'border-box'
+                        }}
+                      />
+                    )}
+                  </div>
+
+                  <div>
+                    {glideGroupLabel('LENGTH')}
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                      {renderGlideChip('Full', (glideMenu.durationMode || 'full') === 'full', () => setGlideMenu(m => ({ ...m, durationMode: 'full' })))}
+                      {renderGlideChip('3/4', glideMenu.durationMode === 'threeQuarters', () => setGlideMenu(m => ({ ...m, durationMode: 'threeQuarters' })))}
+                      {renderGlideChip('1/2', glideMenu.durationMode === 'half', () => setGlideMenu(m => ({ ...m, durationMode: 'half' })))}
+                      {renderGlideChip('Fixed', glideMenu.durationMode === 'fixed', () => setGlideMenu(m => ({ ...m, durationMode: 'fixed', fixedTicks: m.fixedTicks ?? 48 })))}
+                      {glideMenu.durationMode === 'fixed' && (
+                        <input
+                          type="number"
+                          min={12}
+                          step={12}
+                          value={glideMenu.fixedTicks ?? 48}
+                          onChange={e => setGlideMenu(m => ({ ...m, fixedTicks: Math.max(12, +e.target.value || 12) }))}
+                          style={{
+                            width: '58px',
+                            background: '#191b21',
+                            border: '1px solid rgba(255,255,255,0.08)',
+                            color: '#da77f2',
+                            borderRadius: '4px',
+                            padding: '3px 6px',
+                            fontSize: '9px',
+                            outline: 'none'
+                          }}
+                        />
+                      )}
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '4px' }}>
+                    {renderGlideChip('Extend Legato', glideMenu.extendLegato ?? true, () => setGlideMenu(m => ({ ...m, extendLegato: !(m.extendLegato ?? true) })), 'Stretch each note so the glide reaches the next note')}
+                    {renderGlideChip('Loop Last', glideMenu.loopLastNote ?? false, () => setGlideMenu(m => ({ ...m, loopLastNote: !(m.loopLastNote ?? false) })), 'Glide from the last note back to the first')}
+                  </div>
+
+                  <button
+                    onClick={handleApplyGlideChain}
+                    style={{
+                      width: '100%',
+                      padding: '7px 10px',
+                      background: 'rgba(218,119,242,0.14)',
+                      border: '1px solid rgba(218,119,242,0.35)',
+                      borderRadius: '5px',
+                      color: '#da77f2',
+                      cursor: 'pointer',
+                      fontSize: '10px',
+                      fontWeight: 800,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '6px'
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(218,119,242,0.22)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'rgba(218,119,242,0.14)'}
+                  >
+                    <IconMusic size={12} /> Apply to {glideCandidateCount} Notes
+                  </button>
+
+                  <button
+                    onClick={handleClearGlideChain}
+                    style={{
+                      width: '100%',
+                      padding: '6px 10px',
+                      background: 'none',
+                      border: '1px solid rgba(255,255,255,0.07)',
+                      borderRadius: '5px',
+                      color: '#999',
+                      cursor: 'pointer',
+                      fontSize: '10px',
+                      fontWeight: 600
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    Clear Glides
+                  </button>
+                </div>
               )}
             </div>
           ) : (

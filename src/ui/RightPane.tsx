@@ -1,9 +1,11 @@
 import React, { useMemo, useState } from 'react'
-import { useStore, deduplicateNotes, type Note } from '../engine/store'
+import { useStore, deduplicateNotes, isPluginDrum, isPluginSynth, getPluginInstrumentType, type Note, type FxInstance, type CustomFxConfig } from '../engine/store'
 import { SYNTH_PRESETS, DRUM_KITS, type SynthPreset, type DrumKit } from '../utils/instruments'
+import { audioEngine } from '../engine/AudioEngine'
+import { NOTE_FX_DEFAULTS } from '../utils/noteFxChain'
 import { NOTE_NAMES_SHARP, snapToScale, detectChord, detectScaleDegree } from '../utils/musicTheory'
 import { applyRatchet, applyMicroNudge } from '../utils/midiEditing'
-import { IconX, IconVolume, IconTimeline, IconMusic, IconDrum, IconSpeaker, IconTrash } from './Icons'
+import { IconX, IconVolume, IconTimeline, IconMusic, IconDrum, IconSpeaker, IconTrash, IconPlus } from './Icons'
 
 const PITCH_TO_PIECE: Record<number, string> = {
   0: 'Kick', 1: 'Snare', 2: 'Hihat Closed', 3: 'Hihat Open', 4: 'Clap',
@@ -142,6 +144,370 @@ interface SelectRowProps {
   onChange: (value: string) => void
 }
 
+const NOTE_FX_INFO: Record<string, { label: string; color: string }> = {
+  eq: { label: 'EQ (Equalizer)', color: '#69db7c' },
+  distortion: { label: 'Distortion (Drive)', color: '#ff6b6b' },
+  chorus: { label: 'Chorus', color: '#da77f2' },
+  phaser: { label: 'Phaser', color: '#00e6ff' },
+  delay: { label: 'Delay (Echo)', color: '#74c0fc' },
+  dpreverb: { label: 'DPreverb (Pre-Wash)', color: '#22d3ee' },
+  reverb: { label: 'Reverb (Space)', color: '#b197fc' },
+  freeverb: { label: 'Freeverb (Live Space)', color: '#e599f7' }
+}
+
+interface NoteFxChainSectionProps {
+  notes: Note[]
+  selectedNoteIds: string[]
+  vst3FxPlugins: any[]
+  customFxConfigs: CustomFxConfig[]
+}
+
+/**
+ * Per-note FX override. An empty chain keeps the track rack; once an effect is added the
+ * note renders through this chain instead, matching the track card's sleeve and cards.
+ */
+const NoteFxChainSection: React.FC<NoteFxChainSectionProps> = ({ notes, selectedNoteIds, vst3FxPlugins, customFxConfigs }) => {
+  const commitHistory = useStore(state => state.commitHistory)
+  const updateNotes = useStore(state => state.updateNotes)
+  const [draggingIndex, setDraggingIndex] = useState<number | null>(null)
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
+
+  if (notes.length === 0) return null
+
+  const first = notes[0]
+  const instances = first.fxInstances ?? []
+  const settings = first.fxSettings ?? {}
+  const mixed = notes.some(n => JSON.stringify(n.fxInstances ?? []) !== JSON.stringify(instances))
+  const title = mixed ? 'Mixed note chains' : instances.length > 0 ? `${instances.length} effect${instances.length === 1 ? '' : 's'}` : 'Track rack applies'
+
+  const commit = (nextInstances: FxInstance[], nextSettings: Record<string, Record<string, number>>) => {
+    commitHistory()
+    updateNotes(selectedNoteIds, {
+      fxInstances: nextInstances.length > 0 ? nextInstances : undefined,
+      fxSettings: nextInstances.length > 0 ? nextSettings : undefined
+    })
+    audioEngine.syncNoteVst3Overrides()
+  }
+
+  const setValue = (instId: string, key: string, value: number) => {
+    const next = JSON.parse(JSON.stringify(settings)) as Record<string, Record<string, number>>
+    next[instId] = { ...(next[instId] || {}), [key]: value }
+    updateNotes(selectedNoteIds, { fxSettings: next })
+  }
+
+  const addEffect = (value: string) => {
+    if (!value) return
+    const id = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+    let inst: FxInstance
+    if (value.startsWith('vst3:')) {
+      const pluginId = value.slice(5)
+      const plugin = vst3FxPlugins.find(p => String(p.fileOrIdentifier) === pluginId || String(p.uniqueId) === pluginId)
+      inst = {
+        id: `vst3_${id}`,
+        type: 'vst3',
+        pluginId: plugin?.fileOrIdentifier || pluginId,
+        pluginName: plugin?.name || 'VST3 Effect'
+      }
+    } else {
+      inst = { id: `${value}_${id}`, type: value }
+    }
+    const nextSettings = { ...settings, [inst.id]: inst.type === 'vst3' ? { wet: 0.4, bypassed: 0 } : { ...NOTE_FX_DEFAULTS[inst.type] } }
+    commit([...instances, inst], nextSettings)
+    useStore.getState().showToast(`Added ${inst.type === 'vst3' ? (inst.pluginName || 'VST3') : (NOTE_FX_INFO[inst.type]?.label || inst.type)} to note`, 'success')
+  }
+
+  const get = (inst: FxInstance, key: string, fallback = 0) => {
+    const stored = settings[inst.id]?.[key]
+    if (typeof stored === 'number' && isFinite(stored)) return stored
+    return NOTE_FX_DEFAULTS[inst.type]?.[key] ?? fallback
+  }
+
+  const renderControls = (inst: FxInstance) => {
+    const update = (key: string, value: number) => setValue(inst.id, key, value)
+    switch (inst.type) {
+      case 'eq':
+        return (
+          <>
+            <SliderRow label="Low EQ" value={get(inst, 'lowGain')} min={-12} max={12} step={0.5} suffix="dB" color="#69db7c" onChange={v => update('lowGain', v)} />
+            <SliderRow label="Mid EQ" value={get(inst, 'midGain')} min={-12} max={12} step={0.5} suffix="dB" color="#ffd43b" onChange={v => update('midGain', v)} />
+            <SliderRow label="High EQ" value={get(inst, 'highGain')} min={-12} max={12} step={0.5} suffix="dB" color="#ff8787" onChange={v => update('highGain', v)} />
+          </>
+        )
+      case 'distortion':
+        return (
+          <>
+            <SliderRow label="Drive" value={get(inst, 'wet')} min={0} max={1} step={0.01} color="#ff6b6b" onChange={v => update('wet', v)} />
+            <SliderRow label="Grit" value={get(inst, 'amount', 0.4)} min={0} max={1} step={0.01} color="#ff6b6b" onChange={v => update('amount', v)} />
+          </>
+        )
+      case 'chorus':
+        return (
+          <>
+            <SliderRow label="Chorus" value={get(inst, 'wet')} min={0} max={1} step={0.01} color="#da77f2" onChange={v => update('wet', v)} />
+            <SliderRow label="C-Rate" value={get(inst, 'frequency', 1.5)} min={0.1} max={10} step={0.1} suffix="Hz" color="#da77f2" onChange={v => update('frequency', v)} />
+            <SliderRow label="C-Depth" value={get(inst, 'depth', 0.7)} min={0} max={1} step={0.01} color="#da77f2" onChange={v => update('depth', v)} />
+            <SliderRow label="C-Delay" value={get(inst, 'delayTime', 3.5)} min={0.1} max={20} step={0.1} suffix="ms" color="#da77f2" onChange={v => update('delayTime', v)} />
+          </>
+        )
+      case 'phaser':
+        return (
+          <>
+            <SliderRow label="Phaser" value={get(inst, 'wet')} min={0} max={1} step={0.01} color="#00e6ff" onChange={v => update('wet', v)} />
+            <SliderRow label="P-Rate" value={get(inst, 'frequency', 0.5)} min={0.1} max={10} step={0.1} suffix="Hz" color="#00e6ff" onChange={v => update('frequency', v)} />
+            <SliderRow label="P-BaseFreq" value={get(inst, 'baseFreq', 350)} min={20} max={4000} step={10} suffix="Hz" color="#00e6ff" onChange={v => update('baseFreq', v)} />
+          </>
+        )
+      case 'delay':
+        return (
+          <>
+            <SliderRow label="Delay" value={get(inst, 'wet')} min={0} max={1} step={0.01} color="#74c0fc" onChange={v => update('wet', v)} />
+            <SliderRow label="D-Time" value={get(inst, 'time', 0.25)} min={0.01} max={2} step={0.01} suffix="s" color="#74c0fc" onChange={v => update('time', v)} />
+            <SliderRow label="Feedback" value={get(inst, 'feedback', 0.25)} min={0} max={0.9} step={0.01} color="#74c0fc" onChange={v => update('feedback', v)} />
+          </>
+        )
+      case 'dpreverb':
+        return (
+          <>
+            <SliderRow label="DPreverb" value={get(inst, 'wet')} min={0} max={1} step={0.01} color="#22d3ee" onChange={v => update('wet', v)} />
+            <SliderRow label="Tail (s)" value={get(inst, 'tail', 2)} min={0} max={120} step={0.1} suffix="s" color="#22d3ee" onChange={v => update('tail', v)} />
+            <SliderRow label="Shape" value={get(inst, 'decay', 0.65)} min={0.05} max={1} step={0.01} color="#5eead4" onChange={v => update('decay', v)} />
+            <SliderRow label="Tone" value={get(inst, 'tone', 0.55)} min={0} max={1} step={0.01} color="#67e8f9" onChange={v => update('tone', v)} />
+          </>
+        )
+      case 'reverb':
+        return (
+          <>
+            <SliderRow label="Reverb" value={get(inst, 'wet')} min={0} max={1} step={0.01} color="#b197fc" onChange={v => update('wet', v)} />
+            <SliderRow label="R-Decay" value={get(inst, 'decay', 2.5)} min={0.1} max={10} step={0.1} suffix="s" color="#b197fc" onChange={v => update('decay', v)} />
+          </>
+        )
+      case 'freeverb':
+        return (
+          <>
+            <SliderRow label="Freeverb" value={get(inst, 'wet')} min={0} max={1} step={0.01} color="#e599f7" onChange={v => update('wet', v)} />
+            <SliderRow label="F-Room" value={get(inst, 'roomSize', 0.7)} min={0} max={1} step={0.01} color="#e599f7" onChange={v => update('roomSize', v)} />
+            <SliderRow label="F-Damp" value={get(inst, 'dampening', 4000)} min={0} max={20000} step={100} suffix="Hz" color="#e599f7" onChange={v => update('dampening', v)} />
+          </>
+        )
+      case 'vst3':
+        return (
+          <SliderRow
+            label="Mix (Wet)"
+            value={get(inst, 'wet', 0.4)}
+            min={0}
+            max={1}
+            step={0.01}
+            color="#00ff88"
+            onChange={v => update('wet', v)}
+          />
+        )
+      default: {
+        const config = customFxConfigs.find(c => c.id === inst.type)
+        if (!config) return null
+        return (
+          <>
+            {config.params.map(p => (
+              <SliderRow
+                key={p.name}
+                label={p.label || p.name}
+                value={settings[inst.id]?.[p.name] ?? p.defaultVal}
+                min={p.min}
+                max={p.max}
+                step={p.max - p.min <= 2 ? 0.01 : 0.1}
+                color={config.mode === 'offline' ? '#22d3ee' : '#74c0fc'}
+                onChange={v => update(p.name, v)}
+              />
+            ))}
+          </>
+        )
+      }
+    }
+  }
+
+  return (
+    <details style={{ marginTop: '4px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+      <summary style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', cursor: 'pointer', userSelect: 'none', outline: 'none', listStyle: 'none' }}>
+        <span>Note Effects Override</span>
+        <span style={{ fontSize: '9px', fontWeight: 800, color: instances.length > 0 ? '#00e6ff' : '#555', letterSpacing: '0.05em' }}>
+          {title}
+        </span>
+      </summary>
+
+      <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        {mixed && (
+          <div style={{ fontSize: '9px', color: '#ffcc00', lineHeight: 1.4 }}>
+            Selected notes use different chains. Adding or removing an effect applies this chain to all of them.
+          </div>
+        )}
+
+        {instances.map((inst, index) => {
+          const isDragging = draggingIndex === index
+          const isOver = dragOverIndex === index
+          const isBypassed = (settings[inst.id]?.bypassed ?? 0) > 0.5
+          const info = inst.type === 'vst3'
+            ? { label: inst.pluginName ? `${inst.pluginName} (VST3)` : 'VST3 Effect', color: '#00ff88' }
+            : NOTE_FX_INFO[inst.type] || { label: customFxConfigs.find(c => c.id === inst.type)?.name || inst.type, color: '#74c0fc' }
+
+          return (
+            <div
+              key={inst.id}
+              draggable
+              onDragStart={e => { setDraggingIndex(index); e.dataTransfer.effectAllowed = 'move' }}
+              onDragOver={e => { e.preventDefault(); if (dragOverIndex !== index) setDragOverIndex(index) }}
+              onDragLeave={() => { if (dragOverIndex === index) setDragOverIndex(null) }}
+              onDrop={e => {
+                e.preventDefault()
+                if (draggingIndex !== null && draggingIndex !== index) {
+                  const next = [...instances]
+                  const [moved] = next.splice(draggingIndex, 1)
+                  next.splice(index, 0, moved)
+                  commit(next, settings)
+                }
+                setDraggingIndex(null)
+                setDragOverIndex(null)
+              }}
+              onDragEnd={() => { setDraggingIndex(null); setDragOverIndex(null) }}
+              style={{
+                background: isOver ? 'rgba(77, 171, 247, 0.12)' : isBypassed ? 'rgba(15, 17, 24, 0.45)' : 'rgba(255, 255, 255, 0.02)',
+                border: `1px solid ${isOver ? '#4dabf7' : isBypassed ? 'rgba(255, 51, 102, 0.25)' : 'rgba(255, 255, 255, 0.05)'}`,
+                borderRadius: '6px',
+                padding: '8px 10px 10px',
+                opacity: isDragging ? 0.4 : isBypassed ? 0.6 : 1,
+                cursor: 'grab',
+                transition: 'all 0.15s ease'
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px', userSelect: 'none' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span style={{ color: 'rgba(255,255,255,0.15)', fontSize: '10px', fontWeight: 'bold', cursor: 'grab' }}>⋮⋮</span>
+                  <button
+                    onClick={e => {
+                      e.stopPropagation()
+                      setValue(inst.id, 'bypassed', isBypassed ? 0 : 1)
+                      audioEngine.syncNoteVst3Overrides()
+                    }}
+                    title={isBypassed ? `Turn ${info.label} ON` : `Bypass ${info.label}`}
+                    style={{
+                      padding: '2px 6px',
+                      borderRadius: '3px',
+                      border: `1px solid ${isBypassed ? '#ff3366' : '#00ff88'}`,
+                      background: isBypassed ? 'rgba(255, 51, 102, 0.15)' : 'rgba(0, 255, 136, 0.15)',
+                      color: isBypassed ? '#ff3366' : '#00ff88',
+                      fontSize: '8px',
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                      lineHeight: '1'
+                    }}
+                  >
+                    {isBypassed ? 'OFF' : 'ON'}
+                  </button>
+                  <span style={{ fontSize: '9px', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: isBypassed ? '#777' : info.color, textDecoration: isBypassed ? 'line-through' : 'none' }}>
+                    {info.label}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <button
+                    onClick={() => {
+                      const copy: FxInstance = { ...inst, id: `${inst.type}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}` }
+                      const next = [...instances]
+                      next.splice(index + 1, 0, copy)
+                      commit(next, { ...settings, [copy.id]: { ...(settings[inst.id] || {}) } })
+                    }}
+                    title="Duplicate Effect"
+                    style={{ background: 'rgba(255,255,255,0.05)', border: 'none', color: '#aaa', padding: '2px 5px', borderRadius: '3px', cursor: 'pointer', display: 'flex', alignItems: 'center' }}
+                  >
+                    <IconPlus size={10} />
+                  </button>
+                  <button
+                    onClick={() => {
+                      const nextSettings = { ...settings }
+                      delete nextSettings[inst.id]
+                      commit(instances.filter(i => i.id !== inst.id), nextSettings)
+                    }}
+                    title="Delete Effect"
+                    style={{ background: 'rgba(255,68,68,0.1)', border: 'none', color: '#ff4444', padding: '2px 5px', borderRadius: '3px', cursor: 'pointer', display: 'flex', alignItems: 'center' }}
+                  >
+                    <IconX size={10} />
+                  </button>
+                  <span style={{ fontSize: '7.5px', color: 'rgba(255,255,255,0.2)', fontWeight: 700 }}>
+                    STEP {index + 1}/{instances.length}
+                  </span>
+                </div>
+              </div>
+              <div style={{ cursor: 'default' }} onMouseDown={e => e.stopPropagation()}>
+                {renderControls(inst)}
+              </div>
+            </div>
+          )
+        })}
+
+        <select
+          value=""
+          onChange={e => addEffect(e.target.value)}
+          onMouseDown={e => e.stopPropagation()}
+          style={{
+            width: '100%',
+            background: '#12141c',
+            border: '1px solid rgba(0, 230, 255, 0.3)',
+            color: '#00e6ff',
+            fontSize: '10px',
+            padding: '5px 8px',
+            borderRadius: '6px',
+            outline: 'none',
+            cursor: 'pointer',
+            colorScheme: 'dark'
+          }}
+        >
+          <option value="" style={{ background: '#12141c', color: '#8b92a5' }}>+ Add Effect to Note Chain...</option>
+          {vst3FxPlugins.length > 0 && (
+            <optgroup label="── VST3 EFFECTS ──" style={{ background: '#0a0b10', color: '#00ff88', fontWeight: 800 }}>
+              {vst3FxPlugins.map(plugin => (
+                <option key={plugin.uniqueId} value={`vst3:${plugin.fileOrIdentifier || plugin.uniqueId}`} style={{ background: '#12141c', color: '#00ff88' }}>
+                  {plugin.name} {plugin.category ? `(${plugin.category})` : ''}
+                </option>
+              ))}
+            </optgroup>
+          )}
+          <optgroup label="── BUILT-IN EFFECTS ──" style={{ background: '#0a0b10', color: '#888', fontWeight: 800 }}>
+            {Object.entries(NOTE_FX_INFO).map(([type, info]) => (
+              <option key={type} value={type} style={{ background: '#12141c', color: info.color }}>
+                {info.label}
+              </option>
+            ))}
+          </optgroup>
+          {customFxConfigs.length > 0 && (
+            <optgroup label="── CUSTOM JS FX ──" style={{ background: '#0a0b10', color: '#bf5af2', fontWeight: 800 }}>
+              {customFxConfigs.map(c => (
+                <option key={c.id} value={c.id} style={{ background: '#12141c', color: '#bf5af2' }}>
+                  {c.name}
+                </option>
+              ))}
+            </optgroup>
+          )}
+        </select>
+
+        {instances.length > 0 && (
+          <button
+            onClick={() => commit([], {})}
+            style={{
+              alignSelf: 'flex-end',
+              background: 'transparent',
+              border: 'none',
+              color: '#ff3366',
+              cursor: 'pointer',
+              fontSize: '10px',
+              fontWeight: 700,
+              padding: 0
+            }}
+          >
+            Clear Note Chain
+          </button>
+        )}
+      </div>
+    </details>
+  )
+}
+
 const SelectRow: React.FC<SelectRowProps> = ({ label, value, options, onChange }) => (
   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '2px 0' }}>
     <span style={{ fontSize: '11px', color: '#aaa' }}>{label}</span>
@@ -173,6 +539,10 @@ export const RightPane: React.FC = () => {
   const notes = useStore(state => state.notes)
   const tracks = useStore(state => state.tracks)
   const voicePresets = useStore(state => state.voicePresets)
+  const vst3Plugins = useStore(state => state.vst3Plugins || [])
+  const vst3ActivePluginIds = useStore(state => state.vst3ActivePluginIds || [])
+  const vst3DrumTags = useStore(state => state.vst3DrumTags || {})
+  const customFxConfigs = useStore(state => state.customFxConfigs || [])
   const activeTrackId = useStore(state => state.activeTrackId)
   const scaleLock = useStore(state => state.scaleLock)
   const scaleLockEnabled = scaleLock.enabled
@@ -355,6 +725,27 @@ export const RightPane: React.FC = () => {
   const currentTrack = tracks.find(t => t.id === targetTrackId)
   const trackType = currentTrack?.instrument || 'synth'
 
+  const noteVst3Instruments = useMemo(() => {
+    const activeSet = new Set((vst3ActivePluginIds || []).map(String))
+    const isActive = (p: any) => activeSet.has(String(p.uniqueId)) || activeSet.has(String(p.fileOrIdentifier))
+    return (vst3Plugins || []).filter(p =>
+      p && p.isInstrument && isActive(p) &&
+      (trackType === 'drum' ? isPluginDrum(p, vst3DrumTags) : isPluginSynth(p, vst3DrumTags))
+    )
+  }, [vst3Plugins, vst3ActivePluginIds, vst3DrumTags, trackType])
+
+  const currentOverrideVst = useMemo(() => {
+    if (typeof commonOverride !== 'string' || commonOverride === 'mixed' || !commonOverride.startsWith('vst3:')) return undefined
+    const id = commonOverride.slice(5)
+    return (vst3Plugins || []).find(p => String(p.fileOrIdentifier) === id || String(p.uniqueId) === id)
+  }, [commonOverride, vst3Plugins])
+
+  const vst3ActiveFx = useMemo(() => {
+    const activeSet = new Set((vst3ActivePluginIds || []).map(String))
+    return (vst3Plugins || []).filter(p => p && !p.isInstrument &&
+      (activeSet.has(String(p.uniqueId)) || activeSet.has(String(p.fileOrIdentifier))))
+  }, [vst3Plugins, vst3ActivePluginIds])
+
   // Edit Handlers
   const handleTrackChange = (newTrackId: string) => {
     if (newTrackId === 'mixed' || !newTrackId) return
@@ -399,7 +790,24 @@ export const RightPane: React.FC = () => {
   }
 
   const handleOverrideChange = (val: string) => {
-    const override = val === 'none' ? undefined : (val as SynthPreset | DrumKit)
+    if (val === 'none') {
+      updateNotes(selectedNoteIds, { instrumentOverride: undefined })
+      return
+    }
+    if (val.startsWith('vst3:')) {
+      const pluginId = val.slice(5)
+      const plugin = vst3Plugins.find(p =>
+        String(p.fileOrIdentifier) === pluginId || String(p.uniqueId) === pluginId || p.name === pluginId
+      )
+      const targetId = plugin?.fileOrIdentifier || plugin?.uniqueId || pluginId
+      commitHistory()
+      updateNotes(selectedNoteIds, { instrumentOverride: `vst3:${targetId}` })
+      const trackIds = new Set(selectedNotes.map(n => n.trackId))
+      trackIds.forEach(tid => audioEngine.ensureNoteVst3Instrument(tid, targetId))
+      useStore.getState().showToast(`Note override: ${plugin?.name || targetId}`, 'success')
+      return
+    }
+    const override = val as SynthPreset | DrumKit
     updateNotes(selectedNoteIds, { instrumentOverride: override })
   }
 
@@ -915,30 +1323,72 @@ export const RightPane: React.FC = () => {
             <select
               value={commonOverride === undefined ? 'none' : (commonOverride === 'mixed' ? 'mixed' : commonOverride)}
               onChange={e => handleOverrideChange(e.target.value)}
+              onMouseDown={e => e.stopPropagation()}
               style={{
-                background: '#191b21',
-                border: '1px solid rgba(255,255,255,0.08)',
-                color: 'white',
-                borderRadius: '6px',
-                padding: '8px 12px',
-                fontSize: '13px',
+                width: '100%',
+                background: '#12141c',
+                color: trackType === 'drum' ? '#ff6b6b' : '#00e6ff',
+                border: `1px solid ${trackType === 'drum' ? 'rgba(255, 107, 107, 0.25)' : 'rgba(0, 230, 255, 0.25)'}`,
+                borderRadius: '4px',
+                padding: '5px',
+                fontSize: '11px',
                 outline: 'none',
-                cursor: 'pointer'
+                cursor: 'pointer',
+                colorScheme: 'dark'
               }}
             >
               {commonOverride === 'mixed' && <option value="mixed">Mixed Overrides</option>}
-              <option value="none">Use Track Default</option>
+              <option value="none" style={{ background: '#12141c', color: '#8b92a5' }}>Use Track Default</option>
+              {noteVst3Instruments.length > 0 && (
+                <optgroup
+                  label={trackType === 'drum' ? '── VST3 DRUM INSTRUMENTS ──' : '── VST3 SYNTH INSTRUMENTS ──'}
+                  style={{ background: '#0a0b10', color: trackType === 'drum' ? '#ff6b6b' : '#00e6ff', fontWeight: 800 }}
+                >
+                  {noteVst3Instruments.map(plugin => (
+                    <option
+                      key={plugin.uniqueId}
+                      value={`vst3:${plugin.fileOrIdentifier || plugin.uniqueId}`}
+                      style={{ background: '#12141c', color: trackType === 'drum' ? '#ff6b6b' : '#00e6ff' }}
+                    >
+                      {plugin.name} {getPluginInstrumentType(plugin, vst3DrumTags) === 'both' ? '(Hybrid)' : '(VST3)'}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {currentOverrideVst && !noteVst3Instruments.some(p =>
+                String(p.fileOrIdentifier || p.uniqueId) === String(currentOverrideVst.fileOrIdentifier || currentOverrideVst.uniqueId)
+              ) && (
+                <optgroup label="── CURRENT VST3 ──" style={{ background: '#0a0b10', color: trackType === 'drum' ? '#ff6b6b' : '#00e6ff', fontWeight: 800 }}>
+                  <option
+                    value={`vst3:${currentOverrideVst.fileOrIdentifier || currentOverrideVst.uniqueId}`}
+                    style={{ background: '#12141c', color: trackType === 'drum' ? '#ff6b6b' : '#00e6ff' }}
+                  >
+                    {currentOverrideVst.name || 'Active VST3'} (Active)
+                  </option>
+                </optgroup>
+              )}
               {trackType === 'synth' ? (
-                SYNTH_PRESETS.map(p => (
-                  <option key={p.value} value={p.value}>{p.label}</option>
-                ))
+                <optgroup label="── BUILT-IN INSTRUMENTS ──" style={{ background: '#0a0b10', color: '#888', fontWeight: 800 }}>
+                  {SYNTH_PRESETS.map(p => (
+                    <option key={p.value} value={p.value} style={{ background: '#12141c', color: '#e0e0e0' }}>{p.label}</option>
+                  ))}
+                </optgroup>
               ) : (
-                DRUM_KITS.map(k => (
-                  <option key={k.value} value={k.value}>{k.label}</option>
-                ))
+                <optgroup label="── DRUM KITS ──" style={{ background: '#0a0b10', color: '#888', fontWeight: 800 }}>
+                  {DRUM_KITS.map(k => (
+                    <option key={k.value} value={k.value} style={{ background: '#12141c', color: '#e0e0e0' }}>{k.label}</option>
+                  ))}
+                </optgroup>
               )}
             </select>
           </div>
+
+          <NoteFxChainSection
+            notes={selectedNotes}
+            selectedNoteIds={selectedNoteIds}
+            vst3FxPlugins={vst3ActiveFx}
+            customFxConfigs={customFxConfigs}
+          />
 
           {/* Note BPM Override */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>

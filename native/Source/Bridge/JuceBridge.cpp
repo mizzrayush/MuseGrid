@@ -687,6 +687,14 @@ void JuceBridge::handleAudioCommand(const juce::Array<juce::var>& args, juce::We
         const float val = (float)obj->getProperty("value");
         audioEngine.setTrackFxParam(trackId, fxType, param, val);
     }
+    else if (type == "ensureNoteFxChain")
+    {
+        const juce::String trackId = obj->getProperty("trackId").toString();
+        const int chainId = (int)obj->getProperty("chainId");
+        const juce::String signature = obj->getProperty("signature").toString();
+        auto effects = juce::JSON::parse(obj->getProperty("effects").toString());
+        audioEngine.ensureNoteFxChain(trackId, chainId, signature, effects);
+    }
     else if (type == "setTrackKit")
     {
         const juce::String trackId = obj->getProperty("trackId").toString();
@@ -770,6 +778,21 @@ void JuceBridge::handleAudioCommand(const juce::Array<juce::var>& args, juce::We
     {
         const juce::String trackId = obj->getProperty("trackId").toString();
         audioEngine.removeTrackVst3Instrument(trackId);
+        complete(true);
+        return;
+    }
+    else if (type == "ensureNoteVst3Instrument")
+    {
+        const juce::String trackId = obj->getProperty("trackId").toString();
+        const juce::String pluginId = obj->getProperty("pluginId").toString();
+        bool ok = audioEngine.ensureNoteVst3Instrument(trackId, pluginId);
+        complete(ok);
+        return;
+    }
+    else if (type == "releaseNoteVst3Instruments")
+    {
+        const juce::String trackId = obj->getProperty("trackId").toString();
+        audioEngine.releaseNoteVst3Instruments(trackId);
         complete(true);
         return;
     }

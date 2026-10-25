@@ -1,11 +1,12 @@
 import * as Tone from 'tone'
 import { useStore } from './store'
-import type { Track, MetronomeSettings, VoicePreset, DrumPadSample, SynthSamplerConfig } from './store'
+import type { Track, MetronomeSettings, VoicePreset, DrumPadSample, SynthSamplerConfig, InstrumentOverride } from './store'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET, type DrumKit, type SynthPreset } from '../utils/instruments'
 import { getAutomationValueAtTick } from '../utils/automation'
 import { calculateFourierPartials } from '../utils/mathWaveform'
 import { getTrackFxInstances, getTrackFxSetting as readTrackFxSetting } from './fxDefaults'
 import { buildNativeNoteOnCommand } from './nativeNoteCommand'
+import { buildNoteFxChain } from '../utils/noteFxChain'
 import { evaluateGlideCurve } from '../utils/glideCurves'
 
 interface TrackRack {
@@ -4291,6 +4292,7 @@ class AudioEngine {
         (window as any).juceAudioBridge.postCommand({ type: 'stop' });
       }
     } else {
+      this.syncNoteVst3Overrides()
       Tone.Transport.start()
       useStore.getState().setIsPlaying(true)
       this.resumeActiveNotes()
@@ -4739,6 +4741,52 @@ class AudioEngine {
     }
   }
 
+  /** Instantiates the extra VST3 slot a per-note instrument override needs. */
+  ensureNoteVst3Instrument(trackId: string, pluginId: string) {
+    if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
+      (window as any).juceAudioBridge.postCommand({
+        type: 'ensureNoteVst3Instrument',
+        trackId,
+        pluginId
+      });
+    }
+  }
+
+  /** Registers a per-note FX chain so it is ready before the first note plays. */
+  ensureNoteFxChain(trackId: string, chainId: number, signature: string, effects: unknown) {
+    if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
+      (window as any).juceAudioBridge.postCommand({
+        type: 'ensureNoteFxChain',
+        trackId,
+        chainId,
+        signature,
+        effects: JSON.stringify(effects)
+      });
+    }
+  }
+
+  /** Makes sure every VST3 referenced by a per-note override has a live native slot. */
+  syncNoteVst3Overrides() {
+    if (!(window as any).__isJuceNative__ || !(window as any).juceAudioBridge) return
+    const state = useStore.getState()
+    const seen = new Set<string>()
+    state.notes.forEach(n => {
+      const ov = n.instrumentOverride
+      if (typeof ov === 'string' && ov.startsWith('vst3:')) {
+        const pluginId = ov.slice(5)
+        const key = `${n.trackId}::${pluginId}`
+        if (!seen.has(key)) {
+          seen.add(key)
+          this.ensureNoteVst3Instrument(n.trackId, pluginId)
+        }
+      }
+      if (n.fxInstances?.length) {
+        const chain = buildNoteFxChain(n)
+        if (chain) this.ensureNoteFxChain(n.trackId, chain.chainId, chain.signature, chain.effects)
+      }
+    })
+  }
+
   removeTrackVst3Instrument(trackId: string) {
     if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
       (window as any).juceAudioBridge.postCommand({
@@ -4814,7 +4862,7 @@ class AudioEngine {
     duration: string,
     time?: number,
     velocity = 1,
-    instrumentOverride?: SynthPreset | DrumKit,
+    instrumentOverride?: InstrumentOverride,
     detune?: number,
     pitchEnd?: string | number,
     noteData?: any
@@ -4828,6 +4876,11 @@ class AudioEngine {
         buildNativeNoteOnCommand({ trackId, type, pitch, duration, velocity, detune, pitchEnd, noteData, track })
       );
       return;
+    }
+
+    // VST3 instrument overrides are hosted by JUCE only. Tone keeps the track sound.
+    if (typeof instrumentOverride === 'string' && instrumentOverride.startsWith('vst3:')) {
+      instrumentOverride = undefined
     }
 
     if (state.engineMode === 'wasm' && this.wasmNode) {

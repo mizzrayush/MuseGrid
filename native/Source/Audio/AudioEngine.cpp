@@ -526,7 +526,8 @@ void AudioEngine::playNote(const juce::String& trackId,
                           float drumDecay,
                           float slideSemitones,
                           float punchOctaves,
-                          float resonanceHz)
+                          float resonanceHz,
+                          const musegrid::NoteExpression& expression)
 {
     std::lock_guard<std::recursive_mutex> lock(trackMutex);
     const int noteId = (int)(pitchMidi * 100.0f + 0.5f);
@@ -627,7 +628,8 @@ void AudioEngine::playNote(const juce::String& trackId,
                                  vibratoDepthCents, vibratoRateHz,
                                  tremoloDepth, tremoloRateHz,
                                  filterStartHz, filterEndHz, filterSweepTimeSeconds,
-                                 &targetTrack->decayCurve, &targetTrack->releaseCurve);
+                                 &targetTrack->decayCurve, &targetTrack->releaseCurve,
+                                 expression);
     }
 }
 

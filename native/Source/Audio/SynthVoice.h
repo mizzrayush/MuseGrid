@@ -2,7 +2,9 @@
 #include <juce_core/juce_core.h>
 #include <juce_dsp/juce_dsp.h>
 #include <cmath>
+#include <array>
 #include "EnvelopeCurve.h"
+#include "NoteExpression.h"
 
 class SynthVoice
 {
@@ -26,7 +28,8 @@ public:
                        float tremoloRateHz = 6.0f,
                        float filterStartHz = -1.0f,
                        float filterEndHz = -1.0f,
-                       float filterSweepTimeSeconds = 0.0f);
+                       float filterSweepTimeSeconds = 0.0f,
+                       const musegrid::NoteExpression& expression = {});
 
     void triggerNoteOff();
     void stopImmediately();
@@ -61,6 +64,9 @@ private:
     float slideDuration = 0.0f;
     float slideElapsed = 0.0f;
     bool isSliding = false;
+    musegrid::NoteExpression expression;
+    float vibratoElapsed = 0.0f;
+    float tremoloElapsed = 0.0f;
 
     // FM Synthesis
     bool isFM = false;
@@ -111,4 +117,8 @@ private:
     // PRNG for noise
     juce::uint32 noiseSeed = 123456789;
     float nextNoise();
+
+    static float sampleCurve(const std::array<float, musegrid::NoteExpression::kCurvePoints>& curve,
+                            int count, float t);
+    static float waveform(int wave, double phase);
 };

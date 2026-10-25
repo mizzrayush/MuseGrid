@@ -1,5 +1,6 @@
 import * as Tone from 'tone'
-import type { Track } from './store'
+import { useStore, type Track } from './store'
+import { buildCurveLut } from '../utils/glideCurves'
 
 export interface NativeNoteOnCommand {
   type: 'noteOn'
@@ -10,13 +11,20 @@ export interface NativeNoteOnCommand {
   duration: number
   slideEnd?: number
   slideTime: number
+  slideCurve?: number[]
+  steppedGlide?: boolean
   vibratoDepth?: number
   vibratoRate?: number
+  vibratoWave?: number
+  vibratoDelay?: number
+  vibratoFade?: number
   tremoloDepth?: number
   tremoloRate?: number
+  tremoloWave?: number
   filterStart?: number
   filterEnd?: number
   filterSweepTime?: number
+  filterCurve?: number[]
   lyric: string
   pitchOffset: number
   drumDecay: number
@@ -24,6 +32,8 @@ export interface NativeNoteOnCommand {
   punchOctaves: number
   resonanceHz: number
 }
+
+const waveformIndex = (wave?: string) => wave === 'triangle' ? 1 : wave === 'square' ? 2 : 0
 
 interface NoteCommandSource {
   trackId: string
@@ -67,10 +77,14 @@ export function buildNativeNoteOnCommand(src: NoteCommandSource): NativeNoteOnCo
   }
   if (noteData?.pitchSlide) {
     endMidi = startMidi + noteData.pitchSlide
-    slideTime = noteData.pitchSlideTime ? Tone.Time(noteData.pitchSlideTime + 'i').toSeconds() : 0.1
+    // 0 ticks means "glide across the whole note"; the JUCE voice applies that fallback.
+    slideTime = noteData.pitchSlideTime ? Tone.Time(noteData.pitchSlideTime + 'i').toSeconds() : 0
   }
 
   const durSec = typeof duration === 'number' ? duration : Tone.Time(duration).toSeconds()
+  const trackGlideStyle = useStore.getState().glideStyle
+  const hasSlide = !!noteData?.pitchSlide
+  const hasFilterSweep = noteData?.filterStart !== undefined
 
   const totalPitchOffset = (noteData?.pitchOffset ?? 0) + (detune ? detune / 100 : 0) + (track?.transpose ?? 0) + (src.extraPitchOffset ?? 0)
 
@@ -83,13 +97,20 @@ export function buildNativeNoteOnCommand(src: NoteCommandSource): NativeNoteOnCo
     duration: durSec,
     slideEnd: endMidi,
     slideTime,
+    slideCurve: hasSlide ? buildCurveLut(noteData?.pitchSlideRamp, noteData?.pitchSlideCustomCurve || 't * t') : undefined,
+    steppedGlide: (noteData?.glideStyle ?? trackGlideStyle) === 'stepped',
     vibratoDepth: noteData?.vibratoDepth,
     vibratoRate: noteData?.vibratoRate,
+    vibratoWave: waveformIndex(noteData?.vibratoWave),
+    vibratoDelay: (noteData?.vibratoDelay || 0) / 1000,
+    vibratoFade: (noteData?.vibratoFade || 0) / 1000,
     tremoloDepth: noteData?.tremoloDepth,
     tremoloRate: noteData?.tremoloRate,
+    tremoloWave: waveformIndex(noteData?.tremoloWave),
     filterStart: noteData?.filterStart,
     filterEnd: noteData?.filterEnd,
     filterSweepTime: noteData?.filterSweepTime ? Tone.Time(noteData.filterSweepTime + 'i').toSeconds() : undefined,
+    filterCurve: hasFilterSweep ? buildCurveLut(noteData?.filterSweepRamp) : undefined,
     lyric: noteData?.lyric || 'a',
     pitchOffset: totalPitchOffset,
     drumDecay: noteData?.decay ?? -1,

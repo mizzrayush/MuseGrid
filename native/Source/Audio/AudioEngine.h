@@ -150,7 +150,8 @@ public:
                   float drumDecay = -1.0f,
                   float slideSemitones = 0.0f,
                   float punchOctaves = -1.0f,
-                  float resonanceHz = -1.0f);
+                  float resonanceHz = -1.0f,
+                  const musegrid::NoteExpression& expression = {});
 
     void noteOff(const juce::String& trackId, int noteId = -1);
     void allNotesOff();

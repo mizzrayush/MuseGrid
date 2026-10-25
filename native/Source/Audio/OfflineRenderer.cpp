@@ -17,6 +17,20 @@ namespace
         return (float)v;
     }
 
+    void readCurve(const juce::DynamicObject* obj, const char* key,
+                   std::array<float, musegrid::NoteExpression::kCurvePoints>& out, int& count)
+    {
+        count = 0;
+        if (!obj->hasProperty(key)) return;
+        if (auto* arr = obj->getProperty(key).getArray())
+        {
+            const int n = juce::jmin((int)arr->size(), musegrid::NoteExpression::kCurvePoints);
+            for (int i = 0; i < n; ++i)
+                out[(size_t)i] = (float)(*arr)[i];
+            count = n;
+        }
+    }
+
     double peakOf(const juce::AudioBuffer<float>& buffer, int numSamples)
     {
         double peak = 0.0;
@@ -261,6 +275,15 @@ void OfflineRenderer::dispatchNoteOn(AudioEngine& engine, const juce::var& comma
     auto* obj = command.getDynamicObject();
     if (obj == nullptr) return;
 
+    musegrid::NoteExpression expression;
+    readCurve(obj, "slideCurve", expression.slideCurve, expression.slideCurveSize);
+    readCurve(obj, "filterCurve", expression.filterCurve, expression.filterCurveSize);
+    expression.steppedGlide = (bool)obj->getProperty("steppedGlide");
+    expression.vibratoDelaySeconds = readFloat(obj, "vibratoDelay", 0.0f);
+    expression.vibratoFadeSeconds = readFloat(obj, "vibratoFade", 0.0f);
+    expression.vibratoWave = (int)readFloat(obj, "vibratoWave", 0.0f);
+    expression.tremoloWave = (int)readFloat(obj, "tremoloWave", 0.0f);
+
     engine.playNote(obj->getProperty("trackId").toString(),
                     readFloat(obj, "pitch", 60.0f),
                     readFloat(obj, "velocity", 1.0f),
@@ -280,7 +303,8 @@ void OfflineRenderer::dispatchNoteOn(AudioEngine& engine, const juce::var& comma
                     readFloat(obj, "drumDecay", -1.0f),
                     readFloat(obj, "slideSemitones", 0.0f),
                     readFloat(obj, "punchOctaves", -1.0f),
-                    readFloat(obj, "resonanceHz", -1.0f));
+                    readFloat(obj, "resonanceHz", -1.0f),
+                    expression);
 }
 
 OfflineRenderer::Result OfflineRenderer::renderToFile(const RenderJob& job, AudioEngine& engine,

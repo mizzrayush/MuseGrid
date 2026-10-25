@@ -135,6 +135,39 @@ const SliderRow: React.FC<SliderRowProps> = ({
   )
 }
 
+interface SelectRowProps {
+  label: string
+  value: string
+  options: Array<{ value: string; label: string }>
+  onChange: (value: string) => void
+}
+
+const SelectRow: React.FC<SelectRowProps> = ({ label, value, options, onChange }) => (
+  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '2px 0' }}>
+    <span style={{ fontSize: '11px', color: '#aaa' }}>{label}</span>
+    <select
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      onMouseDown={e => e.stopPropagation()}
+      style={{
+        background: 'rgba(255,255,255,0.05)',
+        border: '1px solid rgba(255,255,255,0.1)',
+        color: 'white',
+        fontSize: '11px',
+        fontWeight: 600,
+        borderRadius: '6px',
+        padding: '6px 10px',
+        outline: 'none',
+        cursor: 'pointer'
+      }}
+    >
+      {options.map(o => (
+        <option key={o.value} value={o.value} style={{ background: '#12141c', color: 'white' }}>{o.label}</option>
+      ))}
+    </select>
+  </div>
+)
+
 export const RightPane: React.FC = () => {
   const selectedNoteIds = useStore(state => state.selectedNoteIds)
   const notes = useStore(state => state.notes)
@@ -151,7 +184,6 @@ export const RightPane: React.FC = () => {
   const deduplicateOverlapThreshold = useStore(state => state.deduplicateOverlapThreshold)
   const deduplicateProximityTolerance = useStore(state => state.deduplicateProximityTolerance)
   const glideStyle = useStore(state => state.glideStyle)
-  const setGlideStyle = useStore(state => state.setGlideStyle)
 
   const updateNotes = useStore(state => state.updateNotes)
   const removeNotes = useStore(state => state.removeNotes)
@@ -301,9 +333,22 @@ export const RightPane: React.FC = () => {
   const commonPitchSlideTime = getCommonMPE('pitchSlideTime', 48)
   const commonPitchSlideRamp = getCommonStringMPE('pitchSlideRamp', 'linear')
   const commonPitchSlideCustomCurve = getCommonStringMPE('pitchSlideCustomCurve', 't * t')
+  const commonGlideStyle = getCommonStringMPE('glideStyle', 'default')
+  const commonVibratoDelay = getCommonMPE('vibratoDelay', 0)
+  const commonVibratoFade = getCommonMPE('vibratoFade', 0)
+  const commonVibratoWave = getCommonStringMPE('vibratoWave', 'sine')
+  const commonTremoloWave = getCommonStringMPE('tremoloWave', 'sine')
   const commonFilterStart = getCommonMPE('filterStart', 20000)
   const commonFilterEnd = getCommonMPE('filterEnd', 20000)
   const commonFilterSweepTime = getCommonMPE('filterSweepTime', 48)
+  const commonFilterSweepRamp = getCommonStringMPE('filterSweepRamp', 'linear')
+
+  // A note-level choice overrides the track-wide glide style from the left pane.
+  const effectiveSmooth = commonGlideStyle === 'mixed'
+    ? true
+    : commonGlideStyle === 'default'
+      ? (glideStyle || 'smooth') === 'smooth'
+      : commonGlideStyle === 'smooth'
 
   // Determine current active track instrument type
   const targetTrackId = commonTrackId !== 'mixed' ? commonTrackId : activeTrackId
@@ -1298,8 +1343,8 @@ export const RightPane: React.FC = () => {
                     <SliderRow
                       label="Slide Target"
                       value={commonPitchSlide === 'mixed' ? 0 : commonPitchSlide}
-                      min={-24}
-                      max={24}
+                      min={-48}
+                      max={48}
                       step={1}
                       color="#00e6ff"
                       suffix="st"
@@ -1309,7 +1354,7 @@ export const RightPane: React.FC = () => {
                       label="Slide Time"
                       value={commonPitchSlideTime === 'mixed' ? 48 : commonPitchSlideTime}
                       min={0}
-                      max={384}
+                      max={3840}
                       step={1}
                       color="#00e6ff"
                       suffix=" ticks"
@@ -1407,68 +1452,49 @@ export const RightPane: React.FC = () => {
                 <SliderRow
                   label="Slide (Semitones)"
                   value={commonPitchSlide === 'mixed' ? 0 : commonPitchSlide}
-                  min={-24} max={24} step={1}
+                  min={-48} max={48} step={1}
                   color="#00e6ff" suffix="st"
                   onChange={val => handleMPEChange('pitchSlide', val === 0 ? undefined : val)}
                 />
                 <SliderRow
                   label="Slide Duration"
                   value={commonPitchSlideTime === 'mixed' ? 48 : commonPitchSlideTime}
-                  min={0} max={384} step={1}
+                  min={0} max={3840} step={1}
                   color="#00e6ff" suffix=" ticks"
                   onChange={val => handleMPEChange('pitchSlideTime', val)}
                 />
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '2px 4px', marginTop: '2px' }}>
-                  <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 500 }}>Glide Style</span>
-                  <select
-                    value={glideStyle || 'smooth'}
-                    onChange={e => setGlideStyle(e.target.value as 'smooth' | 'stepped')}
-                    style={{
-                      background: 'rgba(0,0,0,0.4)',
-                      border: '1px solid rgba(255,255,255,0.08)',
-                      color: '#00e6ff',
-                      fontSize: '11px',
-                      fontWeight: 'bold',
-                      outline: 'none',
-                      cursor: 'pointer',
-                      padding: '4px 8px',
-                      borderRadius: '4px'
-                    }}
-                  >
-                    <option value="smooth" style={{ background: '#1a1a24', color: 'white' }}>Smooth Ramp</option>
-                    <option value="stepped" style={{ background: '#1a1a24', color: 'white' }}>Stepped Glissando</option>
-                  </select>
-                </div>
-                {(glideStyle || 'smooth') === 'smooth' && (
+                <SelectRow
+                  label="Glide Style"
+                  value={commonGlideStyle}
+                  options={[
+                    ...(commonGlideStyle === 'mixed' ? [{ value: 'mixed', label: 'Mixed' }] : []),
+                    { value: 'default', label: `Track Default (${(glideStyle || 'smooth') === 'stepped' ? 'Stepped' : 'Smooth'})` },
+                    { value: 'smooth', label: 'Smooth Ramp' },
+                    { value: 'stepped', label: 'Stepped Glissando' }
+                  ]}
+                  onChange={val => {
+                    if (val === 'mixed') return
+                    handleMPEChange('glideStyle', val === 'default' ? undefined : val)
+                  }}
+                />
+                {effectiveSmooth && (
                   <>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '2px 4px', marginTop: '2px' }}>
-                      <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 500 }}>Ramp Shape</span>
-                      <select
-                        value={commonPitchSlideRamp === 'mixed' ? 'linear' : commonPitchSlideRamp}
-                        onChange={e => handleMPEChange('pitchSlideRamp', e.target.value === 'mixed' ? undefined : e.target.value)}
-                        style={{
-                          background: 'rgba(0,0,0,0.4)',
-                          border: '1px solid rgba(255,255,255,0.08)',
-                          color: '#00e6ff',
-                          fontSize: '11px',
-                          fontWeight: 'bold',
-                          outline: 'none',
-                          cursor: 'pointer',
-                          padding: '4px 8px',
-                          borderRadius: '4px'
-                        }}
-                      >
-                        {commonPitchSlideRamp === 'mixed' && <option value="mixed">Mixed Ramps</option>}
-                        <option value="linear" style={{ background: '#1a1a24', color: 'white' }}>Linear</option>
-                        <option value="exponential" style={{ background: '#1a1a24', color: 'white' }}>Exponential</option>
-                        <option value="logarithmic" style={{ background: '#1a1a24', color: 'white' }}>Logarithmic</option>
-                        <option value="sigmoid" style={{ background: '#1a1a24', color: 'white' }}>S-Curve (Sigmoid)</option>
-                        <option value="custom" style={{ background: '#1a1a24', color: 'white' }}>Custom Equation</option>
-                      </select>
-                    </div>
+                    <SelectRow
+                      label="Ramp Shape"
+                      value={commonPitchSlideRamp}
+                      options={[
+                        ...(commonPitchSlideRamp === 'mixed' ? [{ value: 'mixed', label: 'Mixed Ramps' }] : []),
+                        { value: 'linear', label: 'Linear' },
+                        { value: 'exponential', label: 'Exponential' },
+                        { value: 'logarithmic', label: 'Logarithmic' },
+                        { value: 'sigmoid', label: 'S-Curve (Sigmoid)' },
+                        { value: 'custom', label: 'Custom Equation' }
+                      ]}
+                      onChange={val => handleMPEChange('pitchSlideRamp', val === 'mixed' ? undefined : val)}
+                    />
 
                     {commonPitchSlideRamp === 'custom' && (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '2px 4px', marginTop: '4px' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginTop: '4px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                           <span style={{ fontSize: '10px', color: 'var(--text-muted)', fontWeight: 700 }}>CUSTOM MATH EQUATION</span>
                           <span style={{ fontSize: '9px', color: '#888' }}>var: t (0 to 1)</span>
@@ -1510,16 +1536,44 @@ export const RightPane: React.FC = () => {
                 <SliderRow
                   label="Depth"
                   value={commonVibratoDepth === 'mixed' ? 0 : commonVibratoDepth}
-                  min={0} max={100} step={1}
+                  min={0} max={200} step={1}
                   color="#ffcc00" suffix="ct"
                   onChange={val => handleMPEChange('vibratoDepth', val === 0 ? undefined : val)}
                 />
                 <SliderRow
                   label="Rate"
                   value={commonVibratoRate === 'mixed' ? 5 : commonVibratoRate}
-                  min={0.1} max={20} step={0.1}
+                  min={0.01} max={40} step={0.01}
                   color="#ffcc00" suffix="Hz"
                   onChange={val => handleMPEChange('vibratoRate', val)}
+                />
+                <SliderRow
+                  label="Delay"
+                  value={commonVibratoDelay === 'mixed' ? 0 : commonVibratoDelay}
+                  min={0} max={2000} step={1}
+                  color="#ffcc00" suffix=" ms"
+                  onChange={val => handleMPEChange('vibratoDelay', val === 0 ? undefined : val)}
+                />
+                <SliderRow
+                  label="Fade In"
+                  value={commonVibratoFade === 'mixed' ? 0 : commonVibratoFade}
+                  min={0} max={2000} step={1}
+                  color="#ffcc00" suffix=" ms"
+                  onChange={val => handleMPEChange('vibratoFade', val === 0 ? undefined : val)}
+                />
+                <SelectRow
+                  label="Waveform"
+                  value={commonVibratoWave}
+                  options={[
+                    ...(commonVibratoWave === 'mixed' ? [{ value: 'mixed', label: 'Mixed' }] : []),
+                    { value: 'sine', label: 'Sine' },
+                    { value: 'triangle', label: 'Triangle' },
+                    { value: 'square', label: 'Square' }
+                  ]}
+                  onChange={val => {
+                    if (val === 'mixed') return
+                    handleMPEChange('vibratoWave', val)
+                  }}
                 />
               </div>
 
@@ -1548,9 +1602,24 @@ export const RightPane: React.FC = () => {
                 <SliderRow
                   label="Sweep Duration"
                   value={commonFilterSweepTime === 'mixed' ? 48 : commonFilterSweepTime}
-                  min={0} max={384} step={1}
+                  min={0} max={3840} step={1}
                   color="#4dabf7" suffix=" ticks"
                   onChange={val => handleMPEChange('filterSweepTime', val)}
+                />
+                <SelectRow
+                  label="Sweep Shape"
+                  value={commonFilterSweepRamp}
+                  options={[
+                    ...(commonFilterSweepRamp === 'mixed' ? [{ value: 'mixed', label: 'Mixed' }] : []),
+                    { value: 'linear', label: 'Linear' },
+                    { value: 'exponential', label: 'Exponential' },
+                    { value: 'logarithmic', label: 'Logarithmic' },
+                    { value: 'sigmoid', label: 'S-Curve (Sigmoid)' }
+                  ]}
+                  onChange={val => {
+                    if (val === 'mixed') return
+                    handleMPEChange('filterSweepRamp', val)
+                  }}
                 />
               </div>
 
@@ -1572,9 +1641,23 @@ export const RightPane: React.FC = () => {
                 <SliderRow
                   label="Rate"
                   value={commonTremoloRate === 'mixed' ? 5 : commonTremoloRate}
-                  min={0.1} max={20} step={0.1}
+                  min={0.01} max={40} step={0.01}
                   color="#ff3366" suffix="Hz"
                   onChange={val => handleMPEChange('tremoloRate', val)}
+                />
+                <SelectRow
+                  label="Waveform"
+                  value={commonTremoloWave}
+                  options={[
+                    ...(commonTremoloWave === 'mixed' ? [{ value: 'mixed', label: 'Mixed' }] : []),
+                    { value: 'sine', label: 'Sine' },
+                    { value: 'triangle', label: 'Triangle' },
+                    { value: 'square', label: 'Square' }
+                  ]}
+                  onChange={val => {
+                    if (val === 'mixed') return
+                    handleMPEChange('tremoloWave', val)
+                  }}
                 />
               </div>
 

@@ -1128,3 +1128,73 @@ export together.
   `SynthStudioModal.tsx:238, 335`. No new findings; no handlers, state or labels were removed.
 - `npx vite build` succeeded and `dist` was copied to `bin/dist` (`index-dvlcHQBy.js`); no native
   rebuild was needed.
+
+## 15. PER-NOTE EXPRESSION FREEDOM — 2026-10-25
+
+Goal: remove the artificial ceilings on glide/vibrato/tremolo/filter and make custom shapes audible in
+the native build, not only in the Tone fallback.
+
+### Model and shared maths
+
+| Field | Meaning |
+| :--- | :--- |
+| `pitchSlide` | Semitone offset from the note's own pitch; no ±24 clamp anywhere. |
+| `pitchSlideTime` | Glide length in ticks; `0` = glide across the whole note. |
+| `glideStyle` | New per-note `'smooth' \| 'stepped'` override. Unset follows the track style in the left pane. |
+| `pitchSlideRamp` / `pitchSlideCustomCurve` | Curve shape and optional JS expression in `t` (0..1). |
+| `vibratoDepth` / `vibratoRate` | Cents and Hz. |
+| `vibratoDelay` / `vibratoFade` | New: ms before vibrato starts / ms to reach full depth. |
+| `vibratoWave` | New: `sine \| triangle \| square`. |
+| `filterStart` / `filterEnd` / `filterSweepTime` | Sweep endpoints (Hz) and length (ticks, `0` = whole note). |
+| `filterSweepRamp` | New: `linear \| exponential \| logarithmic \| sigmoid`. |
+| `tremoloDepth` / `tremoloRate` | Depth 0..1 and Hz. |
+| `tremoloWave` | New: `sine \| triangle \| square`. |
+
+`src/utils/glideCurves.ts` is now the single source of truth for curve shape. `evaluateGlideCurve`
+feeds the Tone path and `buildCurveLut` produces the 33-point LUT sent to JUCE, so a custom equation
+sounds the same in both engines.
+
+### Note Inspector (`RightPane.tsx`)
+
+- Added a flat `SelectRow` using the app's compact dropdown tokens (11 px, 6 px radius, 6×10 px
+  padding, white text on `rgba(255,255,255,0.05)`) — the same treatment as the Synth Studio preset
+  select and the left-pane compact selects — instead of one-off selects.
+- Pitch Glide: slide slider widened to ±48 st, duration to 3840 ticks; typed value boxes remain
+  unclamped, so any value can be entered directly. Glide Style is now per-note with a
+  "Track Default" option; Ramp Shape and the custom equation show whenever the effective style is
+  smooth.
+- Vibrato: depth 0–200 ct, rate 0.01–40 Hz, plus Delay, Fade In and Waveform rows.
+- Filter Sweep: duration 0–3840 ticks and a Sweep Shape row.
+- Tremolo: rate 0.01–40 Hz and a Waveform row.
+- The 808 glide card on drum tracks uses the same widened ranges.
+
+### Engines
+
+- `nativeNoteCommand.ts` sends `slideCurve`, `steppedGlide`, `vibratoDelay/Fade/Wave`, `tremoloWave`
+  and `filterCurve` in addition to the existing fields.
+- New `native/Source/Audio/NoteExpression.h` carries the LUTs and envelopes through
+  `OfflineRenderer::dispatchNoteOn` → `AudioEngine::playNote` → `VoiceManager::noteOnSynth` →
+  `SynthVoice::triggerNoteOn`, used by both live playback and the offline bounce.
+- `SynthVoice::renderBlock` now interpolates pitch and cutoff through their LUTs, quantises pitch to
+  semitones for stepped glide, delays/fades vibrato, and applies the selected vibrato/tremolo
+  waveform. Linear behaviour is unchanged when no LUT is supplied.
+- Tone path: glide duration is no longer clamped to the note length, per-note `glideStyle` wins over
+  the track style, curve stepping uses the shared sampler, and `Tone.Vibrato`/`Tone.Tremolo` receive
+  the chosen waveform; vibrato depth is scheduled from 0 to target across Delay + Fade In.
+
+### Verification
+
+- `npx tsc --noEmit -p tsconfig.app.json` clean.
+- `npx eslint` on all five changed files: **0 errors** (warnings only, all pre-existing patterns).
+- Native `ninja -C native/build` succeeded (`MuseGrid.exe` relinked).
+- `npx vite build` succeeded and `dist` was copied to `bin/dist`.
+- Curve smoke test: sigmoid LUT starts 0.0000/0.0025/0.0058 and ends 1; custom `t * t` starts
+  0.0000/0.0010/0.0039 and ends 1; linear midpoint 0.5.
+
+### Limits that remain
+
+- A glide longer than the note is scheduled in full but is only audible while the voice sounds; the
+  UI does not silently shorten it any more.
+- The Tone fallback still maps vibrato depth through `Tone.Vibrato`'s 0..1 range (≈100 cents ceiling);
+  the native engine accepts arbitrary cents.
+- Stepped glide quantises to semitones; microtonal stepping would need a separate step size.

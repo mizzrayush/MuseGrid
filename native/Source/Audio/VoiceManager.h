@@ -32,7 +32,8 @@ public:
                      float filterEndHz = -1.0f,
                      float filterSweepTimeSeconds = 0.0f,
                      const EnvelopeCurve* customDecayCurve = nullptr,
-                     const EnvelopeCurve* customReleaseCurve = nullptr);
+                     const EnvelopeCurve* customReleaseCurve = nullptr,
+                     const musegrid::NoteExpression& expression = {});
 
     void noteOnPhysical(const juce::String& trackId,
                         int noteId,

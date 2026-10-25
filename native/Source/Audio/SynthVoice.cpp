@@ -19,6 +19,9 @@ void SynthVoice::reset()
     envValue = 0.0f;
     isSliding = false;
     slideElapsed = 0.0f;
+    expression = {};
+    vibratoElapsed = 0.0f;
+    tremoloElapsed = 0.0f;
     vibPhase = 0.0;
     tremPhase = 0.0;
     remainingDuration = -1.0f;
@@ -131,8 +134,12 @@ void SynthVoice::triggerNoteOn(int noteId,
                                float tremoloRateHz,
                                float filterStartHz,
                                float filterEndHz,
-                               float filterSweepTimeSeconds)
+                               float filterSweepTimeSeconds,
+                               const musegrid::NoteExpression& expr)
 {
+    expression = expr;
+    vibratoElapsed = 0.0f;
+    tremoloElapsed = 0.0f;
     currentNoteId = noteId;
     startPitch = pitchMidi;
     currentPitch = pitchMidi;
@@ -203,6 +210,30 @@ float SynthVoice::nextNoise()
     return ((float)(noiseSeed >> 16) / 32768.0f) - 1.0f;
 }
 
+float SynthVoice::sampleCurve(const std::array<float, musegrid::NoteExpression::kCurvePoints>& curve,
+                              int count, float t)
+{
+    if (count < 2) return juce::jlimit(0.0f, 1.0f, t);
+
+    const int points = juce::jmin(count, musegrid::NoteExpression::kCurvePoints);
+    const float pos = juce::jlimit(0.0f, 1.0f, t) * (float)(points - 1);
+    const int i0 = (int)pos;
+    const int i1 = juce::jmin(i0 + 1, points - 1);
+    const float frac = pos - (float)i0;
+    const float value = curve[(size_t)i0] + (curve[(size_t)i1] - curve[(size_t)i0]) * frac;
+    return juce::jlimit(0.0f, 1.0f, value);
+}
+
+float SynthVoice::waveform(int wave, double phase)
+{
+    switch (wave)
+    {
+        case 1:  return (float)(2.0 / juce::MathConstants<double>::pi * std::asin(std::sin(phase)));
+        case 2:  return std::sin(phase) >= 0.0 ? 1.0f : -1.0f;
+        default: return (float)std::sin(phase);
+    }
+}
+
 void SynthVoice::renderBlock(float* leftOut, float* rightOut, int numSamples, float trackPan, float trackVol)
 {
     if (!active || envStage == EnvStage::Off) return;
@@ -229,17 +260,36 @@ void SynthVoice::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
         {
             slideElapsed += sampleTime;
             float t = juce::jlimit(0.0f, 1.0f, slideElapsed / slideDuration);
-            currentPitch = startPitch + (targetPitch - startPitch) * t;
+            const float shape = sampleCurve(expression.slideCurve, expression.slideCurveSize, t);
+            float pitch = startPitch + (targetPitch - startPitch) * shape;
+            if (expression.steppedGlide)
+                pitch = std::round(pitch);
+            currentPitch = pitch;
             if (t >= 1.0f) isSliding = false;
         }
 
         // 3. Vibrato Calculation
         float pitchOffset = 0.0f;
-        if (vibDepth > 0.001f)
+        vibratoElapsed += sampleTime;
+        float activeVibDepth = vibDepth;
+        if (activeVibDepth > 0.001f)
+        {
+            if (vibratoElapsed < expression.vibratoDelaySeconds)
+            {
+                activeVibDepth = 0.0f;
+            }
+            else if (expression.vibratoFadeSeconds > 0.0001f)
+            {
+                const float fadeProgress = (vibratoElapsed - expression.vibratoDelaySeconds)
+                                         / expression.vibratoFadeSeconds;
+                activeVibDepth *= juce::jlimit(0.0f, 1.0f, fadeProgress);
+            }
+        }
+        if (activeVibDepth > 0.001f)
         {
             vibPhase += 2.0 * juce::MathConstants<double>::pi * vibRate * sampleTime;
             if (vibPhase > 2.0 * juce::MathConstants<double>::pi) vibPhase -= 2.0 * juce::MathConstants<double>::pi;
-            pitchOffset = (vibDepth / 100.0f) * (float)std::sin(vibPhase);
+            pitchOffset = (activeVibDepth / 100.0f) * waveform(expression.vibratoWave, vibPhase);
         }
 
         // Convert MIDI to Frequency: f = 440 * 2^((midi - 69) / 12)
@@ -313,7 +363,8 @@ void SynthVoice::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
         {
             filterSweepElapsed += sampleTime;
             float t = juce::jlimit(0.0f, 1.0f, filterSweepElapsed / filterSweepDuration);
-            currentFilterCutoff = filterCutoffStart + (filterCutoffEnd - filterCutoffStart) * t;
+            const float shape = sampleCurve(expression.filterCurve, expression.filterCurveSize, t);
+            currentFilterCutoff = filterCutoffStart + (filterCutoffEnd - filterCutoffStart) * shape;
 
             // Simple 1-pole Lowpass
             const float fc = juce::jlimit(20.0f, (float)(currentSampleRate * 0.45), currentFilterCutoff);
@@ -409,11 +460,12 @@ void SynthVoice::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
 
         // 7. Tremolo
         float tremMultiplier = 1.0f;
+        tremoloElapsed += sampleTime;
         if (tremDepth > 0.001f)
         {
             tremPhase += 2.0 * juce::MathConstants<double>::pi * tremRate * sampleTime;
             if (tremPhase > 2.0 * juce::MathConstants<double>::pi) tremPhase -= 2.0 * juce::MathConstants<double>::pi;
-            tremMultiplier = 1.0f - tremDepth * (float)(0.5 * (1.0 + std::sin(tremPhase)));
+            tremMultiplier = 1.0f - tremDepth * (float)(0.5 * (1.0 + waveform(expression.tremoloWave, tremPhase)));
         }
 
         // 8. Final Sample Output

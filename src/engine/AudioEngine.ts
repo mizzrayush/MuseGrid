@@ -6,6 +6,7 @@ import { getAutomationValueAtTick } from '../utils/automation'
 import { calculateFourierPartials } from '../utils/mathWaveform'
 import { getTrackFxInstances, getTrackFxSetting as readTrackFxSetting } from './fxDefaults'
 import { buildNativeNoteOnCommand } from './nativeNoteCommand'
+import { evaluateGlideCurve } from '../utils/glideCurves'
 
 interface TrackRack {
   input: Tone.Gain
@@ -4876,7 +4877,7 @@ class AudioEngine {
           : Tone.Frequency(targetPitchEnd).toMidi();
         const durSec = Tone.Time(duration).toSeconds();
         slideTime = noteData?.pitchSlideTime
-          ? Math.min(durSec, Tone.Time(noteData.pitchSlideTime + 'i').toSeconds())
+          ? Tone.Time(noteData.pitchSlideTime + 'i').toSeconds()
           : durSec;
       }
       const vibDepth = noteData?.vibratoDepth || 0.0;
@@ -5039,10 +5040,24 @@ class AudioEngine {
         const rack = this.getRack(trackId)
 
         if (noteData.vibratoDepth) {
-          mpeNodes.push(new Tone.Vibrato(noteData.vibratoRate || 5, noteData.vibratoDepth / 100))
+          const vibrato = new Tone.Vibrato({
+            frequency: noteData.vibratoRate || 5,
+            depth: 0,
+            type: noteData.vibratoWave || 'sine'
+          })
+          const depthDelay = Math.max(0, (noteData.vibratoDelay || 0) / 1000)
+          const depthFade = Math.max(0, (noteData.vibratoFade || 0) / 1000)
+          const fullDepth = Math.max(0, Math.min(1, noteData.vibratoDepth / 100))
+          vibrato.depth.setValueAtTime(0, playTime)
+          vibrato.depth.linearRampToValueAtTime(fullDepth, playTime + depthDelay + Math.max(0.001, depthFade))
+          mpeNodes.push(vibrato)
         }
         if (noteData.tremoloDepth) {
-          mpeNodes.push(new Tone.Tremolo(noteData.tremoloRate || 5, noteData.tremoloDepth).start())
+          mpeNodes.push(new Tone.Tremolo({
+            frequency: noteData.tremoloRate || 5,
+            depth: noteData.tremoloDepth,
+            type: noteData.tremoloWave || 'sine'
+          }).start())
         }
         if (noteData.filterStart) {
           const filter = new Tone.Filter(noteData.filterStart, 'lowpass')
@@ -5168,9 +5183,9 @@ class AudioEngine {
             }
             synth.triggerAttackRelease(freqs, duration, time, velocity * 0.7) // Reduce velocity to prevent clipping
           } else {
-            const glideStyle = state.glideStyle || 'smooth'
+            const glideStyle = noteData?.glideStyle || state.glideStyle || 'smooth'
             const glideDur = noteData?.pitchSlideTime
-              ? Math.min(durSec, Tone.Time(noteData.pitchSlideTime + 'i').toSeconds())
+              ? Tone.Time(noteData.pitchSlideTime + 'i').toSeconds()
               : durSec
 
             if (glideStyle === 'smooth') {
@@ -5191,48 +5206,13 @@ class AudioEngine {
                 if (rampType === 'linear') {
                   ;(ephem as any).detune.linearRampToValueAtTime(cents, playTime + glideDur)
                 } else {
-                  const stepCount = Math.max(10, Math.min(100, Math.round(glideDur * 100)))
+                  const stepCount = Math.max(10, Math.min(200, Math.round(glideDur * 100)))
                   const stepTime = glideDur / stepCount
-
-                  let customFn: ((t: number) => number) | null = null
-                  if (rampType === 'custom') {
-                    customFn = (this.formulaCache.get(`curve:${customEquation}`) as any) || null
-                    if (!customFn) {
-                      try {
-                        customFn = new Function('t', `return ${customEquation}`) as (t: number) => number
-                        this.formulaCache.set(`curve:${customEquation}`, customFn)
-                      } catch (e) {
-                        customFn = (t: number) => t
-                      }
-                    }
-                  }
-
-                  const getRampValue = (t: number): number => {
-                    if (rampType === 'exponential') {
-                      return (Math.exp(3 * t) - 1) / (Math.exp(3) - 1)
-                    } else if (rampType === 'logarithmic') {
-                      return Math.log(1 + 9 * t) / Math.log(10)
-                    } else if (rampType === 'sigmoid') {
-                      const sig = (x: number) => 1 / (1 + Math.exp(-10 * (x - 0.5)))
-                      const sig0 = sig(0)
-                      const sig1 = sig(1)
-                      return (sig(t) - sig0) / (sig1 - sig0)
-                    } else if (rampType === 'custom' && customFn) {
-                      try {
-                        const val = customFn(t)
-                        return isFinite(val) ? Math.max(0, Math.min(1, val)) : t
-                      } catch (e) {
-                        return t
-                      }
-                    }
-                    return t
-                  }
 
                   for (let i = 1; i <= stepCount; i++) {
                     const t = i / stepCount
-                    const y = getRampValue(t)
-                    const val = y * cents
-                    ;(ephem as any).detune.setValueAtTime(val, playTime + i * stepTime)
+                    const y = evaluateGlideCurve(t, rampType, customEquation)
+                    ;(ephem as any).detune.setValueAtTime(y * cents, playTime + i * stepTime)
                   }
                 }
 

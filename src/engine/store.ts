@@ -18,17 +18,23 @@ export interface Note {
   pitchEnd?: number // The ending pitch (highest pitch if extended)
 
   // MPE & Micro-Expression Properties
-  pitchSlide?: number;      // Target semitone to slide to (+/- 24)
-  pitchSlideTime?: number;  // Slide duration (in ticks, e.g., matching duration)
+  pitchSlide?: number;      // Semitone offset from this note's own pitch (unbounded)
+  pitchSlideTime?: number;  // Slide duration (in ticks, 0 = whole note)
   pitchSlideRamp?: 'linear' | 'exponential' | 'logarithmic' | 'sigmoid' | 'custom';
   pitchSlideCustomCurve?: string;
+  glideStyle?: 'smooth' | 'stepped'; // Per-note override of the track glide style
   vibratoDepth?: number;    // Cents of pitch wobble
   vibratoRate?: number;     // Speed of pitch wobble (Hz)
+  vibratoDelay?: number;    // Milliseconds before vibrato starts
+  vibratoFade?: number;     // Milliseconds for vibrato to reach full depth
+  vibratoWave?: 'sine' | 'triangle' | 'square';
   filterStart?: number;     // Starting cutoff frequency (Hz)
   filterEnd?: number;       // Ending cutoff frequency (Hz)
-  filterSweepTime?: number; // How fast it sweeps (in ticks)
+  filterSweepTime?: number; // How fast it sweeps (in ticks, 0 = whole note)
+  filterSweepRamp?: 'linear' | 'exponential' | 'logarithmic' | 'sigmoid';
   tremoloDepth?: number;    // Percentage of volume dip (0 to 1)
   tremoloRate?: number;     // Speed of tremolo (Hz)
+  tremoloWave?: 'sine' | 'triangle' | 'square';
 
   // Vocal properties
   lyric?: string            // Syllable/phonetic text (e.g. "la", "do")

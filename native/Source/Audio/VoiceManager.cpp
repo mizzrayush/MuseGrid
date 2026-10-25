@@ -56,7 +56,8 @@ void VoiceManager::noteOnSynth(const juce::String& trackId,
                                float filterEndHz,
                                float filterSweepTimeSeconds,
                                const EnvelopeCurve* customDecayCurve,
-                               const EnvelopeCurve* customReleaseCurve)
+                               const EnvelopeCurve* customReleaseCurve,
+                               const musegrid::NoteExpression& expression)
 {
     // Find free voice or round-robin steal
     int index = -1;
@@ -98,7 +99,8 @@ void VoiceManager::noteOnSynth(const juce::String& trackId,
                            targetPitchMidi, slideTimeSeconds,
                            vibratoDepthCents, vibratoRateHz,
                            tremoloDepth, tremoloRateHz,
-                           filterStartHz, filterEndHz, filterSweepTimeSeconds);
+                           filterStartHz, filterEndHz, filterSweepTimeSeconds,
+                           expression);
 }
 
 void VoiceManager::noteOnPhysical(const juce::String& trackId,

@@ -1,0 +1,88 @@
+{
+  "name": "musegrid",
+  "private": true,
+  "version": "1.1.0",
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "dev:web": "vite --mode web",
+    "build:wasm": "asc assembly/index.ts -o public/audio-dsp.wasm --optimize",
+    "build:native": "scripts\\build_native.bat",
+    "build:native:full": "npm run build:wasm && vite build && scripts\\build_native.bat",
+    "build:setup": "scripts\\build_setup.bat",
+    "build:installer": "scripts\\build_setup.bat",
+    "start:native": "bin\\MuseGrid.exe",
+    "build": "scripts\\build_setup.bat",
+    "build:electron": "npm run build:wasm && tsc -b && vite build && electron-builder",
+    "bundle-ai": "node scripts/bundle_ai_models.js",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "build": {
+    "appId": "com.musegrid.app",
+    "productName": "MuseGrid",
+    "directories": {
+      "output": "release"
+    },
+    "icon": "icon.ico",
+    "extraResources": [
+      {
+        "from": "icon.ico",
+        "to": "icon.ico"
+      }
+    ],
+    "win": {
+      "icon": "icon.ico",
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "MuseGrid",
+      "installerIcon": "icon.ico",
+      "uninstallerIcon": "icon.ico",
+      "installerHeaderIcon": "icon.ico"
+    }
+  },
+  "dependencies": {
+    "@breezystack/lamejs": "^1.2.7",
+    "@magenta/music": "^1.23.1",
+    "@monaco-editor/react": "^4.7.0",
+    "@tonejs/midi": "^2.0.28",
+    "demucs-web": "^1.0.2",
+    "jszip": "^3.10.1",
+    "onnxruntime-web": "^1.26.0",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "tone": "^15.1.22",
+    "zustand": "^5.0.13"
+  },
+  "overrides": {
+    "tone": "^15.1.22"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.12.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "assemblyscript": "^0.28.19",
+    "electron": "^42.0.1",
+    "electron-builder": "^26.8.1",
+    "eslint": "^10.2.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.5.0",
+    "typescript": "~6.0.2",
+    "typescript-eslint": "^8.58.2",
+    "vite": "^8.0.10",
+    "vite-plugin-electron": "^0.29.1",
+    "vite-plugin-electron-renderer": "^0.14.7"
+  }
+}

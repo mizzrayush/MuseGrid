@@ -3413,7 +3413,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
       }
 
       if (!isReadOnly && clickedNote) {
-        if (e.ctrlKey || e.metaKey) {
+        if (e.ctrlKey || e.metaKey || e.shiftKey) {
           if (selectedNoteIds.includes(clickedNote.id)) {
             setSelectedNoteIds(selectedNoteIds.filter(id => id !== clickedNote.id))
           } else {

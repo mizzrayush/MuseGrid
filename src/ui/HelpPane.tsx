@@ -1150,96 +1150,143 @@ MuseState.showToast('Batch Render Complete!', 'success');`}
 
                 <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Exporting Audio</h3>
                 <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
-                  <li>Click <strong>Export Mix</strong> in the Top Bar. Choose <strong>WAV</strong> (highest quality) or <strong>MP3</strong> (smaller file size).</li>
-                  <li>In the export menu, you can apply global transposition, Auto-Fade out, and choose to <strong>Include Procedural FX</strong>.</li>
+                  <li>Click <strong>Export Mix</strong> in the Top Bar. Choose <strong>WAV</strong> (highest quality, 16/24/32-bit float) or <strong>MP3</strong> (high-bitrate compressed, 128 to 320 kbps).</li>
+                  <li>In the export menu, you can apply global transposition, Auto-Fade out, Auto-Normalization to 0dB, and choose to <strong>Include Procedural FX</strong>.</li>
                   <li>If you enable the Loop brace in the timeline, the export will only render the looped area.</li>
                   <li><strong>Include Metronome</strong> places the click in the file using the sound, gain, downbeat and upbeat settings from the Click panel.</li>
                 </ul>
 
-                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Which Export Should I Choose?</h3>
-                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>The format sets the file; the bounce mode sets how it is produced. Choose by what the file is for.</p>
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Audio Render Engine & Bounce Modes</h3>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>MuseGrid offers four distinct offline and real-time rendering pipelines so you always get 100% sound parity regardless of whether you use native VST3 plugins, anatomical vocal modeling, or math scripts:</p>
+                
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginTop: '10px' }}>
-                  <div style={{ background: 'rgba(255,255,255,0.03)', padding: '12px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.06)' }}>
-                    <strong style={{ color: '#4dabf7', fontSize: '12px' }}>WAV - Final Mixes</strong>
+                  <div style={{ background: 'rgba(255,255,255,0.03)', padding: '14px', borderRadius: '8px', border: '1px solid rgba(0,230,255,0.2)' }}>
+                    <div style={{ marginBottom: '6px' }}>
+                      <strong style={{ color: '#00e6ff', fontSize: '13px' }}>Hybrid Stem Mix</strong>
+                    </div>
                     <ul style={{ color: '#ccc', margin: '6px 0 0', paddingLeft: '18px', fontSize: '12px', lineHeight: 1.5 }}>
-                      <li>Rendered by the native engine, including the instruments, effects and VST3 plugins you hear.</li>
-                      <li>16-bit, 24-bit, or 32-bit float.</li>
-                      <li>Use for releasing, mastering, and archiving.</li>
+                      <li>Renders VST3 plugins and instrumental tracks inside high-speed native JUCE C++, while rendering the 67-parameter anatomical Vocal Designer in WebAudio.</li>
+                      <li>Stems are automatically summed together with sample-accurate phase alignment into the final master WAV/MP3.</li>
+                      <li><strong>Use case:</strong> When your project combines Vocal Designer tracks with VST3 plugins for 100% sound parity with live monitoring.</li>
                     </ul>
                   </div>
-                  <div style={{ background: 'rgba(255,255,255,0.03)', padding: '12px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.06)' }}>
-                    <strong style={{ color: '#00e6ff', fontSize: '12px' }}>MP3 - Sharing</strong>
-                    <ul style={{ color: '#ccc', margin: '6px 0 0', paddingLeft: '18px', fontSize: '12px', lineHeight: 1.5 }}>
-                      <li>Smaller files, encoded at 128 to 320 kbps.</li>
-                      <li>Rendered by the browser engine: VST3 plugins and some native-only settings are not included.</li>
-                      <li>Use for demos, links, and quick references.</li>
-                    </ul>
-                  </div>
-                  <div style={{ background: 'rgba(255,255,255,0.03)', padding: '12px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.06)' }}>
-                    <strong style={{ color: '#69db7c', fontSize: '12px' }}>Offline (Fast) - Default</strong>
-                    <ul style={{ color: '#ccc', margin: '6px 0 0', paddingLeft: '18px', fontSize: '12px', lineHeight: 1.5 }}>
-                      <li>Renders as fast as the computer allows, without playing the song.</li>
-                      <li>The right choice for almost every export.</li>
-                    </ul>
-                  </div>
-                  <div style={{ background: 'rgba(255,255,255,0.03)', padding: '12px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.06)' }}>
-                    <strong style={{ color: '#ff6b6b', fontSize: '12px' }}>Real-Time (1:1) - Live Output</strong>
-                    <ul style={{ color: '#ccc', margin: '6px 0 0', paddingLeft: '18px', fontSize: '12px', lineHeight: 1.5 }}>
-                      <li>Records while the song plays, so it takes the full length of the song.</li>
-                      <li>Falls back to the offline renderer if live capture is unavailable.</li>
-                      <li>Use only when you need to verify timing-dependent live behavior.</li>
-                    </ul>
-                  </div>
-                </div>
 
-                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '12px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.06)', marginTop: '15px' }}>
-                  <strong style={{ color: '#ffd43b', fontSize: '12px' }}>When WAV Uses the Browser Engine</strong>
-                  <ul style={{ color: '#ccc', margin: '6px 0 0', paddingLeft: '18px', fontSize: '12px', lineHeight: 1.5 }}>
-                    <li>Exporting multiple regions, or enabling Procedural FX, moves a WAV export to the browser renderer.</li>
-                    <li>The metronome is rendered by the native engine using the Click panel settings, so a WAV with the click and VST3 instruments stays on the native engine.</li>
-                    <li>Leave procedural FX off when the render must match what you hear in the app.</li>
-                  </ul>
+                  <div style={{ background: 'rgba(255,255,255,0.03)', padding: '14px', borderRadius: '8px', border: '1px solid rgba(77,171,247,0.2)' }}>
+                    <div style={{ marginBottom: '6px' }}>
+                      <strong style={{ color: '#4dabf7', fontSize: '13px' }}>JUCE Native Only</strong>
+                    </div>
+                    <ul style={{ color: '#ccc', margin: '6px 0 0', paddingLeft: '18px', fontSize: '12px', lineHeight: 1.5 }}>
+                      <li>Renders entire project directly via native C++ DSP at maximum hardware speed.</li>
+                      <li>Fully hosts VST3 instruments, sampler voices, card-ordered audio effects racks, and Peterson &amp; Barney formant vocal synthesis.</li>
+                      <li><strong>Use case:</strong> Large EDM, orchestral, or multi-track VST projects requiring the fastest possible export.</li>
+                    </ul>
+                  </div>
+
+                  <div style={{ background: 'rgba(255,255,255,0.03)', padding: '14px', borderRadius: '8px', border: '1px solid rgba(218,119,242,0.2)' }}>
+                    <div style={{ marginBottom: '6px' }}>
+                      <strong style={{ color: '#da77f2', fontSize: '13px' }}>Tone.js WebAudio</strong>
+                    </div>
+                    <ul style={{ color: '#ccc', margin: '6px 0 0', paddingLeft: '18px', fontSize: '12px', lineHeight: 1.5 }}>
+                      <li>Renders through the browser WebAudio offline context.</li>
+                      <li>Executes procedural JavaScript Math FX formulas and custom scripted DSP synths, alongside full 67-parameter anatomical vocal modeling.</li>
+                      <li><strong>Note:</strong> Native 64-bit VST3 DLLs are skipped in this mode.</li>
+                    </ul>
+                  </div>
+
+                  <div style={{ background: 'rgba(255,255,255,0.03)', padding: '14px', borderRadius: '8px', border: '1px solid rgba(255,107,107,0.2)' }}>
+                    <div style={{ marginBottom: '6px' }}>
+                      <strong style={{ color: '#ff6b6b', fontSize: '13px' }}>Real-Time (1:1 Recording)</strong>
+                    </div>
+                    <ul style={{ color: '#ccc', margin: '6px 0 0', paddingLeft: '18px', fontSize: '12px', lineHeight: 1.5 }}>
+                      <li>Plays the project and records the live stereo master bus in real time.</li>
+                      <li>Guarantees 100% exact parity with what you hear in your headphones or studio monitors.</li>
+                      <li>Includes a configurable tail buffer (e.g. 2–8 seconds) to capture long reverb/delay decays.</li>
+                    </ul>
+                  </div>
                 </div>
               </div>
             )}
 
             {activeSection === 'shortcuts' && (
               <div>
-                <h1 style={{ margin: '0 0 20px', color: '#fff' }}>Keyboard Shortcuts</h1>
-                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>Master these to speed up your composition and editing workflow.</p>
+                <h1 style={{ margin: '0 0 20px', color: '#fff' }}>Keyboard Shortcuts &amp; Gestures</h1>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>Master these keyboard shortcuts and mouse gestures to navigate, arrange, edit, and export music at maximum speed.</p>
 
-                <h3 style={{ color: '#4dabf7', marginTop: '16px', marginBottom: '10px' }}>Transport & Tools</h3>
+                <h3 style={{ color: '#00e6ff', marginTop: '20px', marginBottom: '10px' }}>Multi-Track &amp; Mouse Selection Gestures</h3>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
                   <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '13px', listStyleType: 'none', padding: 0, margin: 0 }}>
-                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Space</kbd> Play / Pause</li>
-                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Del</kbd> or <kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Backspace</kbd> Delete selected notes</li>
-                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Shift</kbd> + Mouse Wheel: Scroll horizontally</li>
-                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Ctrl</kbd> + Mouse Wheel: Zoom in/out</li>
-                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Ctrl</kbd> + <kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>A</kbd> Select all notes on active track</li>
-                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Esc</kbd> Deselect all notes</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#0e3a44', color: '#00e6ff', border: '1px solid rgba(0,230,255,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Shift + Click</kbd> or <kbd style={{ background: '#0e3a44', color: '#00e6ff', border: '1px solid rgba(0,230,255,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + Click</kbd> Track Header: Select multiple tracks for batch actions, grouping, batch mute/solo, and multi-track mix exports</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#0e3a44', color: '#00e6ff', border: '1px solid rgba(0,230,255,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Shift + Click</kbd> Note: Toggle individual note into/out of current note selection</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#0e3a44', color: '#00e6ff', border: '1px solid rgba(0,230,255,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Shift + Drag</kbd> on Canvas: Force marquee box-select (even when Draw or Erase tool is active)</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Click &amp; Drag</kbd> Empty Canvas: Marquee box-select multiple notes (Select Tool)</li>
                   </ul>
                   <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '13px', listStyleType: 'none', padding: 0, margin: 0 }}>
-                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>V</kbd> Select Tool (Pointer)</li>
-                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>B</kbd> Draw Tool (Pencil)</li>
-                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>E</kbd> Erase Tool</li>
-                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>C</kbd> Slice Tool (Knife)</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Alt + Drag</kbd> Note: Quick clone and duplicate note to new pitch/time</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Double-Click Ghost Note</kbd>: Instantly switch active editing track to that ghost note's track</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Right-Click</kbd> Note or Grid: Open context menu with Quick Velocity bar, glides, transposition, microtuning, and subtrack creation</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Right-Click</kbd> Track Header: Open Track Context menu (multi-track batch actions, duplicate, delete, stem bounce)</li>
                   </ul>
                 </div>
 
-                <h3 style={{ color: '#69db7c', marginTop: '24px', marginBottom: '10px' }}>Piano Roll Keyboard Shortcuts</h3>
+                <h3 style={{ color: '#ffd43b', marginTop: '24px', marginBottom: '10px' }}>Timeline &amp; Region Editing</h3>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
                   <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '13px', listStyleType: 'none', padding: 0, margin: 0 }}>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Click &amp; Drag</kbd> or <kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Shift + Drag</kbd> Ruler: Select a time range (strictly scoped to the active track by default)</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + D</kbd> with Region: Duplicate timeline region forward in time</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>M</kbd> with Region: Mute / Unmute all notes inside the selected region</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + C</kbd> with Region: Copy all notes within region to clipboard</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + X</kbd> with Region: Cut region notes to clipboard</li>
+                  </ul>
+                  <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '13px', listStyleType: 'none', padding: 0, margin: 0 }}>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Del</kbd> / <kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Backspace</kbd> with Region: Delete notes and automation within region</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + E</kbd> with Region: Split notes at start and end region boundaries</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + L</kbd> with Region: Set playback loop markers to match region</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Q</kbd> with Region: Quantize all notes inside selected region</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Right-Click</kbd> Timeline: Open Region Action menu (split, duplicate, mute, cut)</li>
+                  </ul>
+                </div>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '24px', marginBottom: '10px' }}>Transport, Tools &amp; Navigation</h3>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+                  <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '13px', listStyleType: 'none', padding: 0, margin: 0 }}>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Space</kbd> Play / Pause playback</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Shift + Mouse Wheel</kbd> Scroll horizontally across timeline</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + Mouse Wheel</kbd> Zoom in / out</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Middle-Click Drag</kbd> or <kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Space + Drag</kbd> Smooth pan view</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + A</kbd> Select all notes on active track</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Esc</kbd> Clear selection / close menus and modals</li>
+                  </ul>
+                  <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '13px', listStyleType: 'none', padding: 0, margin: 0 }}>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>V</kbd> or <kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>S</kbd> Select Tool (Pointer)</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>B</kbd> or <kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>D</kbd> Draw Tool (Pencil)</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>E</kbd> Erase Tool</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>C</kbd> or <kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>X</kbd> Slice Tool (Knife)</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + S</kbd> Save Project (.musegrid)</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#333', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + O</kbd> Open Project</li>
+                  </ul>
+                </div>
+
+                <h3 style={{ color: '#69db7c', marginTop: '24px', marginBottom: '10px' }}>Editing, Pitch &amp; MIDI Transformations</h3>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+                  <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '13px', listStyleType: 'none', padding: 0, margin: 0 }}>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + C</kbd> / <kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + V</kbd> Copy / Paste notes (at cursor position)</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + X</kbd> Cut selected notes</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + D</kbd> Duplicate selected notes immediately after</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Del</kbd> or <kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Backspace</kbd> Delete selected notes</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + Z</kbd> / <kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + Y</kbd> Undo / Redo</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Alt + ← / →</kbd> Nudge selected notes earlier/later by grid snap</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>M</kbd> Mute / Unmute selected notes</li>
+                  </ul>
+                  <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '13px', listStyleType: 'none', padding: 0, margin: 0 }}>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Shift + ↑ / ↓</kbd> Transpose Octave (±12 semitones)</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + ↑ / ↓</kbd> Transpose Semitone (or microtonal EDO step)</li>
                     <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + L</kbd> Quick Legato (stretch notes to eliminate gaps)</li>
                     <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + G</kbd> Glue contiguous same-pitch notes</li>
                     <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Alt + S</kbd> Quick Strum (stagger chord notes)</li>
                     <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Alt + U</kbd> Quick Chop (subdivide by 1/16 grid)</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Alt + A</kbd> Arpeggiator Tool</li>
                     <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Alt + R</kbd> Quick Humanize (timing, velocity, duration jitter)</li>
-                  </ul>
-                  <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '13px', listStyleType: 'none', padding: 0, margin: 0 }}>
                     <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Alt + Y</kbd> Flip Horizontal (Time Reverse / Retrograde)</li>
-                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Shift + ↑ / ↓</kbd> Transpose Octave (±12 semitones)</li>
-                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + ↑ / ↓</kbd> Transpose Semitone (±1 semitone)</li>
-                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#1c3829', color: '#69db7c', border: '1px solid rgba(105,219,124,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Double-Click Ghost</kbd> Jump active track to note's track</li>
                   </ul>
                 </div>
               </div>

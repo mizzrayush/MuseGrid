@@ -1163,10 +1163,13 @@ function cloneAudioBuffer(buffer: AudioBuffer): AudioBuffer {
   return cloned
 }
 
-function mixAudioBuffers(buffers: AudioBuffer[]): AudioBuffer {
+export function mixAudioBuffers(buffers: AudioBuffer[]): AudioBuffer {
   if (buffers.length === 0) {
     const ctx = Tone.context
     return ctx.createBuffer(2, 1, ctx.sampleRate)
+  }
+  if (buffers.length === 1) {
+    return buffers[0]
   }
 
   const sampleRate = buffers[0].sampleRate
@@ -1179,7 +1182,8 @@ function mixAudioBuffers(buffers: AudioBuffer[]): AudioBuffer {
     const output = mixed.getChannelData(channel)
     buffers.forEach(buffer => {
       const source = buffer.getChannelData(Math.min(channel, buffer.numberOfChannels - 1))
-      for (let i = 0; i < source.length; i++) {
+      const count = Math.min(output.length, source.length)
+      for (let i = 0; i < count; i++) {
         output[i] += source[i]
       }
     })

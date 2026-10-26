@@ -1023,7 +1023,7 @@ export interface ProjectExportData {
   includeProceduralFx?: boolean;
   mp3Kbps?: number;
   bitDepth?: 16 | 24 | 32;
-  bounceMode?: 'offline' | 'realtime';
+  bounceMode?: 'offline' | 'realtime' | 'hybrid' | 'juce' | 'tone';
   realtimeTailSeconds?: number;
   exportScalaWithMidi?: boolean;
 }

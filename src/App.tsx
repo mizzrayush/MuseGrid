@@ -452,7 +452,10 @@ function App() {
       progress: 0,
       startTick: state.loopEnabled ? state.loopStart : 0,
       endTick: state.loopEnabled ? state.loopEnd : lastNoteTick,
-      includeProceduralFx: state.studioSettings.proceduralFxEnabled
+      includeProceduralFx: state.studioSettings.proceduralFxEnabled,
+      bounceMode: 'hybrid',
+      mp3Kbps: 320,
+      realtimeTailSeconds: 2
     })
   }
 

@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Midi } from '@tonejs/midi'
 import * as Tone from 'tone'
-import { useStore, DEFAULT_DRUM_ROWS, DEFAULT_VOICE_PRESETS, defaultGrooveTemplates, isPluginDrum, isPluginSynth, getPluginInstrumentType, type DrumRowConfig, type CustomFxConfig, type Note, type VoicePreset } from '../engine/store'
+import { useStore, DEFAULT_DRUM_ROWS, DEFAULT_VOICE_PRESETS, defaultGrooveTemplates, isPluginDrum, isPluginSynth, getPluginInstrumentType, type Track, type DrumRowConfig, type CustomFxConfig, type Note, type VoicePreset } from '../engine/store'
 import { audioEngine } from '../engine/AudioEngine'
 import { getTrackFxInstances } from '../engine/fxDefaults'
 import { useContextMenuDismissal } from './useContextMenuDismissal'
@@ -11,7 +11,7 @@ import { AppSlider, sliderProgress } from './AppSlider'
 import { NOTE_NAMES_SHARP, NOTE_NAMES_FLAT, CHORD_VOICINGS, snapTick, snapToScale, getDiatonicChord, SCALE_MODES, GENRE_PROGRESSIONS, type GenreProgression, CHORD_STAMPS } from '../utils/musicTheory'
 
 import { createProceduralSuggestions, type ProceduralSuggestion, type SuggestionKind } from '../utils/proceduralSuggestions'
-import { applyAudioBufferFadeOut, normalizeAudioBuffer, renderProjectAudio, stitchAudioBuffers } from '../utils/audioRender'
+import { applyAudioBufferFadeOut, mixAudioBuffers, normalizeAudioBuffer, renderProjectAudio, stitchAudioBuffers } from '../utils/audioRender'
 import { buildNativeBouncePayload, canUseNativeBounce, renderNativeAudioBuffer, renderNativeBounce, type NativeBitDepth } from '../utils/nativeBounce'
 import { audioBufferToWav } from '../utils/wavEncoder'
 import { audioBufferToMp3 } from '../utils/mp3Encoder'
@@ -2429,7 +2429,7 @@ export default function LeftPane() {
       endTick: state.loopEnabled ? state.loopEnd : lastNoteTick,
       includeProceduralFx: format === 'midi' ? false : state.studioSettings.proceduralFxEnabled,
       mp3Kbps: 320,
-      bounceMode: 'offline',
+      bounceMode: 'hybrid',
       realtimeTailSeconds: 2
     })
     setContextMenu(null)
@@ -2622,50 +2622,155 @@ export default function LeftPane() {
       } else {
         const bitDepth = projectExportData.bitDepth ?? 24
         const canNative = canUseNativeBounce()
+        const resolvedMode = (bounceMode === 'offline' || !bounceMode) ? 'hybrid' : bounceMode
 
-        // A straight WAV can stream from JUCE to the user's file without passing samples
-        // through the web layer.
-        if (canNative && type === 'wav' && !exportRegionMode) {
-          const payload = buildNativeBouncePayload(state, {
-            trackId, trackIds, octaveOffset, semitoneOffset, normalize, autoFade, includeMetronome,
-            includeProceduralFx,
-            startTick: resolvedStartTick, endTick: resolvedEndTick, exportRegionMode,
-            filename: exportFilename
-          }, bitDepth)
+        // 1. Pure Tone.js WebAudio Mode
+        if (resolvedMode === 'tone') {
+          nativeBuffer = await renderProjectAudio(renderState, {
+            trackId, trackIds, octaveOffset, semitoneOffset, normalize, includeMetronome, autoFade,
+            startTick: resolvedStartTick, endTick: resolvedEndTick, includeProceduralFx,
+            exportRegionMode,
+            exportRegions
+          })
+        }
+        // 2. Hybrid Stem Mix Mode (JUCE VST3/Instruments + WebAudio 67-param Vocals)
+        else if (resolvedMode === 'hybrid' && canNative) {
+          const selectedRenderTracks = trackIds && trackIds.length > 0
+            ? tracks.filter(t => trackIds.includes(t.id))
+            : trackId
+              ? tracks.filter(t => t.id === trackId)
+              : tracks.filter(t => {
+                  const hasSolo = tracks.some(tr => tr.soloed)
+                  return hasSolo ? t.soloed : !t.muted
+                })
 
-          if (payload) {
-            const outcome = await renderNativeBounce(payload)
-            if (!outcome) return          // host save dialog cancelled
-            if (!outcome.success) throw new Error(outcome.message || 'Native bounce failed')
-            if (useStore.getState().projectExportData) {
-              useStore.getState().showToast(`Exported ${exportFilename} (${bitDepth}-bit, JUCE engine)!`, 'success')
+          const isVocal = (t: Track) => (t as any).synthPreset === 'vocal' || (t.instrument === 'synth' && (t as any).synthPreset === 'vocal')
+          const vocalTracks = selectedRenderTracks.filter(isVocal)
+          const nonVocalTracks = selectedRenderTracks.filter(t => !isVocal(t))
+
+          if (vocalTracks.length > 0 && nonVocalTracks.length > 0) {
+            // Render non-vocal tracks (VST3s, native instruments, drums) through JUCE C++
+            let instrumentalBuffer: AudioBuffer | null = null
+            try {
+              instrumentalBuffer = await renderNativeAudioBuffer(state, {
+                trackIds: nonVocalTracks.map(t => t.id),
+                octaveOffset, semitoneOffset, normalize: false, autoFade: false, includeMetronome,
+                includeProceduralFx,
+                startTick: resolvedStartTick, endTick: resolvedEndTick, exportRegionMode,
+                exportRegions,
+                filename: exportFilename
+              }, type === 'mp3' ? 16 : bitDepth)
+            } catch (err) {
+              console.warn('[Hybrid Export] Native instrumental render failed:', err)
             }
-            return
+
+            // Render vocal tracks through WebAudio 67-parameter anatomical VocalModelVoice
+            let vocalBuffer: AudioBuffer | null = null
+            try {
+              vocalBuffer = await renderProjectAudio(renderState, {
+                trackIds: vocalTracks.map(t => t.id),
+                octaveOffset, semitoneOffset, normalize: false, autoFade: false, includeMetronome: false,
+                includeProceduralFx: false,
+                startTick: resolvedStartTick, endTick: resolvedEndTick, exportRegionMode,
+                exportRegions
+              })
+            } catch (err) {
+              console.warn('[Hybrid Export] Web vocal render failed:', err)
+            }
+
+            if (instrumentalBuffer && vocalBuffer) {
+              nativeBuffer = mixAudioBuffers([instrumentalBuffer, vocalBuffer])
+            } else {
+              nativeBuffer = instrumentalBuffer || vocalBuffer
+            }
+
+            if (nativeBuffer) {
+              if (autoFade) applyAudioBufferFadeOut(nativeBuffer, state.studioSettings.renderFadeDuration ?? 0.1)
+              if (normalize) normalizeAudioBuffer(nativeBuffer, state.studioSettings.normalizationTarget ?? -1.0)
+            }
+          } else if (vocalTracks.length > 0 && nonVocalTracks.length === 0) {
+            // Vocal-only mix: render directly with WebAudio 67-parameter anatomical model
+            nativeBuffer = await renderProjectAudio(renderState, {
+              trackId, trackIds, octaveOffset, semitoneOffset, normalize, includeMetronome, autoFade,
+              startTick: resolvedStartTick, endTick: resolvedEndTick, includeProceduralFx,
+              exportRegionMode,
+              exportRegions
+            })
+          } else {
+            // Instrumental/VST-only mix in hybrid mode: use high-speed JUCE native bounce directly
+            if (type === 'wav' && !exportRegionMode) {
+              const payload = buildNativeBouncePayload(state, {
+                trackId, trackIds, octaveOffset, semitoneOffset, normalize, autoFade, includeMetronome,
+                includeProceduralFx,
+                startTick: resolvedStartTick, endTick: resolvedEndTick, exportRegionMode,
+                filename: exportFilename
+              }, bitDepth)
+
+              if (payload) {
+                const outcome = await renderNativeBounce(payload)
+                if (!outcome) return
+                if (!outcome.success) throw new Error(outcome.message || 'Native bounce failed')
+                if (useStore.getState().projectExportData) {
+                  useStore.getState().showToast(`Exported ${exportFilename} (${bitDepth}-bit, JUCE engine)!`, 'success')
+                }
+                return
+              }
+            }
+
+            try {
+              nativeBuffer = await renderNativeAudioBuffer(state, {
+                trackId, trackIds, octaveOffset, semitoneOffset, normalize, autoFade, includeMetronome,
+                includeProceduralFx,
+                startTick: resolvedStartTick, endTick: resolvedEndTick, exportRegionMode,
+                exportRegions,
+                filename: exportFilename
+              }, type === 'mp3' ? 16 : bitDepth)
+            } catch (err) {
+              console.warn('[Hybrid Export] Native render failed, falling back to Tone:', err)
+            }
           }
         }
-
-        // MP3 and multi-region exports need the samples in JS (encoder / splice), so the
-        // native render goes to a temp WAV that is fetched and decoded here.
-        if (canNative) {
-          try {
-            const engineBuffer = await renderNativeAudioBuffer(state, {
+        // 3. JUCE Native Only Mode
+        else {
+          if (canNative && type === 'wav' && !exportRegionMode) {
+            const payload = buildNativeBouncePayload(state, {
               trackId, trackIds, octaveOffset, semitoneOffset, normalize, autoFade, includeMetronome,
               includeProceduralFx,
               startTick: resolvedStartTick, endTick: resolvedEndTick, exportRegionMode,
-              exportRegions,
               filename: exportFilename
-            }, type === 'mp3' ? 16 : bitDepth)
+            }, bitDepth)
 
-            if (engineBuffer) nativeBuffer = engineBuffer
-          } catch (nativeError) {
-            // Host failure should not block the export; the Tone renderer below still works.
-            console.warn('[Export] Native render failed, falling back to Tone:', nativeError)
+            if (payload) {
+              const outcome = await renderNativeBounce(payload)
+              if (!outcome) return
+              if (!outcome.success) throw new Error(outcome.message || 'Native bounce failed')
+              if (useStore.getState().projectExportData) {
+                useStore.getState().showToast(`Exported ${exportFilename} (${bitDepth}-bit, JUCE engine)!`, 'success')
+              }
+              return
+            }
+          }
+
+          if (canNative) {
+            try {
+              nativeBuffer = await renderNativeAudioBuffer(state, {
+                trackId, trackIds, octaveOffset, semitoneOffset, normalize, autoFade, includeMetronome,
+                includeProceduralFx,
+                startTick: resolvedStartTick, endTick: resolvedEndTick, exportRegionMode,
+                exportRegions,
+                filename: exportFilename
+              }, type === 'mp3' ? 16 : bitDepth)
+            } catch (nativeError) {
+              console.warn('[Export] Native render failed, falling back to Tone:', nativeError)
+            }
           }
         }
 
+        // Fallback safety if buffer is still empty
         if (!nativeBuffer) {
           nativeBuffer = await renderProjectAudio(renderState, {
-            trackId, trackIds, octaveOffset, semitoneOffset, normalize, includeMetronome, autoFade, startTick: resolvedStartTick, endTick: resolvedEndTick, includeProceduralFx,
+            trackId, trackIds, octaveOffset, semitoneOffset, normalize, includeMetronome, autoFade,
+            startTick: resolvedStartTick, endTick: resolvedEndTick, includeProceduralFx,
             exportRegionMode,
             exportRegions
           })
@@ -9779,7 +9884,7 @@ for (let channel = 0; channel < input.length; channel++) {
                 onDragOver={handleDragOver}
                 onDrop={(e) => handleDrop(e, index, track.parentId)}
                 onClick={(e) => {
-                  if (e.ctrlKey || e.metaKey) {
+                  if (e.ctrlKey || e.metaKey || e.shiftKey) {
                     toggleTrackSelection(track.id, true)
                   } else {
                     setActiveTrackId(track.id)
@@ -12306,38 +12411,50 @@ for (let channel = 0; channel < input.length; channel++) {
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                           <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '12px 16px' }}>
                             <div style={{ fontSize: '10px', color: '#555', fontWeight: 800, textTransform: 'uppercase', marginBottom: '8px' }}>Bounce Mode</div>
-                            <div style={{ display: 'flex', gap: '0', borderRadius: '8px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.1)' }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '8px' }}>
                               {([
-                                { value: 'offline' as const, label: 'Offline (Fast)', color: '#4dabf7' },
+                                { value: 'hybrid' as const, label: 'Hybrid Stem Mix', color: '#00e6ff' },
+                                { value: 'juce' as const, label: 'JUCE Native', color: '#4dabf7' },
+                                { value: 'tone' as const, label: 'Tone.js WebAudio', color: '#da77f2' },
                                 { value: 'realtime' as const, label: 'Real-Time (1:1)', color: '#ff6b6b' },
                               ] as const).map(opt => {
-                                const isActive = (projectExportData.bounceMode ?? 'offline') === opt.value
+                                const currentMode = (projectExportData.bounceMode ?? 'hybrid') === 'offline' ? 'hybrid' : (projectExportData.bounceMode ?? 'hybrid')
+                                const isActive = currentMode === opt.value
                                 return (
                                   <button
                                     key={opt.value}
                                     onClick={() => setProjectExportData({ ...projectExportData, bounceMode: opt.value })}
                                     style={{
-                                      flex: 1,
-                                      padding: '8px 12px',
-                                      background: isActive ? `${opt.color}22` : 'rgba(0,0,0,0.2)',
-                                      border: 'none',
-                                      borderRight: opt.value === 'offline' ? '1px solid rgba(255,255,255,0.1)' : 'none',
-                                      color: isActive ? opt.color : '#666',
-                                      fontSize: '11px',
-                                      fontWeight: isActive ? 800 : 600,
+                                      padding: '10px 14px',
+                                      background: isActive ? `${opt.color}18` : 'rgba(0,0,0,0.25)',
+                                      borderRadius: '8px',
+                                      border: `1px solid ${isActive ? opt.color : 'rgba(255,255,255,0.08)'}`,
+                                      textAlign: 'center',
                                       cursor: 'pointer',
                                       transition: 'all 0.2s',
                                     }}
                                   >
-                                    {opt.label}
+                                    <span style={{ fontSize: '12px', fontWeight: 800, color: isActive ? opt.color : '#ccc' }}>
+                                      {opt.label}
+                                    </span>
                                   </button>
                                 )
                               })}
                             </div>
-                            <div style={{ fontSize: '10px', color: '#555', marginTop: '6px', lineHeight: 1.4 }}>
-                              {(projectExportData.bounceMode ?? 'offline') === 'offline'
-                                ? 'Renders faster than real-time using an offline audio context.'
-                                : 'Records the live mix output. Guarantees 1:1 match with what you hear.'}
+                            <div style={{ fontSize: '11px', color: '#888', marginTop: '10px', lineHeight: 1.45, padding: '8px 10px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px' }}>
+                              {(() => {
+                                const mode = (projectExportData.bounceMode ?? 'hybrid') === 'offline' ? 'hybrid' : (projectExportData.bounceMode ?? 'hybrid')
+                                switch (mode) {
+                                  case 'hybrid':
+                                    return 'Renders VST3 plugins & instruments in high-speed JUCE C++, while rendering the 67-parameter anatomical vocal tract in WebAudio, then sums both stems into the final mix.'
+                                  case 'juce':
+                                    return 'Maximum speed native C++ offline bounce. Processes VST3 plugins, dynamic FX racks in card order, and native formant vocal synthesis.'
+                                  case 'tone':
+                                    return 'Offline WebAudio renderer. Supports procedural JavaScript math FX and anatomical vocal modeling. (Note: VST3 plugins are not hosted in web mode).'
+                                  case 'realtime':
+                                    return 'Plays and records the live master bus in real time. Guarantees 100% exact parity with what you hear during live playback.'
+                                }
+                              })()}
                             </div>
                           </div>
 

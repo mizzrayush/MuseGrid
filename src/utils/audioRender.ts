@@ -948,9 +948,13 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
       bpm: state.bpm,
     })
     // A drum hit reads pitch through detune, so an expression lane has to land before that math.
+    // The shape context is what lets a cutoff lane keep its in-note curve here: without it the lane
+    // collapses to one flat value and the bounce disagrees with preview and the native renderer.
     const laneNote = parseAutomationTarget(automationTarget)?.kind === 'expr'
       && laneIsActive(state.automationCurves[track.id], state.automationLanes?.[track.id])
-      ? applyExpressionLaneToNote(note, automationTarget, laneValue)
+      ? applyExpressionLaneToNote(note, automationTarget, laneValue, {
+        lane: state.automationLanes?.[track.id], points: state.automationCurves[track.id], bpm: state.bpm,
+      })
       : note
     let velocity = note.velocity / 127
     let autoGain = 1

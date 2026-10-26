@@ -2628,5 +2628,111 @@ one of the 158 deletions was read against its `+` counterpart:
 - `conditions.md`'s −4 in this diff is the §22.3 clause struck in §23, already accounted there.
 - Scratch: the HEAD copy `src/utils/__abOld.ts` and every `_ab*`/`_rig*`/`_live*`/`_ui*`/`_route*`
   harness file are deleted after this section; `JUCE` (the local WebView2 patch) stays unstaged, and
-  the commit is local only — nothing was pushed.
+  the commit was local when this section was written — it was pushed to `origin/main` after the
+  no-loss audit that follows it, so `261f9d8` is now on GitHub.
+
+## 25. THE DRUM BOUNCE BAKES THE LANE'S IN-NOTE CURVE — 2026-10-26
+
+Found while re-reading §24's own wiring to answer "is anything still uneven between preview and
+export". One argument was missing, so a filter-cutoff lane on a drum track moved in preview and in
+the native bounce but sat still in a Tone-rendered export.
+
+### 25.1 the gap, precisely
+
+`applyExpressionLaneToNote` takes an optional fourth `shape` argument (`lane`, `points`, `bpm`). Only
+when it is present does the function bake the lane's continuous in-note shape — `automation.ts:356-363`
+calls `laneNoteExtent`, which fills `filterStart`, `filterEnd`, `filterSweepTime = 0` and the 33-point
+`laneFilterCurve`. Called without it, the same function still writes `filterStart` from the lane value
+(`EXPRESSION_LANE_FIELDS.filterCutoff = 'filterStart'`, `automation.ts:140`) and then pins
+`filterEnd` to that identical value (`automation.ts:351`), so the note carries a sweep from X to X.
+
+The synth branch of the exporter passed `shape`; the drum branch did not. So in a Tone-rendered
+export a pad's cutoff held the lane value sampled at the note centre, while live preview and the
+native bounce (which reach the lane through `mapNoteToScheduledEvent`, `Scheduler.ts:86-88`, reused by
+`nativeBounce.ts:134-142`) swept the drawn or equation-driven curve. This was pre-existing, not a
+regression from §24: the same three-argument call reads `:855` of `40d4612`. Before §24 the drum
+exporter had no filter at all, so the lane was wholly inert there; §24 made it work once per note and
+this section makes it work continuously.
+
+### 25.2 the fix
+
+One additive call-site change at `src/utils/audioRender.ts:950-957`: the drum branch now passes
+`{ lane: state.automationLanes?.[track.id], points: state.automationCurves[track.id], bpm: state.bpm }`,
+the same three values the synth branch at `:732` already passes, all three already in scope. Two
+comment lines explain why the argument matters. No signature, guard or fallback path changed.
+
+### 25.3 parity proof — structural, headless
+
+Same input through the two producers that must agree — the mapping that feeds live preview and the
+native bounce, and the bake the Tone bounce now performs (drum track, one kick note of 768 ticks at
+120 BPM, `expr:filterCutoff` lane, points 20 @ 0 and 110 @ 768):
+
+| check | result |
+| --- | --- |
+| curve length | native mapping 33, Tone bake 33 |
+| `curveIdentical` | true (element-wise, 1e-9) |
+| `filterStart` / `filterEnd` / `filterSweepTime` / `filterSweepRamp` | all four identical |
+| curve values | 0, 0.033, 0.067 … 0.967, 1 (normalised, as `sampleCurveLut` expects) |
+| resolver output on that note | 59.3568 Hz → 7933.32 Hz, `filterSweepSeconds` 2, `flat: false`, 33 points |
+| same note with no lane and no hand-drawn sweep | resolver returns `undefined` — no work added |
+
+### 25.4 audio A/B — working exporter vs the HEAD copy
+
+`git show HEAD:src/utils/audioRender.ts > src/utils/__abOld.ts`, both imported in one page, the same
+state rendered through each, per-sample `maxAbsDiff` over 504 000 frames at 48 kHz:
+
+| case | maxAbsDiff | peak working | peak HEAD | read |
+| --- | --- | --- | --- | --- |
+| kick, drawn cutoff lane 20→110 | 0.0204244 | 0.017854 | 0.014750 | lane shape now reaches the bounce, ≈ +1.5 dB as the filter opens |
+| kick, formula lane `20 + 90*min(1,t/2)` | 0.0204244 | 0.017970 | 0.014750 | same, from an equation |
+| kick, static lane (both points 110) | 0 | 0.014690 | 0.014690 | flat lane unchanged |
+| kick, velocity lane | 0 | 0.008680 | 0.008680 | non-expression targets untouched |
+| kick, expression target, no points | 0 | 0.014690 | 0.014690 | `laneIsActive` short-circuit intact |
+| kick, hand-drawn sweep on the note | 0 | 0.015280 | 0.015280 | note-driven sweeps unchanged |
+| kick, `expr:vibratoDepth` lane | 0 | 0.014630 | 0.014630 | only cutoff bakes a curve, as designed |
+| synth track, cutoff lane | 0 | 0.008590 | 0.008590 | synth branch already passed `shape` |
+| control: working module rendered twice | 0 | 0.017854 | — | kick-only renders are bit-reproducible, so 0.0204 is behaviour |
+
+Zero-crossings in the first two 1.31-second windows of the moving-lane case read 88, 90 after the fix
+against 88, 58 before — the tail keeps its top end once the lane is allowed to open the filter.
+
+### 25.5 gates, build, deploy
+
+- `npx tsc --noEmit` 0 errors. `npx eslint src/utils/audioRender.ts` 0 errors / 50 warnings, all
+  pre-existing `no-explicit-any` and style noise; the change adds no `any`.
+- Parse gate: both variants fetched over HTTP from the dev server on :5181 serving this checkout —
+  the working module shows the four-argument call, the scratch copy shows the three-argument one.
+- `npx vite build` → `dist/assets/index-Cdi1Uvsu.js` 5,398,944 bytes, copied to `bin/dist`, `cmp`
+  identical to `dist`, `bin/dist/index.html` references the new hash, no nested `bin/dist/dist`.
+- Native not rebuilt: this is a JS-only change and the C++ readers (`DrumEngine.cpp:344`,
+  `OfflineRenderer.cpp:291`) are the ones §24 verified. `TestOfflineRender.exe` stays at 39 PASS.
+
+### 25.6 accounting — what was deleted
+
+`git diff --numstat` for this change: `src/utils/audioRender.ts 5 1`, plus this register. No other
+source file is modified, and no file is added or removed.
+
+- The single removed line is `? applyExpressionLaneToNote(note, automationTarget, laneValue)` re-issued
+  as the same call with the shape object appended. The `parseAutomationTarget(...)?.kind === 'expr'`
+  and `laneIsActive(...)` guards, the `laneNote` binding, the `: note` fallback and every consumer of
+  `laneNote` (`pitchOffset`, `detune`, `octaves`, `resonance`, `decay`, `pitchSlide*`, the resolver
+  call at `:993`) are untouched.
+- No feature was removed, gated off or renamed; the synth exporter branch, `Scheduler.ts`,
+  `automation.ts`, `drumModulation.ts`, `nativeNoteCommand.ts`, `GridCanvas.tsx`, `RightPane.tsx` and
+  every native file are byte-identical to `261f9d8`.
+- Scratch deleted after measurement: `src/utils/__abOld.ts`, `_ab_main.cjs`, `_ab_page.js`,
+  `_ab_parity.js`, `_ab_lane.json`, `_ab_parity.json` and their `_std` logs. `_audit_dev.log` predates
+  this session and is left alone. `JUCE` (the local WebView2 patch) stays unstaged.
+
+### 25.7 what is still uneven, on purpose or on record
+
+- Native live preview and native export in `bin/MuseGrid.exe` remain unauditioned by ear; §24's
+  numbers are machine-verified, not listened to.
+- Non-cutoff expression lanes (`vibratoDepth`, `vibratoRate`, `detune`, `glideAmount`) still take one
+  value per note in all four paths. That is the documented design of `applyExpressionLaneToNote`:
+  filter cutoff is the only parameter both voices modulate per-sample, so it is the only lane baked
+  into a curve.
+- Tremolo depth/rate lanes stay out of the drum picker — synth-only by user decision, recorded in §24.
+- A Tone-rendered drum export with a moving cutoff lane still cannot reproduce native's stepped pad
+  curve (§24.9); the two now agree on the sweep's endpoints and its 33-point shape.
 

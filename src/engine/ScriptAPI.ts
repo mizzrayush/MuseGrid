@@ -1,5 +1,5 @@
-import { useStore, deduplicateNotes } from './store';
-import type { CustomFxConfig, Note, Track, VoicePreset, Clip, TrackGroup, AutomationPoint, ScaleLock, GrooveTemplate } from './store';
+import { useStore, deduplicateNotes, EXPRESSION_LANE_TARGETS } from './store';
+import type { CustomFxConfig, Note, Track, VoicePreset, Clip, TrackGroup, AutomationPoint, AutomationLane, AutomationTarget, ExpressionLaneTarget, ScaleLock, GrooveTemplate } from './store';
 import { audioEngine } from './AudioEngine';
 import { recordingEngine } from './RecordingEngine';
 import * as Tone from 'tone';
@@ -1070,6 +1070,25 @@ export const ScriptAPI = {
       const state = useStore.getState();
       state.commitHistory();
       state.bakeProceduralAutomation(trackId, formula, preset, density);
+    },
+    getLane: (trackId: string): AutomationLane | null => {
+      return useStore.getState().automationLanes[trackId] ?? null;
+    },
+    setLane: (trackId: string, lane: Partial<AutomationLane>) => {
+      const state = useStore.getState();
+      state.commitHistory();
+      state.updateAutomationLane(trackId, lane);
+    },
+    getTarget: (trackId: string): AutomationTarget => {
+      return useStore.getState().automationTargets[trackId] ?? 'velocity';
+    },
+    setTarget: (trackId: string, target: AutomationTarget) => {
+      const state = useStore.getState();
+      state.commitHistory();
+      state.setAutomationTarget(trackId, target);
+    },
+    listExpressionTargets: (): ExpressionLaneTarget[] => {
+      return [...EXPRESSION_LANE_TARGETS];
     }
   },
 
@@ -1452,6 +1471,7 @@ export const ScriptAPI = {
         groups: [],
         automationCurves: {},
         automationTargets: {},
+        automationLanes: {},
         bpm: 120,
         playheadPosition: 0,
         loopStart: 0,
@@ -1499,6 +1519,7 @@ export const ScriptAPI = {
         playheadFollowMode: state.playheadFollowMode,
         automationCurves: state.automationCurves,
         automationTargets: state.automationTargets,
+        automationLanes: state.automationLanes,
         clips: state.clips,
         groups: state.groups,
         drumSteps: state.drumSteps,
@@ -1560,7 +1581,7 @@ export const ScriptAPI = {
         const text = await selectedFile.text();
         const parsed = JSON.parse(text);
         audioEngine.resetForNewProject();
-        useStore.getState().loadState({ ...parsed, automationTargets: parsed.automationTargets ?? {} });
+        useStore.getState().loadState({ ...parsed, automationTargets: parsed.automationTargets ?? {}, automationLanes: parsed.automationLanes ?? {} });
       } catch (e) {
         console.error('Failed to load project via script:', e);
         throw e;

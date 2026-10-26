@@ -38,6 +38,11 @@ export interface Note {
   filterEnd?: number;       // Ending cutoff frequency (Hz)
   filterSweepTime?: number; // How fast it sweeps (in ticks, 0 = whole note)
   filterSweepRamp?: 'linear' | 'exponential' | 'logarithmic' | 'sigmoid';
+  /**
+   * Transient 0..1 shape a filter-cutoff automation lane draws across this note. Derived at
+   * schedule time from the lane, never stored in a project, because the lane is the real data.
+   */
+  laneFilterCurve?: number[];
   tremoloDepth?: number;    // Percentage of volume dip (0 to 1)
   tremoloRate?: number;     // Speed of tremolo (Hz)
   tremoloWave?: 'sine' | 'triangle' | 'square'
@@ -66,8 +71,84 @@ export interface AutomationPoint {
   value: number
 }
 
+/** Per-note expression parameters a lane can drive, in addition to velocity/volume/pan/VST3 params. */
+export type ExpressionLaneTarget =
+  | 'filterCutoff'
+  | 'vibratoDepth'
+  | 'vibratoRate'
+  | 'tremoloDepth'
+  | 'tremoloRate'
+  | 'detune'
+  | 'glideAmount'
+
 /** What the track's automation lane drives. Values are still 1..127 in the lane. */
-export type AutomationTarget = 'velocity' | 'volume' | 'pan' | `vst3:${number}`
+export type AutomationTarget =
+  | 'velocity'
+  | 'volume'
+  | 'pan'
+  | `vst3:${number}`
+  | `expr:${ExpressionLaneTarget}`
+
+/** Where a lane's values come from. 'formula' evaluates an equation the way the FX modulators do. */
+export type AutomationLaneSource = 'drawn' | 'formula'
+
+export type AutomationLaneMode = 'override' | 'add' | 'multiply'
+
+/**
+ * Descriptor for one track's lane. Drawn points stay in automationCurves untouched; a formula
+ * lane is sampled continuously, so it is not limited to the 1..127 integers a drawn point holds.
+ */
+export interface AutomationLane {
+  source: AutomationLaneSource
+  /** Equation using the FX-modulator variables: t (seconds), b (beats), m (bars), ticks, v (base value). */
+  equation: string
+  /** How the equation result combines with the lane's base value (the note's own value or drawn points). */
+  mode: AutomationLaneMode
+}
+
+export const defaultAutomationLane: AutomationLane = {
+  source: 'drawn',
+  equation: '64 + 60 * Math.sin(t * 2)',
+  mode: 'override',
+}
+
+export const EXPRESSION_LANE_TARGETS: ExpressionLaneTarget[] = [
+  'filterCutoff',
+  'vibratoDepth',
+  'vibratoRate',
+  'tremoloDepth',
+  'tremoloRate',
+  'detune',
+  'glideAmount',
+]
+
+export const expressionLaneLabel: Record<ExpressionLaneTarget, string> = {
+  filterCutoff: 'Filter cutoff',
+  vibratoDepth: 'Vibrato depth',
+  vibratoRate: 'Vibrato rate',
+  tremoloDepth: 'Tremolo depth',
+  tremoloRate: 'Tremolo rate',
+  detune: 'Detune',
+  glideAmount: 'Glide amount',
+}
+
+export function parseAutomationTarget(target: AutomationTarget | undefined):
+  | { kind: 'builtin'; id: 'velocity' | 'volume' | 'pan' }
+  | { kind: 'vst3'; index: number }
+  | { kind: 'expr'; id: ExpressionLaneTarget }
+  | null {
+  if (!target) return null
+  if (target === 'velocity' || target === 'volume' || target === 'pan') return { kind: 'builtin', id: target }
+  if (target.startsWith('vst3:')) {
+    const i = Number(target.slice(5))
+    return Number.isFinite(i) ? { kind: 'vst3', index: i } : null
+  }
+  if (target.startsWith('expr:')) {
+    const id = target.slice(5) as ExpressionLaneTarget
+    return EXPRESSION_LANE_TARGETS.includes(id) ? { kind: 'expr', id } : null
+  }
+  return null
+}
 
 export function deduplicateNotes(notesList: Note[]): Note[] {
   if (!notesList || notesList.length === 0) return []
@@ -1047,6 +1128,8 @@ export interface AppState {
   // note velocity, per-note volume, or per-note pan.
   automationCurves: Record<string, AutomationPoint[]>
   automationTargets: Record<string, AutomationTarget>
+  /** Per-lane source descriptor. Absent or source 'drawn' keeps the historical drawn-points behaviour. */
+  automationLanes: Record<string, AutomationLane>
 
   projectRevision: number
   drumSteps: number
@@ -1214,6 +1297,8 @@ export interface AppState {
   removeAutomationPoint: (trackId: string, pointId: string) => void
   clearAutomationCurve: (trackId: string) => void
   setAutomationTarget: (trackId: string, target: AutomationTarget) => void
+  updateAutomationLane: (trackId: string, updates: Partial<AutomationLane>) => void
+  resetAutomationLane: (trackId: string) => void
   bakeProceduralAutomation: (trackId: string, formula: string, preset: string, density: number) => void
 
   setDrumSteps: (steps: number) => void
@@ -1419,6 +1504,7 @@ export const useStore = create<AppState>((originalSet, get, api) => {
     groups: [],
     automationCurves: {},
     automationTargets: {},
+    automationLanes: {},
     projectRevision: 0,
     drumSteps: 16,
 
@@ -1719,6 +1805,8 @@ if (firstTrack) {
       delete automationCurves[id]
       const automationTargets = { ...state.automationTargets }
       delete automationTargets[id]
+      const automationLanes = { ...state.automationLanes }
+      delete automationLanes[id]
       const newSelected = state.selectedTrackIds.filter(tid => tid !== id)
       const newActive = state.activeTrackId === id ? (newTracks[0]?.id || null) : state.activeTrackId
       return {
@@ -1730,6 +1818,7 @@ if (firstTrack) {
           : g),
         automationCurves,
         automationTargets,
+        automationLanes,
         selectedTrackIds: newSelected,
         activeTrackId: newActive
       }
@@ -1739,9 +1828,11 @@ if (firstTrack) {
       const newTracks = state.tracks.filter(t => !idSet.has(t.id))
       const automationCurves = { ...state.automationCurves }
       const automationTargets = { ...state.automationTargets }
+      const automationLanes = { ...state.automationLanes }
       ids.forEach(id => {
         delete automationCurves[id]
         delete automationTargets[id]
+        delete automationLanes[id]
       })
       const newSelected = state.selectedTrackIds.filter(tid => !idSet.has(tid))
       let newActive = state.activeTrackId
@@ -1757,6 +1848,7 @@ if (firstTrack) {
           : g),
         automationCurves,
         automationTargets,
+        automationLanes,
         selectedTrackIds: newSelected,
         activeTrackId: newActive
       }
@@ -1772,6 +1864,7 @@ if (firstTrack) {
       const copiedClips: Clip[] = []
       const newAutomationCurves = { ...state.automationCurves }
       const newAutomationTargets = { ...state.automationTargets }
+      const newAutomationLanes = { ...state.automationLanes }
 
       state.tracks.forEach(track => {
         newTracks.push(track)
@@ -1828,6 +1921,9 @@ if (firstTrack) {
           if (state.automationTargets[track.id]) {
             newAutomationTargets[newTrackId] = state.automationTargets[track.id]
           }
+          if (state.automationLanes[track.id]) {
+            newAutomationLanes[newTrackId] = { ...state.automationLanes[track.id] }
+          }
         }
       })
 
@@ -1839,6 +1935,7 @@ if (firstTrack) {
         clips: [...state.clips, ...copiedClips],
         automationCurves: newAutomationCurves,
         automationTargets: newAutomationTargets,
+        automationLanes: newAutomationLanes,
         selectedTrackIds: duplicatedIds,
         activeTrackId: duplicatedIds[duplicatedIds.length - 1] || null
       }
@@ -2167,6 +2264,8 @@ if (firstTrack) {
         projectFilePath: newState.projectFilePath !== undefined ? newState.projectFilePath : state.projectFilePath,
         isDirty: false,
         customFxConfigs: newState.customFxConfigs !== undefined ? newState.customFxConfigs : state.customFxConfigs,
+        // A project saved before formula lanes exists must keep its drawn lanes, not lose the map.
+        automationLanes: newState.automationLanes ?? state.automationLanes,
         projectRevision: state.projectRevision + 1,
         notes: deduplicateNotes(newState.notes || state.notes),
         tracks: (newState.tracks || state.tracks).map((t: any) => ({
@@ -2489,6 +2588,16 @@ if (firstTrack) {
         [trackId]: target
       }
     })),
+    updateAutomationLane: (trackId, updates) => set((state) => {
+      const current = state.automationLanes[trackId] ?? defaultAutomationLane
+      return { automationLanes: { ...state.automationLanes, [trackId]: { ...current, ...updates } } }
+    }),
+    resetAutomationLane: (trackId) => set((state) => {
+      if (!state.automationLanes[trackId]) return {}
+      const lanes = { ...state.automationLanes }
+      delete lanes[trackId]
+      return { automationLanes: lanes }
+    }),
     bakeProceduralAutomation: (trackId, formula, preset, density) => set((state) => {
       // Density: how many ticks between points (e.g., 48 = every 16th note, 12 = every 64th note)
       // We will generate 4 bars of automation (768 * 4 = 3072 ticks)
@@ -2928,6 +3037,7 @@ useStore.subscribe((state, prevState) => {
       state.tracks === prevState.tracks &&
       state.bpm === prevState.bpm &&
       state.automationCurves === prevState.automationCurves &&
+      state.automationLanes === prevState.automationLanes &&
       state.columnWidths === prevState.columnWidths &&
       state.customFxConfigs === prevState.customFxConfigs &&
       state.voicePresets === prevState.voicePresets &&
@@ -2970,6 +3080,7 @@ useStore.subscribe((state, prevState) => {
         playheadFollowMode: curState.playheadFollowMode,
         automationCurves: curState.automationCurves,
         automationTargets: curState.automationTargets,
+        automationLanes: curState.automationLanes,
         clips: curState.clips,
         groups: curState.groups,
         drumSteps: curState.drumSteps,

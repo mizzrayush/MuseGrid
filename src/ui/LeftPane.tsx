@@ -1175,6 +1175,8 @@ export default function LeftPane() {
   const updateGroup = useStore(s => s.updateGroup)
   const syncTrackSettings = useStore(s => s.syncTrackSettings)
   const automationCurves = useStore(s => s.automationCurves)
+  const automationLanes = useStore(s => s.automationLanes)
+  const updateAutomationLane = useStore(s => s.updateAutomationLane)
 
   const clearAutomationCurve = useStore(s => s.clearAutomationCurve)
   const getMaxTicks = useStore(s => s.getMaxTicks)
@@ -1619,6 +1621,7 @@ export default function LeftPane() {
 
   const activeTrackNotes = notes.filter(note => note.trackId === activeTrackId)
   const activeCurve = activeTrackId ? automationCurves[activeTrackId] ?? [] : []
+  const activeLane = activeTrackId ? automationLanes[activeTrackId] : undefined
   const editTargets = selectedNoteIds.length > 0
     ? notes.filter(note => selectedNoteIds.includes(note.id))
     : activeTrackNotes
@@ -8195,6 +8198,46 @@ export default function LeftPane() {
             >
               Bake Procedural Curve
             </button>
+          </div>
+
+          <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', marginTop: '4px', paddingTop: '10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+              <div>
+                <span style={{ fontSize: '11px', color: '#4dabf7', fontWeight: 700, display: 'block' }}>Live Equation Lane</span>
+                <span style={{ fontSize: '9px', color: '#888' }}>Reads every frame, nothing is baked into the points</span>
+              </div>
+              <ToggleSwitch
+                checked={activeLane?.source === 'formula'}
+                onChange={checked => activeTrack && updateAutomationLane(activeTrack.id, { source: checked ? 'formula' : 'drawn' })}
+                color="#4dabf7"
+              />
+            </div>
+
+            {activeLane?.source === 'formula' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                  <span style={{ fontSize: '10px', color: '#aaa' }}>Equation — t (s), b (beats), m (bars), ticks, v (base)</span>
+                  <MathInput
+                    value={activeLane.equation}
+                    onChange={value => activeTrack && updateAutomationLane(activeTrack.id, { equation: value })}
+                    placeholder="64 + 60 * Math.sin(t * 2)"
+                  />
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                  <span style={{ fontSize: '11px', color: '#aaa', fontWeight: 600 }}>Combine</span>
+                  <StopPropSelect
+                    value={activeLane.mode}
+                    onChange={e => activeTrack && updateAutomationLane(activeTrack.id, { mode: e.target.value as any })}
+                    style={{ background: '#1e1e2e', color: '#b197fc', border: '1px solid rgba(177, 151, 252, 0.2)', borderRadius: '4px', padding: '4px 6px', fontSize: '11px', outline: 'none' }}
+                  >
+                    <option value="override">Override — equation only</option>
+                    <option value="add">Add — on top of the drawn lane</option>
+                    <option value="multiply">Multiply — scale the drawn lane</option>
+                  </StopPropSelect>
+                </div>
+              </div>
+            )}
           </div>
 
           <button onClick={() => activeTrack && clearAutomationCurve(activeTrack.id)} style={{ ...buttonStyle('#ff3366'), width: '100%' }}>Clear Curve</button>

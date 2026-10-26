@@ -1,6 +1,7 @@
 import * as Tone from 'tone'
 import type { AppState, CustomFxConfig, Note, Track, TrackGroup } from '../engine/store'
-import { getAutomationValueAtTick, laneNeutralValue, laneValueToPan } from './automation'
+import { getLaneValueAtTick, applyExpressionLaneToNote, laneFallbackValue, laneIsActive, laneValueToPan } from './automation'
+import { parseAutomationTarget } from '../engine/store'
 import { getEffectiveTrackLevel } from './groupAudio'
 import { buildGlideIntoMap, resolveGlidePlayback } from './midiEditing'
 import { buildCurveLut, evaluateGlideCurve } from './glideCurves'
@@ -555,7 +556,7 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
     const sortedNotes = [...notes].sort((a, b) => a.time - b.time)
     sortedNotes.forEach(note => {
       const playback = resolveGlidePlayback(note, glideIntoMap.get(note.id))
-      const playNoteData = playback.note
+      let playNoteData = playback.note
       const noteTime = playback.startTick
       const noteLength = playback.durationTicks
 
@@ -570,8 +571,20 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
       const start = Math.max(0, relativeTime / noteTicksPerSecond)
       const duration = Math.max(0.01, noteLength / noteTicksPerSecond)
 
-      // The automation lane drives velocity, per-note volume or per-note pan.
-      const laneValue = getAutomationValueAtTick(state.automationCurves[track.id], note.time + note.duration / 2, laneNeutralValue(automationTarget, note.velocity))
+      // The automation lane drives velocity, per-note volume, per-note pan or one expression parameter.
+      const laneValue = getLaneValueAtTick({
+        points: state.automationCurves[track.id],
+        lane: state.automationLanes?.[track.id],
+        target: automationTarget,
+        tick: note.time + note.duration / 2,
+        fallback: laneFallbackValue(automationTarget, note),
+        bpm: state.bpm,
+      })
+      if (parseAutomationTarget(automationTarget)?.kind === 'expr' && laneIsActive(state.automationCurves[track.id], state.automationLanes?.[track.id])) {
+        playNoteData = applyExpressionLaneToNote(playNoteData, automationTarget, laneValue, {
+          lane: state.automationLanes?.[track.id], points: state.automationCurves[track.id], bpm: state.bpm,
+        })
+      }
       let velocity = note.velocity / 127
       let autoGain = 1
       let notePan = 0
@@ -768,7 +781,19 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
 
     const start = Math.max(0, relativeTime / noteTicksPerSecond)
     const duration = Math.max(0.01, note.duration / noteTicksPerSecond)
-    const laneValue = getAutomationValueAtTick(state.automationCurves[track.id], note.time + note.duration / 2, laneNeutralValue(automationTarget, note.velocity))
+    const laneValue = getLaneValueAtTick({
+      points: state.automationCurves[track.id],
+      lane: state.automationLanes?.[track.id],
+      target: automationTarget,
+      tick: note.time + note.duration / 2,
+      fallback: laneFallbackValue(automationTarget, note),
+      bpm: state.bpm,
+    })
+    // A drum hit reads pitch through detune, so an expression lane has to land before that math.
+    const laneNote = parseAutomationTarget(automationTarget)?.kind === 'expr'
+      && laneIsActive(state.automationCurves[track.id], state.automationLanes?.[track.id])
+      ? applyExpressionLaneToNote(note, automationTarget, laneValue)
+      : note
     let velocity = note.velocity / 127
     let autoGain = 1
     let notePan = 0
@@ -785,7 +810,7 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
       : 0
 
     const totalTranspose = (track.transpose ?? 0) + (options.semitoneOffset ?? 0) + ((options.octaveOffset ?? 0) * 12)
-    const notePitchOffset = (note.pitchOffset ?? 0) + ((note.detune ?? 0) / 100)
+    const notePitchOffset = (laneNote.pitchOffset ?? 0) + ((laneNote.detune ?? 0) / 100)
     const drumOffset = totalTranspose + notePitchOffset
     const drumOutput: DrumOutputOptions = {
       pan: notePan,

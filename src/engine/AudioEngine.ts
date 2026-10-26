@@ -2,7 +2,7 @@ import * as Tone from 'tone'
 import { useStore } from './store'
 import type { Track, MetronomeSettings, VoicePreset, DrumPadSample, SynthSamplerConfig, InstrumentOverride } from './store'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET, type DrumKit, type SynthPreset } from '../utils/instruments'
-import { getAutomationValueAtTick } from '../utils/automation'
+import { getLaneValueAtTick } from '../utils/automation'
 import { calculateFourierPartials } from '../utils/mathWaveform'
 import { getTrackFxInstances, getTrackFxSetting as readTrackFxSetting } from './fxDefaults'
 import { getEffectiveTrackLevel } from '../utils/groupAudio'
@@ -4774,7 +4774,14 @@ class AudioEngine {
 
         const automationPoints = state.automationCurves[note.trackId] || []
         const automationTarget = state.automationTargets[note.trackId] ?? 'velocity'
-        const laneValue = getAutomationValueAtTick(automationPoints, currentTicks, note.velocity)
+        const laneValue = getLaneValueAtTick({
+          points: automationPoints,
+          lane: state.automationLanes?.[note.trackId],
+          target: automationTarget,
+          tick: currentTicks,
+          fallback: note.velocity,
+          bpm: state.bpm,
+        })
         const velocity = automationTarget === 'velocity' ? laneValue / 127 : note.velocity / 127
 
         this.playNote(
@@ -5323,8 +5330,12 @@ class AudioEngine {
       const index = Number(target.slice(5))
       if (!Number.isInteger(index) || index < 0) continue
       const points = state.automationCurves[track.id]
-      if (!points || points.length === 0) continue
-      const value = Math.max(0, Math.min(1, getAutomationValueAtTick(points, ticks, 64) / 127))
+      const lane = state.automationLanes?.[track.id]
+      // A formula lane needs no drawn points to be worth streaming.
+      if ((!points || points.length === 0) && lane?.source !== 'formula') continue
+      const value = Math.max(0, Math.min(1, getLaneValueAtTick({
+        points, lane, target, tick: ticks, fallback: 64, bpm: state.bpm,
+      }) / 127))
       this.setTrackVst3Parameter(track.id, index, value, rampSeconds)
     }
   }

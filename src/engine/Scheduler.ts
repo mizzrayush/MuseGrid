@@ -1,8 +1,9 @@
 import * as Tone from 'tone'
 import { audioEngine } from './AudioEngine'
 import { useStore } from './store'
-import type { Track, Note, AutomationPoint, AutomationTarget } from './store'
-import { getAutomationValueAtTick, laneNeutralValue, laneValueToPan } from '../utils/automation'
+import type { Track, Note, AutomationPoint, AutomationTarget, AutomationLane } from './store'
+import { parseAutomationTarget } from './store'
+import { getLaneValueAtTick, applyExpressionLaneToNote, laneFallbackValue, laneIsActive, laneValueToPan } from '../utils/automation'
 import { buildGlideIntoMap, resolveGlidePlayback, type GlideIntoSpec } from '../utils/midiEditing'
 import { getActiveDPreverbInstances } from './fxDefaults'
 
@@ -34,7 +35,8 @@ export function mapNoteToScheduledEvent(
   globalBpm: number,
   automationPoints: AutomationPoint[] | undefined,
   glideInto?: GlideIntoSpec,
-  automationTarget: AutomationTarget = 'velocity'
+  automationTarget: AutomationTarget = 'velocity',
+  automationLane?: AutomationLane
 ): ScheduledNoteMapping {
   const trackBpm = track?.targetTempo ?? globalBpm
   const multiplier = trackBpm / globalBpm
@@ -62,13 +64,16 @@ export function mapNoteToScheduledEvent(
       ? (isMicrotonal ? Tone.Frequency(n.pitchEnd + transpose, 'midi').toFrequency() : Tone.Frequency(n.pitchEnd + transpose, 'midi').toNote())
       : undefined)
 
-  // The lane drives velocity, per-note volume, or per-note pan. All are sampled at the
-  // note's centre, the same way the original velocity lane has always behaved.
-  const laneValue = getAutomationValueAtTick(
-    automationPoints,
-    n.time + n.duration / 2,
-    laneNeutralValue(automationTarget, n.velocity)
-  )
+  // The lane drives velocity, per-note volume, per-note pan or one per-note expression parameter.
+  // All are sampled at the note's centre, the same way the original velocity lane has always behaved.
+  const laneValue = getLaneValueAtTick({
+    points: automationPoints,
+    lane: automationLane,
+    target: automationTarget,
+    tick: n.time + n.duration / 2,
+    fallback: laneFallbackValue(automationTarget, n),
+    bpm: globalBpm,
+  })
   let velocity = n.velocity / 127
   let note = playback.note
   if (automationTarget === 'volume') {
@@ -77,6 +82,10 @@ export function mapNoteToScheduledEvent(
     note = { ...note, pan: laneValueToPan(laneValue) }
   } else if (automationTarget === 'velocity') {
     velocity = laneValue / 127
+  } else if (parseAutomationTarget(automationTarget)?.kind === 'expr' && laneIsActive(automationPoints, automationLane)) {
+    note = applyExpressionLaneToNote(note, automationTarget, laneValue, {
+      lane: automationLane, points: automationPoints, bpm: globalBpm,
+    })
   }
 
   return {
@@ -88,7 +97,7 @@ export function mapNoteToScheduledEvent(
     duration: durationSeconds,
     velocity,
     instrumentOverride: n.instrumentOverride,
-    detune: n.detune,
+    detune: note.detune ?? n.detune,
     note
   }
 }
@@ -156,6 +165,7 @@ class Scheduler {
         tracksChanged ||
         state.automationCurves !== prevState.automationCurves ||
         state.automationTargets !== prevState.automationTargets ||
+        state.automationLanes !== prevState.automationLanes ||
         state.bpm !== prevState.bpm
       ) {
         this.rebuildSchedule(state.notes, state.tracks)
@@ -179,6 +189,7 @@ class Scheduler {
     const globalBpm = useStore.getState().bpm
     const glideIntoMap = buildGlideIntoMap(notes)
     const automationTargets = useStore.getState().automationTargets
+    const automationLanes = useStore.getState().automationLanes
 
     // Create a new Part for each track
     notesByTrack.forEach((trackNotes, trackId) => {
@@ -189,7 +200,7 @@ class Scheduler {
       const automationPoints = useStore.getState().automationCurves[trackId]
       const events: ScheduledTrackEvent[] = trackNotes.map(n => ({
         kind: 'note',
-        ...mapNoteToScheduledEvent(n, track, globalBpm, automationPoints, glideIntoMap.get(n.id), automationTargets[trackId] ?? 'velocity')
+        ...mapNoteToScheduledEvent(n, track, globalBpm, automationPoints, glideIntoMap.get(n.id), automationTargets[trackId] ?? 'velocity', automationLanes[trackId])
       }))
 
       if (track) {

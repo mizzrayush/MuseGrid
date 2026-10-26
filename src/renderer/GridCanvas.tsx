@@ -2,11 +2,11 @@ import { useCallback, useState, useEffect, useMemo, useRef } from 'react'
 import * as Tone from 'tone'
 import { IconPin, IconPlus, IconTrash, IconChevronLeft, IconMusic, IconDrum, IconSettings } from '../ui/Icons'
 import { useContextMenuDismissal } from '../ui/useContextMenuDismissal'
-import { useStore, DEFAULT_DRUM_ROWS } from '../engine/store'
+import { useStore, DEFAULT_DRUM_ROWS, EXPRESSION_LANE_TARGETS, expressionLaneLabel, parseAutomationTarget, type ExpressionLaneTarget } from '../engine/store'
 import { audioEngine } from '../engine/AudioEngine'
 import type { Vst3ParameterInfo } from '../engine/AudioEngine'
 import { isInScale, snapToScale, snapTick, NOTE_NAMES_SHARP, NOTE_NAMES_FLAT, CHORD_STAMPS, getDiatonicChord, detectScaleDegree } from '../utils/musicTheory'
-import { getAutomationValueAtTick, laneNeutralValue, sortAutomationPoints } from '../utils/automation'
+import { getAutomationValueAtTick, getLaneValueAtTick, laneNeutralValue, laneTargetLabel, sortAutomationPoints } from '../utils/automation'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET } from '../utils/instruments'
 import {
   applyLegato,
@@ -146,6 +146,8 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   const removeAutomationPoint = useStore(state => state.removeAutomationPoint)
   const automationTargets = useStore(state => state.automationTargets)
   const setAutomationTarget = useStore(state => state.setAutomationTarget)
+  const automationLanes = useStore(state => state.automationLanes)
+  const updateAutomationLane = useStore(state => state.updateAutomationLane)
   const addTrack = useStore(state => state.addTrack)
   const updateTrack = useStore(state => state.updateTrack)
 
@@ -341,6 +343,16 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
 
   const showAutomation = instrument === 'drum' ? showDrumVelocity : showSynthVelocity
   const automationTarget = automationTargets[targetTrackId] ?? 'velocity'
+  const automationLane = automationLanes[targetTrackId]
+  const laneIsFormula = automationLane?.source === 'formula'
+  const laneTargetKind = parseAutomationTarget(automationTarget)?.kind ?? 'builtin'
+  // Each engine only follows the parameters it actually reads, so a drum lane never offers LFOs.
+  const exprTargets: ExpressionLaneTarget[] = instrument === 'drum'
+    ? ['filterCutoff', 'detune', 'glideAmount']
+    : instrument === 'vst3'
+      ? ['detune', 'glideAmount']
+      : EXPRESSION_LANE_TARGETS
+  const exprTargetId = laneTargetKind === 'expr' ? automationTarget.slice(5) : ''
   const setShowAutomation = (val: boolean | ((prev: boolean) => boolean)) => {
     const newVal = typeof val === 'function' ? val(showAutomation) : val
     if (instrument === 'drum') setShowDrumVelocity(newVal)
@@ -2120,10 +2132,14 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         ...points.map(point => point.time),
       )
 
-      if (points.length === 0) {
+      const formulaLane = storeState.automationLanes?.[targetTrackId]
+      if (points.length === 0 && formulaLane?.source !== 'formula') {
         // The dashed baseline is the value the lane holds when untouched: the old 100
-        // default for velocity, unity gain for volume, dead centre for pan.
-        const baselineValue = laneNeutralValue(laneTarget, 100)
+        // default for velocity, unity gain for volume, dead centre for pan, mid-range for
+        // an expression parameter (whose neutral is each note's own value).
+        const baselineValue = parseAutomationTarget(laneTarget)?.kind === 'expr'
+          ? 64
+          : laneNeutralValue(laneTarget, 100)
         ctx.beginPath()
         ctx.moveTo(0, canvasHeight - (baselineValue / 127) * canvasHeight)
         ctx.lineTo(tickToX(maxTick), canvasHeight - (baselineValue / 127) * canvasHeight)
@@ -2136,7 +2152,14 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         ctx.beginPath()
         const step = Math.max(4, 8 / zoom)
         for (let tick = 0; tick <= maxTick; tick += step) {
-          const velocity = getAutomationValueAtTick(points, tick, 100)
+          const velocity = getLaneValueAtTick({
+            points,
+            lane: formulaLane,
+            target: laneTarget,
+            tick,
+            fallback: 100,
+            bpm: storeState.bpm,
+          })
           const y = canvasHeight - (velocity / 127) * canvasHeight
           const x = tickToX(tick)
           if (tick === 0) ctx.moveTo(x, y)
@@ -2183,12 +2206,12 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
       ctx.lineTo(SIDEBAR_WIDTH, canvasHeight)
       ctx.stroke()
 
-      // Draw "Velocity" label in the sidebar blocker
+      // Draw the lane's own target name in the sidebar blocker
       ctx.fillStyle = 'rgba(255,255,255,0.7)'
       ctx.font = '600 11px Inter, sans-serif'
       ctx.textAlign = 'left'
       ctx.textBaseline = 'middle'
-      ctx.fillText('Velocity', 8, canvasHeight / 2)
+      ctx.fillText(laneTargetLabel(laneTarget), 8, canvasHeight / 2)
 
       animationFrameId = requestAnimationFrame(render)
     }
@@ -3599,10 +3622,9 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
             onClick={() => setShowAutomation(prev => !prev)}
           >
             <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {automationTarget === 'velocity' ? 'Velocity'
-                : automationTarget === 'volume' ? 'Volume'
-                : automationTarget === 'pan' ? 'Pan'
-                : `VST3 · ${vst3TargetParam?.name ?? `#${vst3TargetIndex + 1}`}`} Automation
+              {laneTargetKind === 'vst3'
+                ? `VST3 · ${vst3TargetParam?.name ?? `#${vst3TargetIndex + 1}`}`
+                : laneTargetLabel(automationTarget)} Automation
             </span>
             <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
               {(['velocity', 'volume', 'pan'] as const).map(t => (
@@ -3660,6 +3682,65 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                   ))}
                 </select>
               )}
+              <select
+                value={exprTargetId}
+                onClick={(e) => e.stopPropagation()}
+                onChange={(e) => {
+                  e.stopPropagation()
+                  if (e.currentTarget.value !== '') {
+                    setAutomationTarget(targetTrackId, `expr:${e.currentTarget.value as ExpressionLaneTarget}`)
+                  } else {
+                    setAutomationTarget(targetTrackId, 'velocity')
+                  }
+                }}
+                title="Automate a per-note expression parameter"
+                style={{
+                  padding: '3px 6px',
+                  borderRadius: '4px',
+                  border: `1px solid ${laneTargetKind === 'expr' ? 'rgba(77,171,247,0.45)' : 'rgba(255,255,255,0.07)'}`,
+                  background: laneTargetKind === 'expr' ? 'rgba(77,171,247,0.16)' : 'rgba(255,255,255,0.03)',
+                  color: laneTargetKind === 'expr' ? '#4dabf7' : '#8a8a95',
+                  fontSize: '9px',
+                  fontWeight: 700,
+                  textTransform: 'none',
+                  letterSpacing: 0,
+                  cursor: 'pointer',
+                  lineHeight: 1.2,
+                  maxWidth: '150px'
+                }}
+              >
+                <option value="">Expression…</option>
+                {exprTargets.map(t => (
+                  <option key={t} value={t} style={{ background: '#12141c', color: '#e0e0e0' }}>
+                    {expressionLaneLabel[t]}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  updateAutomationLane(targetTrackId, { source: laneIsFormula ? 'drawn' : 'formula' })
+                }}
+                title={laneIsFormula
+                  ? 'Lane is driven by an equation (edit it in Automation (Procedural)). Click to draw points instead.'
+                  : 'Drive this lane with any equation, like the FX modulators. Click to turn it off.'}
+                style={{
+                  padding: '3px 7px',
+                  borderRadius: '4px',
+                  border: `1px solid ${laneIsFormula ? 'rgba(77,171,247,0.45)' : 'rgba(255,255,255,0.07)'}`,
+                  background: laneIsFormula ? 'rgba(77,171,247,0.16)' : 'rgba(255,255,255,0.03)',
+                  color: laneIsFormula ? '#4dabf7' : '#8a8a95',
+                  fontFamily: 'monospace',
+                  fontSize: '9px',
+                  fontWeight: 700,
+                  textTransform: 'none',
+                  letterSpacing: 0,
+                  cursor: 'pointer',
+                  lineHeight: 1.2
+                }}
+              >
+                f(x)
+              </button>
               <span style={{ marginLeft: '6px' }}>{showAutomation ? '▼' : '▲'}</span>
             </div>
           </div>

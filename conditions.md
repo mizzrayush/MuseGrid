@@ -2085,3 +2085,145 @@ gained a symbol. The `automationTargets` map itself was already declared, so no 
 rule or call site disappeared; `git diff -U0` output for these seven files contains no removed
 statement that lacks a replacement.
 
+## 21. EQUATION-DRIVEN AUTOMATION LANES + EXPRESSION TARGETS — 2026-10-26
+
+§20 left the automation lane able to drive velocity, volume, pan and one VST3 parameter, and able
+to be *baked* from a procedural formula. Two things were still missing: a lane could not address the
+per-note expression parameters, and a lane could only ever be a drawn spline — the equation had to
+be baked into points first. This pass adds both, so a lane is now a live source shaped by any
+equation, the same way an FX modulator is.
+
+Native JUCE stayed first. The finding that shaped the whole design is that **no C++ was needed**:
+the voice already sweeps filter cutoff per sample along a 33-point `filterCurve`
+([SynthVoice.cpp:362](native/Source/Audio/SynthVoice.cpp#L362)), `OfflineRenderer::readCurve`
+clamps any array length with `juce::jmin(arr->size(), kCurvePoints)`
+([OfflineRenderer.cpp:21](native/Source/Audio/OfflineRenderer.cpp#L21)), and
+`filterSweepDuration` already falls back to the whole note when sweep time is 0
+([SynthVoice.cpp:176](native/Source/Audio/SynthVoice.cpp#L176)). A cutoff lane therefore rides
+slots that already ship. `git diff --stat -- native/` is empty and the native binary was not rebuilt.
+
+### 21.1 Capability surface
+
+| Axis | Now available |
+| --- | --- |
+| Lane targets | `velocity`, `volume`, `pan`, `vst3:<index>`, and `expr:` for filterCutoff, vibratoDepth, vibratoRate, tremoloDepth, tremoloRate, detune, glideAmount |
+| Lane sources | `drawn` (the existing spline, unchanged) and `formula` (live, reads every sample of the transport, nothing baked) |
+| Combine modes | `override`, `add` (on top of the drawn lane), `multiply` (scale the drawn lane) |
+| Equation variables | `t` seconds, `b` beats, `m` bars, `ticks`, plus `v` — the lane's own base value at that tick, so an equation can shape what was drawn instead of only replacing it |
+| Lane space | 0..127, continuous for formula output; each `expr:` target maps that onto its own unit |
+
+Parameter ranges a lane 0..127 lands on
+([automation.ts:128](src/utils/automation.ts#L128)): cutoff 20..20000 Hz on an **exponential**
+curve (a linear lane would spend most of its travel inaudible below 200 Hz), vibratoDepth
+0..300 cents, vibratoRate/tremoloRate 0..20 Hz, tremoloDepth 0..1, detune ±1200 cents,
+glideAmount ±24 semitones.
+
+### 21.2 Where it is wired
+
+- [store.ts:70](src/engine/store.ts#L70) — `ExpressionLaneTarget`, the extended `AutomationTarget`
+  union, `AutomationLane`, `defaultAutomationLane`, `parseAutomationTarget`, and the
+  `automationLanes: Record<trackId, AutomationLane>` map with `updateAutomationLane` /
+  `resetAutomationLane`, plus lifecycle in `removeTrack`, `removeTracks`, `duplicateTracks`,
+  autosave, `saveState` and a `loadState` guard.
+- [automation.ts](src/utils/automation.ts) — `getLaneValueAtTick` is the single continuous sampler
+  every engine now calls instead of `getAutomationValueAtTick`; `compileLaneEquation` caches the
+  compiled function; `buildLaneCurve` / `laneNoteExtent` / `applyExpressionLaneToNote` turn a lane
+  into the note's own fields; `laneIsActive` keeps an empty lane perfectly inert.
+- Consumers: [Scheduler.ts:32](src/engine/Scheduler.ts#L32) (live + native bounce mapping),
+  [audioRender.ts:575](src/utils/audioRender.ts#L575) and
+  [audioRender.ts:784](src/utils/audioRender.ts#L784) (Tone offline, synth and drum paths),
+  [AudioEngine.ts](src/engine/AudioEngine.ts) (retrigger + VST3 bake),
+  [nativeBounce.ts](src/utils/nativeBounce.ts),
+  [nativeNoteCommand.ts](src/engine/nativeNoteCommand.ts) (one added `filterCurve` branch).
+- UI: the lane header in [GridCanvas.tsx:3685](src/renderer/GridCanvas.tsx#L3685) gains an
+  "Expression…" select and an `f(x)` toggle; the per-track *Automation (Procedural)* section in
+  [LeftPane.tsx:8206](src/ui/LeftPane.tsx#L8206) gains a Live Equation Lane switch, the equation
+  field and a Combine select; [HelpPane.tsx](src/ui/HelpPane.tsx) documents `v` and the feature.
+- Scripting: `automation.getLane/setLane/getTarget/setTarget/listExpressionTargets` in
+  [ScriptAPI.ts](src/engine/ScriptAPI.ts).
+
+### 21.3 Verification
+
+Nothing existing regressed — the drawn path is bit-identical to the old spline:
+
+- `drawnMatchesLegacy`, `noLaneMatchesLegacy`, `drawnFormulaNoEquation` (a formula lane with an
+  empty equation) and `badEquationFallsBack` (unparsable syntax) are all **true**: with no formula
+  the sampler returns exactly what `getAutomationValueAtTick` returned before.
+- A formula lane is genuinely continuous, not quantized: `64 + 60 * Math.sin(t * 2)` over five
+  ticks gives `[64, 67.7475, 71.4804, 78.8442, 92.7655]` — 4 of 5 samples are non-integers.
+- An inert lane is now exactly inert. Before this pass an expression target with no points and no
+  equation round-tripped a note's own `vibratoDepth: 40` to `40.15748`; with `laneIsActive`
+  guarding all three shaping sites the note object is returned untouched and reads **40**.
+- Lane↔parameter round-trip is exact for every target: `v` in override mode returns
+  vibratoDepth `0/7/40/121.5/300` unchanged, detune `±700` unchanged, glide `5` unchanged,
+  cutoff `1200` Hz unchanged (float error ≤ 4e-13). `v * 2` on a depth of 40 gives **exactly 80**
+  cents, where it previously gave 80.31496 because the base inherited the drawn spline's integer
+  snapping.
+- Drawn points still shape expression: lane value 100 → vibratoDepth 236.22 (= 100/127 × 300);
+  `add` mode with `10` on a note of 40 → 63.62 (= 40 cents + 10 lane steps).
+- Cutoff lanes produce the per-note shape the native voice reads: 33 points, all finite,
+  normalised to [0,1], with `filterSweepTime: 0` so the native side spans the whole note, and the
+  source note object is never mutated.
+- Native command build: a `ticks`-linear equation yields a perfectly uniform 1/32 ramp
+  (`0, 0.03125, … 1`), proving the in-note shape comes from the equation and not a preset; a
+  60-point array truncates to 33 with the last point 0.5424 (= 32/59); a note with an explicit
+  `easeIn` sweep keeps its legacy 33-point LUT and `filterSweepTime: 0.2`; a note with no lane
+  sends no `filterCurve` at all.
+- UI: the expression select is filtered per instrument (synth offers all 7, drum offers
+  cutoff/detune/glide only), the lane canvas draws the equation as a real curve (340 stroked
+  columns, 59 distinct y values), and the `f(x)` chip uses the same token pair as its siblings —
+  active `rgba(77,171,247,0.16)`/`#4dabf7`, inactive `rgba(255,255,255,0.03)`/`#8a8a95`. Every
+  new element reports `background-image: none`; the row's children measure 293px inside the
+  existing 300px `nowrap` group, and the header label keeps its own ellipsis guard, so nothing
+  overflows. All 20 app-wide selects resolve to the same computed colours, so the new ones match
+  the app rather than each other's inline styles.
+- Persistence: serialize → wipe → `loadState` restores both lane and target; a project saved
+  before lanes existed keeps the live map; a project that carries lanes wins over the live value;
+  an explicit `{}` is honoured. ScriptAPI round-trip returns all 7 targets from
+  `listExpressionTargets`.
+- `npx tsc --noEmit` exits 0 and `npx vite build` succeeds (3.95s client, warnings unchanged and
+  pre-existing).
+
+### 21.4 Honest remaining limits
+
+1. **Only filter cutoff follows a lane continuously inside a note.** Vibrato, tremolo, detune and
+   glide are read once per note, at the note's centre, in both engines — that is the per-note field
+   they write, and the native voice has no per-sample slot for them. Cutoff is the exception because
+   the 33-point `filterCurve` already exists.
+2. **A Tone-engine export applies no per-note expression at all**, so an expression lane is silent
+   in that one path. This is pre-existing, not introduced here: [audioRender.ts:628](src/utils/audioRender.ts#L628)
+   holds a single hardcoded `vibratoDepth: 35` and the file contains no filter or tremolo wiring.
+   Proven by A/B offline render — a note with explicit `vibratoDepth: 200, vibratoRate: 8` and one
+   with `filterStart: 100 → filterEnd: 20000` both differ from a plain note by RMS **0.0**, while a
+   velocity lane differs by 0.114, so the lane machinery itself does reach this renderer.
+   Live preview (Tone and native) and the native bounce all apply the lanes; the product's default
+   export takes the native path via `canUseNativeBounce()`.
+3. **One lane per track.** The descriptor is keyed by track id, so a track cannot run a velocity
+   lane and a cutoff lane at the same time.
+4. **Drawn points are still whole lane steps.** `getAutomationValueAtTick` clamps through
+   `clampVelocity`, which rounds; only formula output is continuous. Changing that would alter every
+   existing drawn curve, so it was left alone.
+5. **Native curve resolution is fixed at 33 points** (`kCurvePoints`). Denser shapes need a C++
+   change and a rebuild; longer arrays are truncated, as verified above.
+6. **`loadState` accepts an object, not a JSON string.** Passing a string makes
+   `{...state, ...newState}` smear the characters across state as numeric keys (11,842 observed in
+   the live store during testing). Every in-app call site parses first, so this is a scripting
+   footgun rather than a product bug; it was left unfixed because it is shared code outside this
+   task, and it is worth a deliberate pass of its own.
+
+### 21.5 accounting
+
+13 files touched, **670 insertions(+), 47 deletions(-)**, all of them in `src/`; `native/` is
+untouched and `JUCE` remains the pre-existing unstaged submodule. All 47 deletions are in-place
+replacements, each re-emitted with the lane argument or symbol added: 9 import lines that gained a
+symbol, the one-line `AutomationTarget` union (extended, not narrowed), 6 lane-sample call sites
+that moved from positional `getAutomationValueAtTick` to `getLaneValueAtTick({ … })`, the
+`mapNoteToScheduledEvent` signature and its one call site, `const playNoteData` → `let`,
+`notePitchOffset`'s source note → `laneNote`, `detune: n.detune` → `detune: note.detune ?? n.detune`,
+the `filterCurve` ternary (lane branch added ahead of the legacy branch), two VST3-bake guards
+(`!points` → "no points *and* not a formula lane"), the dashed-baseline `points.length === 0`
+condition, the sidebar's hardcoded `'Velocity'` literal → `laneTargetLabel(laneTarget)`, the header
+label ternary (whose VST3 branch is preserved verbatim), and 3 comment lines rewritten to describe
+what the code now does. No field, branch, style rule or call site disappeared without a
+replacement; `App.tsx`'s serialization line still emits `clips`, `groups` and `drumSteps`.
+

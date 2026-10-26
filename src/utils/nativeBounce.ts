@@ -3,7 +3,7 @@ import * as Tone from 'tone'
 import { mapNoteToScheduledEvent, TICKS_PER_BEAT } from '../engine/Scheduler'
 import { buildNativeNoteOnCommand, type NativeNoteOnCommand } from '../engine/nativeNoteCommand'
 import { buildGlideIntoMap, resolveGlidePlayback } from './midiEditing'
-import { getAutomationValueAtTick } from './automation'
+import { getLaneValueAtTick } from './automation'
 import { applyAudioBufferFadeOut, normalizeAudioBuffer, stitchAudioBuffers } from './audioRender'
 
 export type NativeBitDepth = 16 | 24 | 32
@@ -138,7 +138,8 @@ export function buildNativeBouncePayload(state: AppState, request: NativeBounceR
       state.bpm,
       state.automationCurves[note.trackId],
       glideInto,
-      state.automationTargets[note.trackId] ?? 'velocity'
+      state.automationTargets[note.trackId] ?? 'velocity',
+      state.automationLanes?.[note.trackId]
     )
     const command = buildNativeNoteOnCommand({
       trackId: note.trackId,
@@ -170,12 +171,15 @@ export function buildNativeBouncePayload(state: AppState, request: NativeBounceR
     const index = Number(target.slice(5))
     if (!Number.isInteger(index) || index < 0) return
     const points = state.automationCurves[track.id]
-    if (!points || points.length === 0) return
+    const lane = state.automationLanes?.[track.id]
+    if ((!points || points.length === 0) && lane?.source !== 'formula') return
 
     for (let tick = request.startTick; ; tick += stepTicks)
     {
       const clamped = Math.min(tick, request.endTick)
-      const value = Math.max(0, Math.min(1, getAutomationValueAtTick(points, clamped, 64) / 127))
+      const value = Math.max(0, Math.min(1, getLaneValueAtTick({
+        points, lane, target, tick: clamped, fallback: 64, bpm: state.bpm,
+      }) / 127))
       events.push({
         type: 'vst3Param',
         trackId: track.id,

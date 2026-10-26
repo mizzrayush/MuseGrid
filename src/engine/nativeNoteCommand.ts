@@ -142,7 +142,9 @@ export function buildNativeNoteOnCommand(src: NoteCommandSource): NativeNoteOnCo
     filterStart: noteData?.filterStart,
     filterEnd: noteData?.filterEnd,
     filterSweepTime: noteData?.filterSweepTime ? Tone.Time(noteData.filterSweepTime + 'i').toSeconds() : undefined,
-    filterCurve: hasFilterSweep ? buildCurveLut(noteData?.filterSweepRamp) : undefined,
+    filterCurve: noteData?.laneFilterCurve
+      ? noteData.laneFilterCurve.slice(0, 33)
+      : (hasFilterSweep ? buildCurveLut(noteData?.filterSweepRamp) : undefined),
     overrideKind,
     overrideValue,
     instanceKey: overrideKind === 'vst3' && noteData?.id ? String(noteData.id) : undefined,

@@ -819,6 +819,23 @@ export default function HelpPane() {
                   <li><code>ticks</code>: The raw internal tick counter.</li>
                   <li><code>sampleRate</code>: The audio sample rate (e.g., 44100). Essential for time/frequency math!</li>
                   <li><code>currentTime</code>: The exact audio context time in seconds.</li>
+                  <li><code>v</code>: In a <strong>Live Equation Lane</strong>, the lane's own drawn value at that moment, so an equation can shape what you drew instead of replacing it.</li>
+                </ul>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Live Equation Lanes (Automation)</h3>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>
+                  Every track lane can be driven by an equation instead of only hand-drawn points. Turn on
+                  <strong> Live Equation Lane</strong> in the left panel's <em>Automation (Procedural)</em> section. Nothing is baked:
+                  the lane is read live during playback and again, sample-accurately, during export, so preview and bounce always match.
+                </p>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li>The lane always works in <strong>0–127 lane space</strong>; the target decides what that number means.</li>
+                  <li><strong>Override / Add / Multiply</strong> combine the equation with the drawn points, exactly like the FX modulators.</li>
+                  <li>Targets: Velocity, Volume, Pan, any <strong>VST3 parameter</strong>, and the per-note expression parameters
+                    <em> Filter cutoff, Vibrato depth, Vibrato rate, Tremolo depth, Tremolo rate, Detune, Glide amount</em>.</li>
+                  <li>Filter cutoff is followed <strong>continuously inside each note</strong> — the lane's own shape is fed to the engine's
+                    per-sample filter curve. Vibrato, tremolo, detune and glide are taken once per note, at the note's centre, the same way velocity has always behaved.</li>
+                  <li>A formula lane needs no drawn points. Turning it off returns the lane to the points you drew, untouched.</li>
                 </ul>
 
                 <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Advanced Math & Optimization (For DSP Nerds)</h3>

@@ -152,20 +152,33 @@ public:
                 if (cleanUrl == "/" || cleanUrl.isEmpty()) cleanUrl = "/index.html";
 
                 if (cleanUrl.startsWithChar('/')) cleanUrl = cleanUrl.substring(1);
-                auto targetFile = distDir.getChildFile(cleanUrl);
 
-                if (!targetFile.existsAsFile())
+                juce::File targetFile;
+                if (cleanUrl.startsWith("musegrid-render/"))
                 {
-                    // Fallback to public assets
-                    auto publicFile = distDir.getParentDirectory().getChildFile("public").getChildFile(cleanUrl);
-                    if (publicFile.existsAsFile()) targetFile = publicFile;
+                    // Only files the bridge wrote into its private temp folder are reachable.
+                    const juce::String name = cleanUrl.substring(juce::String("musegrid-render/").length());
+                    if (name.isNotEmpty() && !name.contains("..") && !name.containsChar('/') && !name.containsChar('\\'))
+                        targetFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                        .getChildFile("MuseGridRenders").getChildFile(name);
                 }
-
-                if (!targetFile.existsAsFile())
+                else
                 {
-                    // Additional fallback to workspace dist
-                    auto wsDistFile = juce::File("D:\\MyApps\\MuseGrid Native\\dist").getChildFile(cleanUrl);
-                    if (wsDistFile.existsAsFile()) targetFile = wsDistFile;
+                    targetFile = distDir.getChildFile(cleanUrl);
+
+                    if (!targetFile.existsAsFile())
+                    {
+                        // Fallback to public assets
+                        auto publicFile = distDir.getParentDirectory().getChildFile("public").getChildFile(cleanUrl);
+                        if (publicFile.existsAsFile()) targetFile = publicFile;
+                    }
+
+                    if (!targetFile.existsAsFile())
+                    {
+                        // Additional fallback to workspace dist
+                        auto wsDistFile = juce::File("D:\\MyApps\\MuseGrid Native\\dist").getChildFile(cleanUrl);
+                        if (wsDistFile.existsAsFile()) targetFile = wsDistFile;
+                    }
                 }
 
                 if (targetFile.existsAsFile())
@@ -188,6 +201,7 @@ public:
                     else if (ext == "ico")                mime = "image/x-icon";
                     else if (ext == "json")               mime = "application/json; charset=utf-8";
                     else if (ext == "woff2")              mime = "font/woff2";
+                    else if (ext == "wav")                mime = "audio/wav";
 
                     return juce::WebBrowserComponent::Resource{ std::move(data), mime };
                 }

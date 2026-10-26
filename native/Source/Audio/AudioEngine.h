@@ -67,6 +67,23 @@ struct Vst3VolumeFade
     int lastValue = -1;
 };
 
+/** One UI automation write for a hosted VST3 parameter; applied on the audio thread. */
+struct Vst3ParamTarget
+{
+    int index = 0;
+    float value = 0.0f;      // normalised 0..1
+    int rampSamples = 0;
+};
+
+struct Vst3ParamRamp
+{
+    int index = 0;
+    float startValue = 0.0f;
+    float targetValue = 0.0f;
+    int totalSamples = 1;
+    int elapsedSamples = 0;
+};
+
 struct TrackState
 {
     juce::String id;
@@ -124,13 +141,20 @@ struct TrackState
     std::vector<Vst3VolumeFade> volumeFades;
     int nextGlideChannel = 2;
 
+    // Host automation for the track VST3 instrument. Writes are queued from the UI and
+    // applied with a short ramp inside the audio block to avoid zipper noise.
+    std::vector<Vst3ParamTarget> pendingVst3Params;
+    std::vector<Vst3ParamRamp> vst3ParamRamps;
+
     // Extra VST3 instrument instances used by per-note instrument overrides.
     struct NoteVst3Slot
     {
         juce::String identifier;
         juce::String name;
+        juce::String instanceKey; // non-empty for per-note instances
         int fxChainId = 0;
         std::unique_ptr<juce::AudioPluginInstance> plugin;
+        std::unique_ptr<Vst3PluginWindow> editorWindow;
         juce::MidiBuffer pendingMidi;
         std::mutex midiMutex;
         std::vector<ScheduledNoteOff> scheduledNoteOffs;
@@ -269,9 +293,17 @@ public:
     Vst3Host& getVst3Host() { return vst3Host; }
     bool setTrackVst3Instrument(const juce::String& trackId, const juce::String& pluginIdentifier);
     void removeTrackVst3Instrument(const juce::String& trackId);
-    bool ensureNoteVst3Instrument(const juce::String& trackId, const juce::String& pluginIdentifier);
+    // Parameter list of the track's hosted VST3 instrument, for automation lanes.
+    juce::var getTrackVst3Parameters(const juce::String& trackId);
+    // value is normalised 0..1; rampSeconds smooths the write across the next blocks.
+    void setTrackVst3Parameter(const juce::String& trackId, int index, float value, float rampSeconds);
+    bool ensureNoteVst3Instrument(const juce::String& trackId, const juce::String& pluginIdentifier,
+                                  const juce::String& instanceKey = {});
     void releaseNoteVst3Instruments(const juce::String& trackId);
+    // Drops per-note VST3 instances whose note no longer exists (keys are note ids).
+    void pruneNoteVst3Instruments(const juce::String& trackId, const juce::var& activeInstanceKeys);
     void openTrackVst3InstrumentEditor(const juce::String& trackId);
+    void openNoteVst3InstrumentEditor(const juce::String& trackId, const juce::String& instanceKey);
 
     // Registers (or refreshes) the per-note FX chain used by noteOn fxChainId. The effect
     // spec is an array of objects: { type, bypassed?, wet?, pluginId?, params? }.

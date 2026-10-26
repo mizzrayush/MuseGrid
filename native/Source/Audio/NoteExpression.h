@@ -29,6 +29,10 @@ namespace musegrid
         juce::String overrideKind;
         juce::String overrideValue;
 
+        // Per-note VST3 override identity (the note id). Each key owns its own plugin
+        // instance, so edits to one note's plugin state never touch another note.
+        juce::String instanceKey;
+
         // 0 = the track FX rack applies. Non-zero renders this voice through its own
         // registered per-note chain instead, so track FX are bypassed for this note.
         int fxChainId = 0;

@@ -837,8 +837,7 @@ export const RightPane: React.FC = () => {
       const targetId = plugin?.fileOrIdentifier || plugin?.uniqueId || pluginId
       commitHistory()
       updateNotes(selectedNoteIds, { instrumentOverride: `vst3:${targetId}` })
-      const trackIds = new Set(selectedNotes.map(n => n.trackId))
-      trackIds.forEach(tid => audioEngine.ensureNoteVst3Instrument(tid, targetId))
+      selectedNotes.forEach(n => audioEngine.ensureNoteVst3Instrument(n.trackId, targetId, n.id))
       useStore.getState().showToast(`Note override: ${plugin?.name || targetId}`, 'success')
       return
     }
@@ -1416,8 +1415,30 @@ export const RightPane: React.FC = () => {
                 </optgroup>
               )}
             </select>
+            {typeof commonOverride === 'string' && commonOverride.startsWith('vst3:') && selectedNotes.length === 1 && (
+              <button
+                onClick={() => {
+                  const note = selectedNotes[0]
+                  audioEngine.ensureNoteVst3Instrument(note.trackId, commonOverride.slice(5), note.id)
+                  audioEngine.openNoteVst3InstrumentEditor(note.trackId, note.id)
+                }}
+                style={{
+                  alignSelf: 'flex-start',
+                  background: 'transparent',
+                  border: '1px solid rgba(0, 230, 255, 0.25)',
+                  borderRadius: '4px',
+                  color: '#00e6ff',
+                  fontSize: '10px',
+                  fontWeight: 700,
+                  letterSpacing: '0.03em',
+                  padding: '4px 8px',
+                  cursor: 'pointer'
+                }}
+              >
+                Edit Note VST3 Instance
+              </button>
+            )}
           </div>
-
           <NoteFxChainSection
             notes={selectedNotes}
             selectedNoteIds={selectedNoteIds}

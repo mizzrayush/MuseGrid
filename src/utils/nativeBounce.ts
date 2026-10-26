@@ -1,7 +1,10 @@
 import type { AppState, Track } from '../engine/store'
+import * as Tone from 'tone'
 import { mapNoteToScheduledEvent, TICKS_PER_BEAT } from '../engine/Scheduler'
 import { buildNativeNoteOnCommand, type NativeNoteOnCommand } from '../engine/nativeNoteCommand'
 import { buildGlideIntoMap, resolveGlidePlayback } from './midiEditing'
+import { getAutomationValueAtTick } from './automation'
+import { applyAudioBufferFadeOut, normalizeAudioBuffer, stitchAudioBuffers } from './audioRender'
 
 export type NativeBitDepth = 16 | 24 | 32
 
@@ -17,12 +20,20 @@ export interface NativeBounceRequest {
   startTick: number
   endTick: number
   exportRegionMode: boolean
+  exportRegions?: Array<{ id?: string, startTick: number, endTick: number, gap: number }>
   filename: string
 }
 
-export interface NativeBounceEvent extends NativeNoteOnCommand {
-  time: number
-}
+export type NativeBounceEvent =
+  | (NativeNoteOnCommand & { time: number })
+  | {
+    type: 'vst3Param'
+    trackId: string
+    index: number
+    value: number
+    rampSeconds: number
+    time: number
+  }
 
 export interface NativeMetronomeConfig {
   bpm: number
@@ -81,8 +92,8 @@ export function canUseNativeBounce(): boolean {
 /**
  * The JUCE host already owns the sound you hear (voices, drums, chromatic sampler, native and
  * VST3 FX), so a native bounce needs no re-implementation of the graph. It cannot reproduce
- * script-driven procedural FX nor the multi-region splice, so those cases return null and stay
- * on the Tone.js renderer. The metronome is passed along as a config and synthesized natively.
+ * script-driven procedural FX, so those cases return null and stay on the Tone.js renderer.
+ * The metronome is passed along as a config and synthesized natively.
  */
 export function buildNativeBouncePayload(state: AppState, request: NativeBounceRequest, bitDepth: NativeBitDepth): NativeBouncePayload | null {
   if (request.exportRegionMode) return null
@@ -147,7 +158,37 @@ export function buildNativeBouncePayload(state: AppState, request: NativeBounceR
     lastNoteEndSeconds = Math.max(lastNoteEndSeconds, time + command.duration)
   })
 
-  if (events.length === 0 && !request.includeMetronome) return null
+  // A `vst3:<index>` lane is baked into the event stream so the plugin hears the same
+  // curve during a bounce that it hears live. 32 Hz sampling with a matching ramp keeps
+  // the parameter continuous without flooding the engine.
+  const noteEventCount = events.length
+  const VST3_AUTOMATION_STEP_SECONDS = 1 / 32
+  const stepTicks = VST3_AUTOMATION_STEP_SECONDS * globalTPS
+  renderableTracks.forEach(track => {
+    const target = state.automationTargets[track.id]
+    if (!target || !target.startsWith('vst3:')) return
+    const index = Number(target.slice(5))
+    if (!Number.isInteger(index) || index < 0) return
+    const points = state.automationCurves[track.id]
+    if (!points || points.length === 0) return
+
+    for (let tick = request.startTick; ; tick += stepTicks)
+    {
+      const clamped = Math.min(tick, request.endTick)
+      const value = Math.max(0, Math.min(1, getAutomationValueAtTick(points, clamped, 64) / 127))
+      events.push({
+        type: 'vst3Param',
+        trackId: track.id,
+        index,
+        value,
+        rampSeconds: VST3_AUTOMATION_STEP_SECONDS,
+        time: Math.max(0, (clamped - request.startTick) / globalTPS)
+      })
+      if (clamped >= request.endTick) break
+    }
+  })
+
+  if (noteEventCount === 0 && !request.includeMetronome) return null
 
   const fadeSeconds = state.studioSettings.renderFadeDuration ?? 0.1
   const durationSeconds = Math.max(1,
@@ -198,4 +239,87 @@ export async function renderNativeBounce(payload: NativeBouncePayload): Promise<
   const result = await (window as any).ipcRenderer.invoke('render-audio', payload)
   if (!result) return null
   return result as NativeBounceResult
+}
+
+async function renderNativeBounceToTemp(payload: NativeBouncePayload): Promise<AudioBuffer | null> {
+  const result = await (window as any).ipcRenderer.invoke('render-audio-temp', payload)
+  if (!result) return null
+  if (!result.success) throw new Error(result.message || 'Native bounce failed')
+
+  try
+  {
+    const response = await fetch(result.url as string)
+    if (!response.ok) throw new Error(`Could not read the native render (${response.status})`)
+    const bytes = await response.arrayBuffer()
+    const ctx = Tone.getContext().rawContext as BaseAudioContext
+    return await ctx.decodeAudioData(bytes)
+  }
+  finally
+  {
+    // The temp WAV has been decoded into memory; the host copy is no longer needed.
+    ;(window as any).ipcRenderer.invoke('release-native-render', result.path).catch(() => {})
+  }
+}
+
+/**
+ * Renders through the JUCE engine and returns the audio in memory. Used by MP3 and
+ * multi-region exports, which need the samples in JS to encode or stitch. Returns null
+ * when the native path cannot reproduce the request, so the caller can fall back to Tone.
+ */
+export async function renderNativeAudioBuffer(
+  state: AppState,
+  request: NativeBounceRequest,
+  bitDepth: NativeBitDepth
+): Promise<AudioBuffer | null> {
+  if (request.includeProceduralFx && state.studioSettings.proceduralFxEnabled) return null
+
+  if (request.exportRegionMode && request.exportRegions && request.exportRegions.length > 0)
+  {
+    const regions = [...request.exportRegions].sort((a, b) => a.startTick - b.startTick)
+    const globalTPS = (state.bpm / 60) * TICKS_PER_BEAT
+    if (!(globalTPS > 0)) return null
+
+    let sampleRate = state.studioSettings.sampleRate ?? 44100
+    const buffers: AudioBuffer[] = []
+    const gaps: number[] = []
+
+    for (const region of regions)
+    {
+      const payload = buildNativeBouncePayload(state, {
+        ...request,
+        exportRegionMode: false,
+        startTick: region.startTick,
+        endTick: region.endTick,
+        normalize: false,
+        autoFade: false
+      }, 24)
+
+      if (!payload)
+      {
+        // A silent region still occupies its place in the stitched file, as in the Tone path.
+        const seconds = Math.max(0.1, (region.endTick - region.startTick) / globalTPS)
+        buffers.push(new AudioBuffer({ length: Math.max(1, Math.round(seconds * sampleRate)),
+                                       numberOfChannels: 2, sampleRate }))
+      }
+      else
+      {
+        const buffer = await renderNativeBounceToTemp(payload)
+        if (!buffer) return null
+        buffers.push(buffer)
+        sampleRate = buffer.sampleRate
+      }
+      gaps.push(Math.max(0, region.gap))
+    }
+
+    const stitched = stitchAudioBuffers(buffers, gaps)
+    // The native per-region renders skip post-processing so normalize/fade apply once,
+    // to the stitched result, exactly like the Tone renderer.
+    if (request.autoFade) applyAudioBufferFadeOut(stitched, state.studioSettings.renderFadeDuration ?? 0.1)
+    if (request.normalize) normalizeAudioBuffer(stitched, state.studioSettings.normalizationTarget ?? -1.0)
+    return stitched
+  }
+
+  const payload = buildNativeBouncePayload(state, request, bitDepth)
+  if (!payload) return null
+  return renderNativeBounceToTemp(payload)
 }

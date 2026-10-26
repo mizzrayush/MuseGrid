@@ -12,7 +12,7 @@ import { NOTE_NAMES_SHARP, NOTE_NAMES_FLAT, CHORD_VOICINGS, snapTick, snapToScal
 
 import { createProceduralSuggestions, type ProceduralSuggestion, type SuggestionKind } from '../utils/proceduralSuggestions'
 import { applyAudioBufferFadeOut, normalizeAudioBuffer, renderProjectAudio, stitchAudioBuffers } from '../utils/audioRender'
-import { buildNativeBouncePayload, canUseNativeBounce, renderNativeBounce, type NativeBitDepth } from '../utils/nativeBounce'
+import { buildNativeBouncePayload, canUseNativeBounce, renderNativeAudioBuffer, renderNativeBounce, type NativeBitDepth } from '../utils/nativeBounce'
 import { audioBufferToWav } from '../utils/wavEncoder'
 import { audioBufferToMp3 } from '../utils/mp3Encoder'
 import { createMidiData } from '../utils/midiExport'
@@ -2618,9 +2618,11 @@ export default function LeftPane() {
         }
       } else {
         const bitDepth = projectExportData.bitDepth ?? 24
-        const useNativeEngine = type === 'wav' && canUseNativeBounce()
+        const canNative = canUseNativeBounce()
 
-        if (useNativeEngine) {
+        // A straight WAV can stream from JUCE to the user's file without passing samples
+        // through the web layer.
+        if (canNative && type === 'wav' && !exportRegionMode) {
           const payload = buildNativeBouncePayload(state, {
             trackId, trackIds, octaveOffset, semitoneOffset, normalize, autoFade, includeMetronome,
             includeProceduralFx,
@@ -2637,14 +2639,34 @@ export default function LeftPane() {
             }
             return
           }
-          // Multi-region bounces stay on the Tone.js renderer
         }
 
-        nativeBuffer = await renderProjectAudio(renderState, {
-          trackId, trackIds, octaveOffset, semitoneOffset, normalize, includeMetronome, autoFade, startTick: resolvedStartTick, endTick: resolvedEndTick, includeProceduralFx,
-          exportRegionMode,
-          exportRegions
-        })
+        // MP3 and multi-region exports need the samples in JS (encoder / splice), so the
+        // native render goes to a temp WAV that is fetched and decoded here.
+        if (canNative) {
+          try {
+            const engineBuffer = await renderNativeAudioBuffer(state, {
+              trackId, trackIds, octaveOffset, semitoneOffset, normalize, autoFade, includeMetronome,
+              includeProceduralFx,
+              startTick: resolvedStartTick, endTick: resolvedEndTick, exportRegionMode,
+              exportRegions,
+              filename: exportFilename
+            }, type === 'mp3' ? 16 : bitDepth)
+
+            if (engineBuffer) nativeBuffer = engineBuffer
+          } catch (nativeError) {
+            // Host failure should not block the export; the Tone renderer below still works.
+            console.warn('[Export] Native render failed, falling back to Tone:', nativeError)
+          }
+        }
+
+        if (!nativeBuffer) {
+          nativeBuffer = await renderProjectAudio(renderState, {
+            trackId, trackIds, octaveOffset, semitoneOffset, normalize, includeMetronome, autoFade, startTick: resolvedStartTick, endTick: resolvedEndTick, includeProceduralFx,
+            exportRegionMode,
+            exportRegions
+          })
+        }
       }
 
       // Check if cancelled

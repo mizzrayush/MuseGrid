@@ -9,6 +9,7 @@ import { getEffectiveTrackLevel } from '../utils/groupAudio'
 import { buildNativeNoteOnCommand } from './nativeNoteCommand'
 import { buildNoteFxChain } from '../utils/noteFxChain'
 import { buildCurveLut, evaluateGlideCurve } from '../utils/glideCurves'
+import { createTrackChannel, setTrackChannelPan } from '../utils/toneChannel'
 
 interface TrackRack {
   input: Tone.Gain
@@ -344,6 +345,39 @@ function getDecayDefaultByPitch(pitch: number): number {
   return defaults[pitch] ?? 0.40
 }
 
+/** Per-hit output trim: volume automation, per-note pan and morph crossfades. */
+export interface DrumOutputOptions {
+  pan?: number
+  gain?: number
+  fadeIn?: number
+  fadeOut?: number
+}
+
+/** One automatable parameter of the track's VST3 instrument (values normalized 0..1). */
+export interface Vst3ParameterInfo {
+  index: number
+  name: string
+  label?: string
+  value: number
+  valueText?: string
+  min?: number
+  max?: number
+  default?: number
+  discrete?: boolean
+}
+
+const DRUM_PAD_FIELD: Record<number, string> = {
+  0: 'kick', 1: 'snare', 2: 'hihatClosed', 3: 'hihatOpen', 4: 'clap',
+  5: 'tomLow', 6: 'tomMid', 7: 'tomHigh', 8: 'crash', 9: 'ride',
+  10: 'cowbell', 11: 'tambourine', 12: 'congaLow', 13: 'congaHigh', 14: 'claves', 15: 'rimshot'
+}
+
+function drumNeedsOutput(opts?: DrumOutputOptions): boolean {
+  if (!opts) return false
+  return !!opts.pan || (opts.gain !== undefined && Math.abs(opts.gain - 1) > 0.001)
+    || (opts.fadeIn ?? 0) > 0 || (opts.fadeOut ?? 0) > 0
+}
+
 class DrumMachine {
   kick = new Tone.MembraneSynth()
   snare = new Tone.NoiseSynth({
@@ -422,7 +456,8 @@ class DrumMachine {
     _duration: string,
     time?: number,
     velocity = 1,
-    pitchOffset = 0
+    pitchOffset = 0,
+    outputOpts?: DrumOutputOptions
   ) {
     try {
       const ctx = Tone.getContext().rawContext as AudioContext
@@ -459,7 +494,8 @@ class DrumMachine {
 
       const gainNode = ctx.createGain()
       const sampleVol = sampleConfig?.volume !== undefined ? sampleConfig.volume : 1.0
-      const peakGain = Math.max(0.0001, Math.min(2.5, velocity * sampleVol))
+      const trim = Math.max(0, Math.min(2, outputOpts?.gain ?? 1))
+      const peakGain = Math.max(0.0001, Math.min(2.5, velocity * sampleVol * trim))
       gainNode.gain.setValueAtTime(peakGain, now)
 
       const bufDuration = buffer.duration / playbackRate
@@ -474,12 +510,29 @@ class DrumMachine {
       }
 
       let outputNode: AudioNode = gainNode
-      const panVal = sampleConfig?.pan ?? 0
+      const chainNodes: AudioNode[] = []
+      const panVal = Math.max(-1, Math.min(1, (sampleConfig?.pan ?? 0) + (outputOpts?.pan ?? 0)))
       if (panVal !== 0 && (ctx as any).createStereoPanner) {
         const panner = (ctx as any).createStereoPanner()
+        // A default stereo panner sums the up-mixed mono hit and doubles it at hard pan.
+        panner.channelCount = 1
+        panner.channelCountMode = 'explicit'
         panner.pan.setValueAtTime(panVal, now)
         gainNode.connect(panner)
         outputNode = panner
+        chainNodes.push(panner)
+      }
+
+      const fadeIn = Math.max(0, outputOpts?.fadeIn ?? 0)
+      const fadeOut = Math.max(0, outputOpts?.fadeOut ?? 0)
+      if (fadeIn > 0 || fadeOut > 0) {
+        const fadeNode = ctx.createGain()
+        fadeNode.gain.setValueAtTime(fadeIn > 0 ? 0.0001 : 1, now)
+        if (fadeIn > 0) fadeNode.gain.linearRampToValueAtTime(1, now + fadeIn)
+        if (fadeOut > 0) fadeNode.gain.linearRampToValueAtTime(0.0001, now + fadeOut)
+        outputNode.connect(fadeNode)
+        outputNode = fadeNode
+        chainNodes.push(fadeNode)
       }
 
       if (this.lastDestination) {
@@ -513,7 +566,7 @@ class DrumMachine {
           try {
             source.disconnect()
             gainNode.disconnect()
-            if (outputNode !== gainNode) outputNode.disconnect()
+            chainNodes.forEach(node => { try { node.disconnect() } catch (_) {} })
           } catch (_) {}
         }
       } else {
@@ -521,7 +574,7 @@ class DrumMachine {
           try {
             source.disconnect()
             gainNode.disconnect()
-            if (outputNode !== gainNode) outputNode.disconnect()
+            chainNodes.forEach(node => { try { node.disconnect() } catch (_) {} })
           } catch (_) {}
         }
       }
@@ -617,26 +670,29 @@ class DrumMachine {
     }
   }
 
+  private createCustomSynth(pitch: number): any {
+    const cfg = this.customMuxins?.config?.[pitch.toString()]
+
+    if (cfg?.noise !== undefined) {
+      return new Tone.NoiseSynth(cfg)
+    }
+    if (cfg?.harmonicity !== undefined) {
+      return new Tone.MetalSynth(cfg)
+    }
+    return new Tone.MembraneSynth(cfg || {
+      octaves: 3,
+      pitchDecay: 0.05,
+      oscillator: { type: 'sine' },
+      envelope: { attack: 0.001, decay: 0.4, sustain: 0, release: 0.1 }
+    })
+  }
+
   private getOrCreateCustomSynth(pitch: number, destination?: any): any {
     if (this.customSynths.has(pitch)) {
       return this.customSynths.get(pitch)
     }
 
-    const cfg = this.customMuxins?.config?.[pitch.toString()]
-    let synth: any
-
-    if (cfg?.noise !== undefined) {
-      synth = new Tone.NoiseSynth(cfg)
-    } else if (cfg?.harmonicity !== undefined) {
-      synth = new Tone.MetalSynth(cfg)
-    } else {
-      synth = new Tone.MembraneSynth(cfg || {
-        octaves: 3,
-        pitchDecay: 0.05,
-        oscillator: { type: 'sine' },
-        envelope: { attack: 0.001, decay: 0.4, sustain: 0, release: 0.1 }
-      })
-    }
+    const synth = this.createCustomSynth(pitch)
 
     const dest = destination || this.lastDestination
     if (dest) {
@@ -645,6 +701,52 @@ class DrumMachine {
 
     this.customSynths.set(pitch, synth)
     return synth
+  }
+
+  /**
+   * Copies one pad instrument for a per-hit output chain. Drum pad instruments are
+   * monophonic, so a note that needs its own pan/gain ride gets a private voice
+   * instead of sharing the track-level chain.
+   */
+  private cloneInstrument(original: any, destination: any): any {
+    let voice: any
+    if (original instanceof Tone.NoiseSynth) voice = new Tone.NoiseSynth(original.get())
+    else if (original instanceof Tone.MetalSynth) voice = new Tone.MetalSynth(original.get())
+    else voice = new Tone.MembraneSynth(original.get())
+    voice.connect(destination)
+    return voice
+  }
+
+  private buildOutputChain(opts: DrumOutputOptions, startSec: number) {
+    const gain = new Tone.Gain(1)
+    const pan = Math.max(-1, Math.min(1, opts.pan ?? 0))
+    let output: Tone.ToneAudioNode = gain
+    let panner: Tone.Panner | undefined
+    // A centred panner would fold the mono pad and cost 3 dB; only pan when asked to.
+    if (pan !== 0) {
+      panner = new Tone.Panner(pan)
+      gain.connect(panner)
+      output = panner
+    }
+    if (this.lastDestination) output.connect(this.lastDestination)
+    else output.toDestination()
+
+    const target = Math.max(0, Math.min(2, opts.gain ?? 1))
+    const fadeIn = Math.max(0, opts.fadeIn ?? 0)
+    const fadeOut = Math.max(0, opts.fadeOut ?? 0)
+    try {
+      gain.gain.setValueAtTime(fadeIn > 0 ? 0 : target, startSec)
+      if (fadeIn > 0) gain.gain.linearRampToValueAtTime(target, startSec + fadeIn)
+      if (fadeOut > 0) gain.gain.linearRampToValueAtTime(0, startSec + fadeOut)
+    } catch (_) {}
+
+    return {
+      input: gain,
+      dispose: () => {
+        try { gain.dispose() } catch (_) {}
+        try { panner?.dispose() } catch (_) {}
+      }
+    }
   }
 
   connect(destination: Tone.Gain) {
@@ -684,7 +786,8 @@ class DrumMachine {
       octaves?: number
       resonance?: number
       decay?: number
-    }
+    },
+    outputOpts?: DrumOutputOptions
   ) {
     const index = typeof pitch === 'number' ? pitch : Tone.Frequency(pitch).toMidi()
     const t = time as Tone.Unit.Time
@@ -695,7 +798,60 @@ class DrumMachine {
     const buffer = this.padAudioBuffers.get(index)
 
     if (mode === 'sample' && buffer) {
-      this.triggerSample(index, sample, buffer, duration, time, velocity, pitchOffset)
+      this.triggerSample(index, sample, buffer, duration, time, velocity, pitchOffset, outputOpts)
+      return
+    }
+
+    // Per-hit pan, volume automation or morph fades need their own output node, which
+    // also means a private copy of the pad voice: the shared instrument is connected
+    // straight to the track input and is monophonic.
+    if (outputOpts && drumNeedsOutput(outputOpts)) {
+      const startSec = time !== undefined ? Tone.Time(time).toSeconds() : Tone.now()
+      const durSec = Tone.Time(duration).toSeconds()
+      const chain = this.buildOutputChain(outputOpts, startSec)
+      const shadow = Object.create(DrumMachine.prototype) as DrumMachine
+      shadow.kit = this.kit
+      shadow.customMuxins = this.customMuxins
+      shadow.drumDecays = this.drumDecays
+      shadow.drumOctaves = this.drumOctaves
+      shadow.drumResonances = this.drumResonances
+      shadow.customSynths = new Map()
+      shadow.padModes = this.padModes
+      shadow.padSamples = this.padSamples
+      shadow.padAudioBuffers = this.padAudioBuffers
+      shadow.lastDestination = chain.input
+
+      let voice: any
+      if (this.kit === 'tabla') {
+        if (index === 0 || index === 1 || index === 4) {
+          voice = shadow.kick = this.cloneInstrument(this.kick, chain.input)
+        } else if (index === 2) {
+          voice = shadow.hihatClosed = this.cloneInstrument(this.hihatClosed, chain.input)
+        } else if (index === 3) {
+          voice = shadow.hihatOpen = this.cloneInstrument(this.hihatOpen, chain.input)
+        }
+      } else {
+        const field = DRUM_PAD_FIELD[index]
+        if (field) {
+          voice = this.cloneInstrument((this as any)[field], chain.input)
+          ;(shadow as any)[field] = voice
+        }
+      }
+      if (!voice) {
+        voice = this.createCustomSynth(index)
+        voice.connect(chain.input)
+        shadow.customSynths.set(index, voice)
+      }
+
+      shadow.triggerAttackRelease(pitch, duration, time, velocity, pitchOffset, slideOpts, padCustom)
+
+      if (!(Tone.getContext() as any).isOffline) {
+        const delayMs = Math.max(0, (startSec + durSec + 4 - Tone.now()) * 1000)
+        window.setTimeout(() => {
+          try { voice.dispose() } catch (_) {}
+          chain.dispose()
+        }, delayMs)
+      }
       return
     }
 
@@ -1147,6 +1303,8 @@ export class ChromaticSampler {
     const panVal = Math.max(-1, Math.min(1, (cfg.pan ?? 0) + (opts?.pan ?? 0)))
     if (panVal !== 0 && (this.ctx as any).createStereoPanner) {
       const panner = (this.ctx as any).createStereoPanner()
+      panner.channelCount = 1
+      panner.channelCountMode = 'explicit'
       panner.pan.setValueAtTime(panVal, now)
       output.connect(panner)
       output = panner
@@ -1270,6 +1428,8 @@ export class PhysicalModelVoice {
     const pan = Math.max(-1, Math.min(1, opts?.pan ?? 0))
     if (pan !== 0 && (ctx as any).createStereoPanner) {
       const panner = (ctx as any).createStereoPanner()
+      panner.channelCount = 1
+      panner.channelCountMode = 'explicit'
       panner.pan.setValueAtTime(pan, now)
       panner.connect(node)
       node = panner
@@ -1756,6 +1916,8 @@ export class VocalModelVoice {
       const pan = Math.max(-1, Math.min(1, opts?.pan ?? 0))
       if (pan !== 0 && (ctx as any).createStereoPanner) {
         const panner = (ctx as any).createStereoPanner()
+        panner.channelCount = 1
+        panner.channelCountMode = 'explicit'
         panner.pan.setValueAtTime(pan, now)
         panner.connect(outNode)
         outNode = panner
@@ -2894,6 +3056,8 @@ class AudioEngine {
   private activeVoicePreviewGain: GainNode | null = null
   private activeVoicePreviewTimer: any = null
   private activeVoicePreviewGeneration = 0
+  private vst3AutomationTimer: any = null
+  private vst3AutomationLastTicks = 0
 
   constructor() {
     try {
@@ -3270,7 +3434,7 @@ class AudioEngine {
 
   private createRack(trackId: string): TrackRack {
     const input = new Tone.Gain()
-    const channel = new Tone.Channel()
+    const channel = createTrackChannel({ volume: 0, pan: 0, mute: false, solo: false })
     const fxNodes = new Map<string, Tone.ToneAudioNode>()
 
     const defaultInstances = getTrackFxInstances()
@@ -3751,7 +3915,7 @@ class AudioEngine {
 
     // 4. General channel settings
     rack.channel.volume.value = Tone.gainToDb(Math.max(0.0001, effective.volume))
-    rack.channel.pan.value = track.pan
+    setTrackChannelPan(rack.channel, track.pan)
     rack.channel.mute = effective.muted
     rack.channel.solo = effective.soloed
 
@@ -4609,7 +4773,9 @@ class AudioEngine {
           : undefined
 
         const automationPoints = state.automationCurves[note.trackId] || []
-        const velocity = getAutomationValueAtTick(automationPoints, currentTicks, note.velocity) / 127
+        const automationTarget = state.automationTargets[note.trackId] ?? 'velocity'
+        const laneValue = getAutomationValueAtTick(automationPoints, currentTicks, note.velocity)
+        const velocity = automationTarget === 'velocity' ? laneValue / 127 : note.velocity / 127
 
         this.playNote(
           track.id,
@@ -4634,6 +4800,7 @@ class AudioEngine {
     if (Tone.Transport.state === 'started') {
       Tone.Transport.pause()
       this.stopActiveNotes()
+      this.stopVst3Automation()
       useStore.getState().setIsPlaying(false)
       if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
         (window as any).juceAudioBridge.postCommand({ type: 'stop' });
@@ -4643,6 +4810,7 @@ class AudioEngine {
       Tone.Transport.start()
       useStore.getState().setIsPlaying(true)
       this.resumeActiveNotes()
+      this.startVst3Automation()
       if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
         (window as any).juceAudioBridge.postCommand({ type: 'play' });
       }
@@ -4652,6 +4820,7 @@ class AudioEngine {
   stop() {
     Tone.Transport.stop()
     this.stopActiveNotes()
+    this.stopVst3Automation()
     const state = useStore.getState()
     if (state.isRecording) {
       state.setIsRecording(false)
@@ -5088,15 +5257,89 @@ class AudioEngine {
     }
   }
 
-  /** Instantiates the extra VST3 slot a per-note instrument override needs. */
-  ensureNoteVst3Instrument(trackId: string, pluginId: string) {
+  /** Instantiates the VST3 instance a per-note instrument override needs (one per note). */
+  ensureNoteVst3Instrument(trackId: string, pluginId: string, instanceKey?: string) {
     if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
       (window as any).juceAudioBridge.postCommand({
         type: 'ensureNoteVst3Instrument',
         trackId,
-        pluginId
+        pluginId,
+        instanceKey
       });
     }
+  }
+
+  /** Opens the plugin editor for one note's own VST3 instance. */
+  openNoteVst3InstrumentEditor(trackId: string, instanceKey: string) {
+    if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
+      (window as any).juceAudioBridge.postCommand({
+        type: 'openNoteVst3InstrumentEditor',
+        trackId,
+        instanceKey
+      });
+    }
+  }
+
+  /** Parameters exposed by the track's VST3 instrument, for the automation lane selector. */
+  async getTrackVst3Parameters(trackId: string): Promise<Vst3ParameterInfo[]> {
+    if ((window as any).__isJuceNative__ && (window as any).ipcRenderer) {
+      try {
+        const list = await (window as any).ipcRenderer.invoke('vst3-track-parameters', trackId);
+        return Array.isArray(list) ? list : [];
+      } catch (err) {
+        console.warn('[AudioEngine] getTrackVst3Parameters error:', err);
+      }
+    }
+    return [];
+  }
+
+  /** Writes a normalized 0..1 value to a plugin parameter, ramped over `rampSeconds`. */
+  setTrackVst3Parameter(trackId: string, index: number, value: number, rampSeconds = 0.05) {
+    if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
+      (window as any).juceAudioBridge.postCommand({
+        type: 'setTrackVst3Parameter',
+        trackId,
+        index,
+        value: Math.max(0, Math.min(1, value)),
+        rampSeconds
+      });
+    }
+  }
+
+  // The JUCE host owns the plugin instances, so a `vst3:<index>` lane is streamed to them
+  // while the transport runs; each write ramps across the sampling interval.
+  private pushVst3Automation() {
+    if (!(window as any).__isJuceNative__ || !(window as any).juceAudioBridge) return
+    const state = useStore.getState()
+    const ticks = Tone.Transport.ticks
+    const secondsPerTick = 60 / (state.bpm * 192)
+    const elapsedTicks = Math.max(0, ticks - this.vst3AutomationLastTicks)
+    const rampSeconds = Math.max(0.02, Math.min(0.2, elapsedTicks * secondsPerTick))
+    this.vst3AutomationLastTicks = ticks
+
+    for (const track of state.tracks) {
+      const target = state.automationTargets[track.id]
+      if (!target || !target.startsWith('vst3:')) continue
+      const index = Number(target.slice(5))
+      if (!Number.isInteger(index) || index < 0) continue
+      const points = state.automationCurves[track.id]
+      if (!points || points.length === 0) continue
+      const value = Math.max(0, Math.min(1, getAutomationValueAtTick(points, ticks, 64) / 127))
+      this.setTrackVst3Parameter(track.id, index, value, rampSeconds)
+    }
+  }
+
+  private startVst3Automation() {
+    if (this.vst3AutomationTimer != null) return
+    this.vst3AutomationLastTicks = Tone.Transport.ticks
+    this.pushVst3Automation()
+    this.vst3AutomationTimer = window.setInterval(() => this.pushVst3Automation(), 50)
+  }
+
+  private stopVst3Automation() {
+    if (this.vst3AutomationTimer == null) return
+    window.clearInterval(this.vst3AutomationTimer)
+    this.vst3AutomationTimer = null
   }
 
   /** Registers a per-note FX chain so it is ready before the first note plays. */
@@ -5116,16 +5359,10 @@ class AudioEngine {
   syncNoteVst3Overrides() {
     if (!(window as any).__isJuceNative__ || !(window as any).juceAudioBridge) return
     const state = useStore.getState()
-    const seen = new Set<string>()
     state.notes.forEach(n => {
       const ov = n.instrumentOverride
       if (typeof ov === 'string' && ov.startsWith('vst3:')) {
-        const pluginId = ov.slice(5)
-        const key = `${n.trackId}::${pluginId}`
-        if (!seen.has(key)) {
-          seen.add(key)
-          this.ensureNoteVst3Instrument(n.trackId, pluginId)
-        }
+        this.ensureNoteVst3Instrument(n.trackId, ov.slice(5), n.id)
       }
       if (n.fxInstances?.length) {
         const chain = buildNoteFxChain(n)
@@ -5134,19 +5371,27 @@ class AudioEngine {
     })
   }
 
-  /** Drops native note-FX chains whose notes were deleted or whose override was cleared. */
+  /** Drops native note-FX chains and per-note VST3 instances whose notes are gone. */
   private pruneNativeNoteFxChains() {
     if (!(window as any).__isJuceNative__ || !(window as any).juceAudioBridge) return
     const state = useStore.getState()
     for (const track of state.tracks) {
-      const chainIds = state.notes
-        .filter(note => note.trackId === track.id)
+      const trackNotes = state.notes.filter(note => note.trackId === track.id)
+      const chainIds = trackNotes
         .map(note => buildNoteFxChain(note)?.chainId)
         .filter((id): id is number => typeof id === 'number')
       ;(window as any).juceAudioBridge.postCommand({
         type: 'pruneNoteFxChains',
         trackId: track.id,
         chainIds
+      })
+      const instanceKeys = trackNotes
+        .filter(note => typeof note.instrumentOverride === 'string' && note.instrumentOverride.startsWith('vst3:'))
+        .map(note => note.id)
+      ;(window as any).juceAudioBridge.postCommand({
+        type: 'pruneNoteVst3Instruments',
+        trackId: track.id,
+        instanceKeys
       })
     }
   }
@@ -5753,13 +5998,22 @@ class AudioEngine {
           }
         }
 
+        // Native drums already apply per-hit gain/pan/fades; give the Tone preview the
+        // same output trim so an automated or morphed drum note sounds identical.
+        const drumOutput: DrumOutputOptions = {
+          pan: noteData?.pan,
+          gain: noteData?.automationGain,
+          fadeIn: noteData?.morphFadeIn ? Tone.Time(noteData.morphFadeIn + 'i').toSeconds() : undefined,
+          fadeOut: noteData?.morphFadeOut ? Tone.Time(noteData.morphFadeOut + 'i').toSeconds() : undefined
+        }
+
         if (typeof pitch === 'number' && pitch >= 1000) {
           const mixRow = state.customDrumRows?.find(r => r.syntheticPitch === pitch)
           if (mixRow) {
             const velA = velocity * (1 - mixRow.proportion)
             const velB = velocity * mixRow.proportion
-            if (velA > 0.01) drum.triggerAttackRelease(mixRow.drumA, duration, time, velA, totalPitchOffset, slideOpts)
-            if (velB > 0.01) drum.triggerAttackRelease(mixRow.drumB, duration, time, velB, totalPitchOffset, slideOpts)
+            if (velA > 0.01) drum.triggerAttackRelease(mixRow.drumA, duration, time, velA, totalPitchOffset, slideOpts, undefined, drumOutput)
+            if (velB > 0.01) drum.triggerAttackRelease(mixRow.drumB, duration, time, velB, totalPitchOffset, slideOpts, undefined, drumOutput)
             return
           }
         }
@@ -5767,7 +6021,7 @@ class AudioEngine {
           octaves: noteData?.octaves,
           resonance: noteData?.resonance,
           decay: noteData?.decay
-        })
+        }, drumOutput)
       }
     }
   }

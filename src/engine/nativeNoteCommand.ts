@@ -29,6 +29,8 @@ export interface NativeNoteOnCommand {
   /** Per-note sound override. Kind tells JUCE which engine to route the note to. */
   overrideKind?: 'preset' | 'kit' | 'vst3'
   overrideValue?: string
+  /** Note id: per-note VST3 overrides own one plugin instance each. */
+  instanceKey?: string
   /** Per-note FX chain, registered by JUCE before the note is triggered. */
   fxChainId?: number
   fxChainSignature?: string
@@ -143,6 +145,7 @@ export function buildNativeNoteOnCommand(src: NoteCommandSource): NativeNoteOnCo
     filterCurve: hasFilterSweep ? buildCurveLut(noteData?.filterSweepRamp) : undefined,
     overrideKind,
     overrideValue,
+    instanceKey: overrideKind === 'vst3' && noteData?.id ? String(noteData.id) : undefined,
     fxChainId: fxChain?.chainId,
     fxChainSignature: fxChain?.signature,
     fxChainEffects: fxChain?.effects,

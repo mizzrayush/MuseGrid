@@ -1,4 +1,4 @@
-import type { AutomationPoint, Note } from '../engine/store'
+import type { AutomationPoint, AutomationTarget, Note } from '../engine/store'
 
 const MIN_VELOCITY = 1
 const MAX_VELOCITY = 127
@@ -90,4 +90,20 @@ export function applyAutomationToNotes(notes: Note[], points: AutomationPoint[])
     id: note.id,
     velocity: getAutomationValueAtTick(points, note.time + note.duration / 2, note.velocity),
   }))
+}
+
+/** Lane values are clamped to 1..127, so anchor pan at lane 64 to still reach both hard stops. */
+export function laneValueToPan(value: number): number {
+  return Math.max(-1, Math.min(1, (clampVelocity(value) - 64) / 63))
+}
+
+/**
+ * What a lane holds where the track has no points. Sampling falls back to the note's own
+ * velocity, which is right for a velocity lane but would double-apply velocity as gain or
+ * pan notes by how hard they were hit on the other lanes.
+ */
+export function laneNeutralValue(target: AutomationTarget, noteVelocity: number): number {
+  if (target === 'volume') return MAX_VELOCITY
+  if (target === 'pan') return 64
+  return noteVelocity
 }

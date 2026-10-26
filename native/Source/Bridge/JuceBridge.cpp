@@ -47,6 +47,66 @@ namespace
             return jobHasFinished;
         }
     };
+
+    juce::File renderTempDir()
+    {
+        return juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("MuseGridRenders");
+    }
+
+    // Shared payload parser for the dialog-driven WAV bounce and the temp-file bounce
+    // used by MP3 / multi-region exports.
+    bool parseRenderJob(const juce::var& input, OfflineRenderer::RenderJob& job, juce::String& error)
+    {
+        juce::var parsed = input;
+        if (parsed.isString()) parsed = juce::JSON::parse(parsed.toString());
+        if (!parsed.isObject()) { error = "Invalid render payload"; return false; }
+        auto* obj = parsed.getDynamicObject();
+
+        job.sampleRate = obj->hasProperty("sampleRate") ? (double)obj->getProperty("sampleRate") : 44100.0;
+        job.bitDepth = obj->hasProperty("bitDepth") ? (int)obj->getProperty("bitDepth") : 24;
+        job.totalDurationSeconds = obj->hasProperty("durationSeconds") ? (double)obj->getProperty("durationSeconds") : 10.0;
+        job.normalize = obj->hasProperty("normalize") ? (bool)obj->getProperty("normalize") : true;
+        job.normalizeTargetDb = obj->hasProperty("normalizeTargetDb") ? (double)obj->getProperty("normalizeTargetDb") : -1.0;
+        job.autoFade = obj->hasProperty("autoFade") ? (bool)obj->getProperty("autoFade") : true;
+        job.fadeSeconds = obj->hasProperty("fadeSeconds") ? (double)obj->getProperty("fadeSeconds") : 0.5;
+
+        if (auto* arr = obj->getProperty("events").getArray())
+            for (const auto& ev : *arr) job.events.add(ev);
+        if (auto* overrides = obj->getProperty("trackOverrides").getArray())
+            for (const auto& ov : *overrides) job.trackOverrides.add(ov);
+
+        if (auto* m = obj->getProperty("metronome").getDynamicObject())
+        {
+            auto number = [m](const char* key, double fallback) {
+                return m->hasProperty(key) ? (double)m->getProperty(key) : fallback;
+            };
+
+            auto& cfg = job.metronome;
+            cfg.enabled = true;
+            cfg.bpm = std::max(1.0, number("bpm", 120.0));
+            cfg.startTick = std::max(0.0, number("startTick", 0.0));
+            cfg.beatsPerMeasure = std::max(1, (int)number("beatsPerMeasure", 4.0));
+            cfg.metronomeVolume = juce::jlimit(0.0, 1.0, number("metronomeVolume", 1.0));
+            cfg.gainDb = number("gainDb", 0.0);
+            cfg.pitchDecay = std::max(0.0, number("pitchDecay", 0.01));
+            cfg.octaves = std::max(1.0, number("octaves", 2.0));
+            cfg.attack = std::max(0.0, number("attack", 0.001));
+            cfg.decay = std::max(0.0, number("decay", 0.1));
+            cfg.sustain = juce::jlimit(0.0, 1.0, number("sustain", 0.0));
+            cfg.release = std::max(0.0, number("release", 0.1));
+            cfg.downbeatVel = juce::jlimit(0.0, 1.0, number("downbeatVel", 1.0));
+            cfg.upbeatVel = juce::jlimit(0.0, 1.0, number("upbeatVel", 0.65));
+            if (m->hasProperty("downbeatPitch")) cfg.downbeatPitch = m->getProperty("downbeatPitch").toString();
+            if (m->hasProperty("upbeatPitch")) cfg.upbeatPitch = m->getProperty("upbeatPitch").toString();
+        }
+
+        if (job.totalDurationSeconds <= 0.0 || (job.events.isEmpty() && !job.metronome.enabled))
+        {
+            error = "Nothing to render";
+            return false;
+        }
+        return true;
+    }
 }
 
 JuceBridge::JuceBridge(AudioEngine& engine)
@@ -171,12 +231,18 @@ juce::WebBrowserComponent::Options JuceBridge::setupOptions(juce::WebBrowserComp
         .withNativeFunction("save-midi", [this](auto& args, auto comp) { handleSaveMidi(args, comp); })
         .withNativeFunction("save-file", [this](auto& args, auto comp) { handleSaveFile(args, comp); })
         .withNativeFunction("render-audio", [this](auto& args, auto comp) { handleRenderAudio(args, comp); })
+        .withNativeFunction("render-audio-temp", [this](auto& args, auto comp) { handleRenderAudioTemp(args, comp); })
+        .withNativeFunction("release-native-render", [this](auto& args, auto comp) { handleReleaseNativeRender(args, comp); })
         .withNativeFunction("show-open-dialog", [this](auto& args, auto comp) { handleShowOpenDialog(args, comp); })
         .withNativeFunction("toggle-fullscreen", [this](auto& args, auto comp) { handleToggleFullscreen(args, comp); })
         .withNativeFunction("is-fullscreen", [this](auto& args, auto comp) { handleIsFullscreen(args, comp); })
         .withNativeFunction("audioCommand", [this](auto& args, auto comp) { handleAudioCommand(args, comp); })
         .withNativeFunction("vst3-scan", [this](auto& args, auto comp) { handleVst3Scan(args, comp); })
         .withNativeFunction("vst3-get-plugins", [this](auto& args, auto comp) { handleVst3GetPlugins(args, comp); })
+        .withNativeFunction("vst3-track-parameters", [this](auto& args, auto comp) {
+            if (args.isEmpty()) { comp(juce::Array<juce::var>()); return; }
+            comp(audioEngine.getTrackVst3Parameters(args[0].toString()));
+        })
         .withNativeFunction("vst3-open-editor", [this](auto& args, auto comp) { handleVst3OpenEditor(args, comp); });
 }
 
@@ -454,49 +520,8 @@ void JuceBridge::handleRenderAudio(const juce::Array<juce::var>& args, juce::Web
     if (activeRenders.load(std::memory_order_acquire) > 0) { fail("A render is already running"); return; }
 
     OfflineRenderer::RenderJob job;
-    job.sampleRate = obj->hasProperty("sampleRate") ? (double)obj->getProperty("sampleRate") : 44100.0;
-    job.bitDepth = obj->hasProperty("bitDepth") ? (int)obj->getProperty("bitDepth") : 24;
-    job.totalDurationSeconds = obj->hasProperty("durationSeconds") ? (double)obj->getProperty("durationSeconds") : 10.0;
-    job.normalize = obj->hasProperty("normalize") ? (bool)obj->getProperty("normalize") : true;
-    job.normalizeTargetDb = obj->hasProperty("normalizeTargetDb") ? (double)obj->getProperty("normalizeTargetDb") : -1.0;
-    job.autoFade = obj->hasProperty("autoFade") ? (bool)obj->getProperty("autoFade") : true;
-    job.fadeSeconds = obj->hasProperty("fadeSeconds") ? (double)obj->getProperty("fadeSeconds") : 0.5;
-
-    if (auto* arr = obj->getProperty("events").getArray())
-        for (const auto& ev : *arr) job.events.add(ev);
-    if (auto* overrides = obj->getProperty("trackOverrides").getArray())
-        for (const auto& ov : *overrides) job.trackOverrides.add(ov);
-
-    if (auto* m = obj->getProperty("metronome").getDynamicObject())
-    {
-        auto number = [m](const char* key, double fallback) {
-            return m->hasProperty(key) ? (double)m->getProperty(key) : fallback;
-        };
-
-        auto& cfg = job.metronome;
-        cfg.enabled = true;
-        cfg.bpm = std::max(1.0, number("bpm", 120.0));
-        cfg.startTick = std::max(0.0, number("startTick", 0.0));
-        cfg.beatsPerMeasure = std::max(1, (int)number("beatsPerMeasure", 4.0));
-        cfg.metronomeVolume = juce::jlimit(0.0, 1.0, number("metronomeVolume", 1.0));
-        cfg.gainDb = number("gainDb", 0.0);
-        cfg.pitchDecay = std::max(0.0, number("pitchDecay", 0.01));
-        cfg.octaves = std::max(1.0, number("octaves", 2.0));
-        cfg.attack = std::max(0.0, number("attack", 0.001));
-        cfg.decay = std::max(0.0, number("decay", 0.1));
-        cfg.sustain = juce::jlimit(0.0, 1.0, number("sustain", 0.0));
-        cfg.release = std::max(0.0, number("release", 0.1));
-        cfg.downbeatVel = juce::jlimit(0.0, 1.0, number("downbeatVel", 1.0));
-        cfg.upbeatVel = juce::jlimit(0.0, 1.0, number("upbeatVel", 0.65));
-        if (m->hasProperty("downbeatPitch")) cfg.downbeatPitch = m->getProperty("downbeatPitch").toString();
-        if (m->hasProperty("upbeatPitch")) cfg.upbeatPitch = m->getProperty("upbeatPitch").toString();
-    }
-
-    if (job.totalDurationSeconds <= 0.0 || (job.events.isEmpty() && !job.metronome.enabled))
-    {
-        fail("Nothing to render");
-        return;
-    }
+    juce::String parseError;
+    if (!parseRenderJob(parsed, job, parseError)) { fail(parseError); return; }
 
     juce::String defaultFilename = obj->hasProperty("filename") ? obj->getProperty("filename").toString() : "export";
     if (!defaultFilename.endsWithIgnoreCase(".wav")) defaultFilename += ".wav";
@@ -524,6 +549,69 @@ void JuceBridge::handleRenderAudio(const juce::Array<juce::var>& args, juce::Web
             renderPool.addJob(new OfflineRenderJob(job, audioEngine, liveRate, liveBlock,
                                                    job.outputFile.getFullPathName(), complete, activeRenders), true);
         });
+}
+
+// Renders to a private temp WAV instead of a user-chosen file. The web layer fetches it
+// through the resource provider, encodes MP3 or stitches regions, then releases it.
+void JuceBridge::handleRenderAudioTemp(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete)
+{
+    auto fail = [&complete](const juce::String& message) {
+        juce::DynamicObject::Ptr res = new juce::DynamicObject();
+        res->setProperty("success", false);
+        res->setProperty("message", message);
+        complete(juce::var(res.get()));
+    };
+
+    if (args.isEmpty()) { fail("Missing render payload"); return; }
+    if (activeRenders.load(std::memory_order_acquire) > 0) { fail("A render is already running"); return; }
+
+    OfflineRenderer::RenderJob job;
+    juce::String parseError;
+    if (!parseRenderJob(args[0], job, parseError)) { fail(parseError); return; }
+
+    auto tempDir = renderTempDir();
+    tempDir.createDirectory();
+
+    // A crashed session can leave renders behind; anything older than an hour is stale.
+    const auto cutoff = juce::Time::getCurrentTime() - juce::RelativeTime::hours(1);
+    for (const auto& entry : juce::RangedDirectoryIterator(tempDir, false, "*.wav"))
+        if (entry.getFile().getLastModificationTime() < cutoff)
+            entry.getFile().deleteFile();
+
+    const juce::String name = "render-" + juce::String(juce::Time::currentTimeMillis()) + "-"
+        + juce::String(juce::Random::getSystemRandom().nextInt(100000)) + ".wav";
+    auto outFile = tempDir.getChildFile(name);
+    job.outputFile = outFile;
+
+    auto* device = audioEngine.getDeviceManager().getCurrentAudioDevice();
+    const double liveRate = device != nullptr ? device->getCurrentSampleRate() : audioEngine.getSampleRate();
+    const int liveBlock = device != nullptr ? device->getCurrentBufferSizeSamples() : 512;
+
+    const juce::String url = "/musegrid-render/" + name;
+    const juce::String path = outFile.getFullPathName();
+
+    activeRenders.fetch_add(1, std::memory_order_acq_rel);
+    renderPool.addJob(new OfflineRenderJob(job, audioEngine, liveRate, liveBlock, path,
+        [complete, url, path](juce::var payload) {
+            if (auto* obj = payload.getDynamicObject())
+            {
+                obj->setProperty("url", url);
+                if (!(bool)obj->getProperty("success"))
+                    juce::File(path).deleteFile();
+            }
+            complete(payload);
+        }, activeRenders), true);
+}
+
+void JuceBridge::handleReleaseNativeRender(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete)
+{
+    if (!args.isEmpty())
+    {
+        auto file = juce::File(args[0].toString());
+        if (file.isAChildOf(renderTempDir()))
+            file.deleteFile();
+    }
+    complete(true);
 }
 
 void JuceBridge::handleShowOpenDialog(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete)
@@ -814,11 +902,22 @@ void JuceBridge::handleAudioCommand(const juce::Array<juce::var>& args, juce::We
         complete(true);
         return;
     }
+    else if (type == "setTrackVst3Parameter")
+    {
+        const juce::String trackId = obj->getProperty("trackId").toString();
+        const int index = (int)obj->getProperty("index");
+        const float value = (float)(double)obj->getProperty("value");
+        const float rampSeconds = (float)(double)obj->getProperty("rampSeconds");
+        audioEngine.setTrackVst3Parameter(trackId, index, value, rampSeconds);
+        complete(true);
+        return;
+    }
     else if (type == "ensureNoteVst3Instrument")
     {
         const juce::String trackId = obj->getProperty("trackId").toString();
         const juce::String pluginId = obj->getProperty("pluginId").toString();
-        bool ok = audioEngine.ensureNoteVst3Instrument(trackId, pluginId);
+        const juce::String instanceKey = obj->getProperty("instanceKey").toString();
+        bool ok = audioEngine.ensureNoteVst3Instrument(trackId, pluginId, instanceKey);
         complete(ok);
         return;
     }
@@ -829,10 +928,25 @@ void JuceBridge::handleAudioCommand(const juce::Array<juce::var>& args, juce::We
         complete(true);
         return;
     }
+    else if (type == "pruneNoteVst3Instruments")
+    {
+        const juce::String trackId = obj->getProperty("trackId").toString();
+        audioEngine.pruneNoteVst3Instruments(trackId, obj->getProperty("instanceKeys"));
+        complete(true);
+        return;
+    }
     else if (type == "openTrackVst3InstrumentEditor")
     {
         const juce::String trackId = obj->getProperty("trackId").toString();
         audioEngine.openTrackVst3InstrumentEditor(trackId);
+        complete(true);
+        return;
+    }
+    else if (type == "openNoteVst3InstrumentEditor")
+    {
+        const juce::String trackId = obj->getProperty("trackId").toString();
+        const juce::String instanceKey = obj->getProperty("instanceKey").toString();
+        audioEngine.openNoteVst3InstrumentEditor(trackId, instanceKey);
         complete(true);
         return;
     }

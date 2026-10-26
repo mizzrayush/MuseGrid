@@ -918,9 +918,14 @@ void AudioEngine::pruneNoteFxChains(const juce::String& trackId, const juce::var
         for (auto it = t->noteVst3Slots.begin(); it != t->noteVst3Slots.end();)
         {
             if ((*it)->fxChainId != 0 && active.count((*it)->fxChainId) == 0)
+            {
+                (*it)->editorWindow.reset();
                 it = t->noteVst3Slots.erase(it);
+            }
             else
+            {
                 ++it;
+            }
         }
         break;
     }
@@ -1064,6 +1069,55 @@ static float samplePitchCurve(const std::array<float, musegrid::NoteExpression::
     const int i1 = juce::jmin(i0 + 1, size - 1);
     const float frac = pos - (float)i0;
     return curve[(size_t)i0] * (1.0f - frac) + curve[(size_t)i1] * frac;
+}
+
+/**
+ * Applies queued host-automation writes to the track's VST3 instrument. Runs on the audio
+ * thread so plugin parameters are only touched from the thread that processes them.
+ */
+static void applyPendingVst3Parameters(TrackState& track, int numSamples)
+{
+    if (track.vst3Instrument == nullptr)
+    {
+        track.pendingVst3Params.clear();
+        track.vst3ParamRamps.clear();
+        return;
+    }
+
+    auto& params = track.vst3Instrument->getParameters();
+
+    for (const auto& target : track.pendingVst3Params)
+    {
+        if (target.index < 0 || target.index >= params.size()) continue;
+        auto* param = params[target.index];
+        if (param == nullptr) continue;
+
+        const float value = juce::jlimit(0.0f, 1.0f, target.value);
+        for (auto it = track.vst3ParamRamps.begin(); it != track.vst3ParamRamps.end();)
+        {
+            if (it->index == target.index) it = track.vst3ParamRamps.erase(it);
+            else ++it;
+        }
+
+        if (target.rampSamples > 0)
+            track.vst3ParamRamps.push_back({ target.index, param->getValue(), value, target.rampSamples, 0 });
+        else
+            param->setValueNotifyingHost(value);
+    }
+    track.pendingVst3Params.clear();
+
+    for (auto it = track.vst3ParamRamps.begin(); it != track.vst3ParamRamps.end();)
+    {
+        it->elapsedSamples += numSamples;
+        const float progress = juce::jlimit(0.0f, 1.0f,
+            (float)it->elapsedSamples / (float)juce::jmax(1, it->totalSamples));
+        if (it->index >= 0 && it->index < params.size())
+            if (auto* param = params[it->index])
+                param->setValueNotifyingHost(it->startValue + (it->targetValue - it->startValue) * progress);
+
+        if (progress >= 1.0f) it = track.vst3ParamRamps.erase(it);
+        else ++it;
+    }
 }
 
 /**
@@ -1367,11 +1421,24 @@ void AudioEngine::playNote(const juce::String& trackId,
         {
             TrackState::NoteVst3Slot* slot = nullptr;
             for (auto& s : targetTrack->noteVst3Slots)
-                if (s->identifier == expression.overrideValue
-                    && s->fxChainId == expression.fxChainId
-                    && s->plugin != nullptr) { slot = s.get(); break; }
+            {
+                if (s->identifier != expression.overrideValue || s->plugin == nullptr) continue;
+                if (expression.instanceKey.isNotEmpty())
+                {
+                    // One instance per note: the key alone identifies the slot, and the
+                    // chain follows the note if its per-note FX rack changes.
+                    if (s->instanceKey != expression.instanceKey) continue;
+                    s->fxChainId = expression.fxChainId;
+                }
+                else if (!s->instanceKey.isEmpty() || s->fxChainId != expression.fxChainId)
+                {
+                    continue;
+                }
+                slot = s.get();
+                break;
+            }
 
-            if (slot == nullptr && expression.fxChainId != 0)
+            if (slot == nullptr && (expression.instanceKey.isNotEmpty() || expression.fxChainId != 0))
             {
                 juce::String errorMsg;
                 auto plugin = vst3Host.instantiatePlugin(expression.overrideValue, currentSampleRate,
@@ -1388,6 +1455,7 @@ void AudioEngine::playNote(const juce::String& trackId,
                     auto newSlot = std::make_unique<TrackState::NoteVst3Slot>();
                     newSlot->identifier = expression.overrideValue;
                     newSlot->name = plugin->getName();
+                    newSlot->instanceKey = expression.instanceKey;
                     newSlot->fxChainId = expression.fxChainId;
                     newSlot->plugin = std::move(plugin);
                     slot = newSlot.get();
@@ -1395,7 +1463,7 @@ void AudioEngine::playNote(const juce::String& trackId,
                 }
                 else
                 {
-                    juce::Logger::writeToLog("[AudioEngine] Per-note FX VST3 slot failed: " + errorMsg);
+                    juce::Logger::writeToLog("[AudioEngine] Per-note VST3 slot failed: " + errorMsg);
                 }
             }
 
@@ -1521,6 +1589,7 @@ void AudioEngine::playNote(const juce::String& trackId,
             TrackState::NoteVst3Slot* slot = nullptr;
             for (auto& s : targetTrack->noteVst3Slots)
                 if (s->identifier == identifier && s->fxChainId == expression.fxChainId
+                    && s->instanceKey.isEmpty()
                     && s->plugin != nullptr) { slot = s.get(); break; }
 
             if (slot == nullptr && identifier.isNotEmpty())
@@ -1901,6 +1970,9 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
                 renderVst3Glides(t->pitchGlides, midiForBlock, numSamples);
                 renderVst3VolumeFades(t->volumeFades, midiForBlock, numSamples);
             }
+
+            applyPendingVst3Parameters(*t, numSamples);
+
             int outCh = t->vst3Instrument->getTotalNumOutputChannels();
             int inCh = t->vst3Instrument->getTotalNumInputChannels();
             int reqCh = std::max({ 2, inCh, outCh });
@@ -2380,6 +2452,8 @@ bool AudioEngine::setTrackVst3Instrument(const juce::String& trackId, const juce
                 return true;
 
             targetTrack->vst3InstrumentEditor = nullptr;
+            targetTrack->pendingVst3Params.clear();
+            targetTrack->vst3ParamRamps.clear();
             targetTrack->vst3Instrument = std::move(inst);
             targetTrack->vst3InstrumentIdentifier = pluginIdentifier;
             targetTrack->vst3InstrumentName = targetTrack->vst3Instrument->getName();
@@ -2391,6 +2465,60 @@ bool AudioEngine::setTrackVst3Instrument(const juce::String& trackId, const juce
         }
     }
     return false;
+}
+
+juce::var AudioEngine::getTrackVst3Parameters(const juce::String& trackId)
+{
+    juce::Array<juce::var> out;
+    std::lock_guard<std::recursive_mutex> lock(trackMutex);
+    for (auto& t : tracks)
+    {
+        if (t->id != trackId) continue;
+        if (t->vst3Instrument == nullptr) break;
+
+        int index = 0;
+        for (auto* param : t->vst3Instrument->getParameters())
+        {
+            if (param == nullptr) { ++index; continue; }
+
+            auto* obj = new juce::DynamicObject();
+            obj->setProperty("index", index);
+            obj->setProperty("name", param->getName(96));
+            obj->setProperty("label", param->getLabel());
+            obj->setProperty("value", (double)param->getValue());
+            obj->setProperty("valueText", param->getText(param->getValue(), 32));
+
+            if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*>(param))
+            {
+                const auto& range = ranged->getNormalisableRange();
+                obj->setProperty("min", (double)range.start);
+                obj->setProperty("max", (double)range.end);
+                obj->setProperty("default", (double)range.convertFrom0to1(ranged->getDefaultValue()));
+                obj->setProperty("discrete", range.interval > 0.0f);
+            }
+
+            out.add(juce::var(obj));
+            ++index;
+        }
+        break;
+    }
+    return juce::var(out);
+}
+
+void AudioEngine::setTrackVst3Parameter(const juce::String& trackId, int index, float value, float rampSeconds)
+{
+    std::lock_guard<std::recursive_mutex> lock(trackMutex);
+    for (auto& t : tracks)
+    {
+        if (t->id != trackId) continue;
+        const int samples = rampSeconds > 0.0f
+            ? juce::jmax(1, (int)(rampSeconds * (float)currentSampleRate)) : 0;
+        // A stalled audio device must not let the UI queue grow without bound.
+        if (t->pendingVst3Params.size() > 512)
+            t->pendingVst3Params.erase(t->pendingVst3Params.begin());
+        t->pendingVst3Params.push_back({ index, juce::jlimit(0.0f, 1.0f, value), samples });
+        break;
+    }
 }
 
 void AudioEngine::removeTrackVst3Instrument(const juce::String& trackId)
@@ -2406,6 +2534,8 @@ void AudioEngine::removeTrackVst3Instrument(const juce::String& trackId)
                 t->pitchGlides.clear();
                 t->volumeFades.clear();
             }
+            t->pendingVst3Params.clear();
+            t->vst3ParamRamps.clear();
             t->vst3InstrumentEditor = nullptr;
             t->vst3Instrument = nullptr;
             t->vst3InstrumentIdentifier = "";
@@ -2419,7 +2549,8 @@ void AudioEngine::removeTrackVst3Instrument(const juce::String& trackId)
     }
 }
 
-bool AudioEngine::ensureNoteVst3Instrument(const juce::String& trackId, const juce::String& pluginIdentifier)
+bool AudioEngine::ensureNoteVst3Instrument(const juce::String& trackId, const juce::String& pluginIdentifier,
+                                            const juce::String& instanceKey)
 {
     if (pluginIdentifier.isEmpty()) return false;
 
@@ -2429,7 +2560,8 @@ bool AudioEngine::ensureNoteVst3Instrument(const juce::String& trackId, const ju
         {
             if (t->id != trackId) continue;
             for (auto& slot : t->noteVst3Slots)
-                if (slot->identifier == pluginIdentifier && slot->plugin != nullptr)
+                if (slot->identifier == pluginIdentifier && slot->instanceKey == instanceKey
+                    && slot->plugin != nullptr)
                     return true;
             break;
         }
@@ -2460,15 +2592,18 @@ bool AudioEngine::ensureNoteVst3Instrument(const juce::String& trackId, const ju
     if (targetTrack == nullptr) return false;
 
     for (auto& slot : targetTrack->noteVst3Slots)
-        if (slot->identifier == pluginIdentifier && slot->plugin != nullptr)
+        if (slot->identifier == pluginIdentifier && slot->instanceKey == instanceKey
+            && slot->plugin != nullptr)
             return true;
 
     auto slot = std::make_unique<TrackState::NoteVst3Slot>();
     slot->identifier = pluginIdentifier;
     slot->name = inst->getName();
+    slot->instanceKey = instanceKey;
     slot->plugin = std::move(inst);
     targetTrack->noteVst3Slots.push_back(std::move(slot));
-    juce::Logger::writeToLog("[AudioEngine] Loaded per-note VST3: " + pluginIdentifier);
+    juce::Logger::writeToLog("[AudioEngine] Loaded per-note VST3: " + pluginIdentifier
+                             + (instanceKey.isNotEmpty() ? " (" + instanceKey + ")" : ""));
     return true;
 }
 
@@ -2485,8 +2620,37 @@ void AudioEngine::releaseNoteVst3Instruments(const juce::String& trackId)
             slot->scheduledNoteOffs.clear();
             slot->pitchGlides.clear();
             slot->volumeFades.clear();
+            slot->editorWindow.reset();
         }
         t->noteVst3Slots.clear();
+        break;
+    }
+}
+
+void AudioEngine::pruneNoteVst3Instruments(const juce::String& trackId, const juce::var& activeInstanceKeys)
+{
+    std::set<juce::String> active;
+    if (auto* arr = activeInstanceKeys.getArray())
+        for (const auto& key : *arr)
+            active.insert(key.toString());
+
+    std::lock_guard<std::recursive_mutex> lock(trackMutex);
+    for (auto& t : tracks)
+    {
+        if (t->id != trackId) continue;
+        for (auto it = t->noteVst3Slots.begin(); it != t->noteVst3Slots.end();)
+        {
+            // Only per-note slots are pruned; chain-keyed slots follow pruneNoteFxChains.
+            if ((*it)->instanceKey.isNotEmpty() && active.count((*it)->instanceKey) == 0)
+            {
+                (*it)->editorWindow.reset();
+                it = t->noteVst3Slots.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
         break;
     }
 }
@@ -2543,6 +2707,69 @@ void AudioEngine::openTrackVst3InstrumentEditor(const juce::String& trackId)
                     return;
                 }
             }
+        }
+    });
+}
+
+void AudioEngine::openNoteVst3InstrumentEditor(const juce::String& trackId, const juce::String& instanceKey)
+{
+    if (instanceKey.isEmpty()) return;
+
+    juce::MessageManager::callAsync([this, trackId, instanceKey]() {
+        juce::AudioPluginInstance* instPtr = nullptr;
+        juce::String title;
+        {
+            std::lock_guard<std::recursive_mutex> lock(trackMutex);
+            for (auto& t : tracks)
+            {
+                if (t->id != trackId) continue;
+                for (auto& s : t->noteVst3Slots)
+                {
+                    if (s->instanceKey != instanceKey || s->plugin == nullptr) continue;
+                    if (s->editorWindow != nullptr)
+                    {
+                        s->editorWindow->setVisible(true);
+                        s->editorWindow->toFront(true);
+                        return;
+                    }
+                    instPtr = s->plugin.get();
+                    title = s->name.isNotEmpty() ? s->name : "VST3 Note Instrument";
+                    break;
+                }
+                break;
+            }
+        }
+
+        if (instPtr == nullptr) return;
+
+        auto newWin = std::make_unique<Vst3PluginWindow>(
+            instPtr,
+            title,
+            [this, trackId, instanceKey]() {
+                juce::MessageManager::callAsync([this, trackId, instanceKey]() {
+                    std::lock_guard<std::recursive_mutex> lock(trackMutex);
+                    for (auto& trk : tracks)
+                    {
+                        if (trk->id != trackId) continue;
+                        for (auto& s : trk->noteVst3Slots)
+                            if (s->instanceKey == instanceKey) { s->editorWindow.reset(); return; }
+                        return;
+                    }
+                });
+            }
+        );
+
+        std::lock_guard<std::recursive_mutex> lock(trackMutex);
+        for (auto& t : tracks)
+        {
+            if (t->id != trackId) continue;
+            for (auto& s : t->noteVst3Slots)
+                if (s->instanceKey == instanceKey && s->plugin.get() == instPtr)
+                {
+                    s->editorWindow = std::move(newWin);
+                    return;
+                }
+            return;
         }
     });
 }

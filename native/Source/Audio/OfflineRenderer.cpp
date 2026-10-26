@@ -276,6 +276,16 @@ void OfflineRenderer::dispatchNoteOn(AudioEngine& engine, const juce::var& comma
     auto* obj = command.getDynamicObject();
     if (obj == nullptr) return;
 
+    // Automation writes share the event stream so they land at sample-accurate times.
+    if (obj->getProperty("type").toString() == "vst3Param")
+    {
+        engine.setTrackVst3Parameter(obj->getProperty("trackId").toString(),
+                                     (int)readFloat(obj, "index", 0.0f),
+                                     readFloat(obj, "value", 0.0f),
+                                     readFloat(obj, "rampSeconds", 0.0f));
+        return;
+    }
+
     musegrid::NoteExpression expression;
     readCurve(obj, "slideCurve", expression.slideCurve, expression.slideCurveSize);
     readCurve(obj, "filterCurve", expression.filterCurve, expression.filterCurveSize);
@@ -292,6 +302,8 @@ void OfflineRenderer::dispatchNoteOn(AudioEngine& engine, const juce::var& comma
         expression.overrideKind = obj->getProperty("overrideKind").toString();
     if (obj->hasProperty("overrideValue"))
         expression.overrideValue = obj->getProperty("overrideValue").toString();
+    if (obj->hasProperty("instanceKey"))
+        expression.instanceKey = obj->getProperty("instanceKey").toString();
 
     const auto trackId = obj->getProperty("trackId").toString();
     if (obj->hasProperty("fxChainId"))
@@ -404,10 +416,11 @@ OfflineRenderer::Result OfflineRenderer::renderToFile(const RenderJob& job, Audi
             if (obj->getProperty("overrideKind").toString() != "vst3") continue;
             const juce::String trackId = obj->getProperty("trackId").toString();
             const juce::String pluginId = obj->getProperty("overrideValue").toString();
-            const juce::String key = trackId + "::" + pluginId;
+            const juce::String instanceKey = obj->getProperty("instanceKey").toString();
+            const juce::String key = trackId + "::" + pluginId + "::" + instanceKey;
             if (loaded.count(key) > 0) continue;
             loaded.insert(key);
-            engine.ensureNoteVst3Instrument(trackId, pluginId);
+            engine.ensureNoteVst3Instrument(trackId, pluginId, instanceKey);
         }
     }
 

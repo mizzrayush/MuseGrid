@@ -67,7 +67,7 @@ export interface AutomationPoint {
 }
 
 /** What the track's automation lane drives. Values are still 1..127 in the lane. */
-export type AutomationTarget = 'velocity' | 'volume' | 'pan'
+export type AutomationTarget = 'velocity' | 'volume' | 'pan' | `vst3:${number}`
 
 export function deduplicateNotes(notesList: Note[]): Note[] {
   if (!notesList || notesList.length === 0) return []
@@ -1717,6 +1717,8 @@ if (firstTrack) {
       const newTracks = state.tracks.filter(t => t.id !== id)
       const automationCurves = { ...state.automationCurves }
       delete automationCurves[id]
+      const automationTargets = { ...state.automationTargets }
+      delete automationTargets[id]
       const newSelected = state.selectedTrackIds.filter(tid => tid !== id)
       const newActive = state.activeTrackId === id ? (newTracks[0]?.id || null) : state.activeTrackId
       return {
@@ -1727,6 +1729,7 @@ if (firstTrack) {
           ? { ...g, trackIds: g.trackIds.filter(tid => tid !== id) }
           : g),
         automationCurves,
+        automationTargets,
         selectedTrackIds: newSelected,
         activeTrackId: newActive
       }
@@ -1735,7 +1738,11 @@ if (firstTrack) {
       const idSet = new Set(ids)
       const newTracks = state.tracks.filter(t => !idSet.has(t.id))
       const automationCurves = { ...state.automationCurves }
-      ids.forEach(id => delete automationCurves[id])
+      const automationTargets = { ...state.automationTargets }
+      ids.forEach(id => {
+        delete automationCurves[id]
+        delete automationTargets[id]
+      })
       const newSelected = state.selectedTrackIds.filter(tid => !idSet.has(tid))
       let newActive = state.activeTrackId
       if (newActive && idSet.has(newActive)) {
@@ -1749,6 +1756,7 @@ if (firstTrack) {
           ? { ...g, trackIds: g.trackIds.filter(tid => !idSet.has(tid)) }
           : g),
         automationCurves,
+        automationTargets,
         selectedTrackIds: newSelected,
         activeTrackId: newActive
       }
@@ -1763,6 +1771,7 @@ if (firstTrack) {
       const copiedNotes: Note[] = []
       const copiedClips: Clip[] = []
       const newAutomationCurves = { ...state.automationCurves }
+      const newAutomationTargets = { ...state.automationTargets }
 
       state.tracks.forEach(track => {
         newTracks.push(track)
@@ -1815,6 +1824,10 @@ if (firstTrack) {
           if (state.automationCurves[track.id]) {
             newAutomationCurves[newTrackId] = JSON.parse(JSON.stringify(state.automationCurves[track.id]))
           }
+          // A duplicated lane must mean the same thing as the lane it came from.
+          if (state.automationTargets[track.id]) {
+            newAutomationTargets[newTrackId] = state.automationTargets[track.id]
+          }
         }
       })
 
@@ -1825,6 +1838,7 @@ if (firstTrack) {
         notes: [...state.notes, ...copiedNotes],
         clips: [...state.clips, ...copiedClips],
         automationCurves: newAutomationCurves,
+        automationTargets: newAutomationTargets,
         selectedTrackIds: duplicatedIds,
         activeTrackId: duplicatedIds[duplicatedIds.length - 1] || null
       }

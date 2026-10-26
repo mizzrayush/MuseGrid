@@ -1560,7 +1560,7 @@ export const ScriptAPI = {
         const text = await selectedFile.text();
         const parsed = JSON.parse(text);
         audioEngine.resetForNewProject();
-        useStore.getState().loadState(parsed);
+        useStore.getState().loadState({ ...parsed, automationTargets: parsed.automationTargets ?? {} });
       } catch (e) {
         console.error('Failed to load project via script:', e);
         throw e;

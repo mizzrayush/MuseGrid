@@ -4,8 +4,9 @@ import { IconPin, IconPlus, IconTrash, IconChevronLeft, IconMusic, IconDrum, Ico
 import { useContextMenuDismissal } from '../ui/useContextMenuDismissal'
 import { useStore, DEFAULT_DRUM_ROWS } from '../engine/store'
 import { audioEngine } from '../engine/AudioEngine'
+import type { Vst3ParameterInfo } from '../engine/AudioEngine'
 import { isInScale, snapToScale, snapTick, NOTE_NAMES_SHARP, NOTE_NAMES_FLAT, CHORD_STAMPS, getDiatonicChord, detectScaleDegree } from '../utils/musicTheory'
-import { getAutomationValueAtTick, sortAutomationPoints } from '../utils/automation'
+import { getAutomationValueAtTick, laneNeutralValue, sortAutomationPoints } from '../utils/automation'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET } from '../utils/instruments'
 import {
   applyLegato,
@@ -346,6 +347,10 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
     else setShowSynthVelocity(newVal)
   }
   const [dragAutomationPointId, setDragAutomationPointId] = useState<string | null>(null)
+  const [vst3Params, setVst3Params] = useState<Vst3ParameterInfo[]>([])
+  const vst3ParamTrackKey = currentTrack?.vst3InstrumentId ? `${currentTrack.id}:${currentTrack.vst3InstrumentId}` : ''
+  const vst3TargetIndex = automationTarget.startsWith('vst3:') ? Number(automationTarget.slice(5)) : -1
+  const vst3TargetParam = vst3TargetIndex >= 0 ? vst3Params.find(p => p.index === vst3TargetIndex) : undefined
   const [dragVelocityNoteId, setDragVelocityNoteId] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tick: number; mode: 'main' | 'subtrack_parent' | 'glide' } | null>(null)
   const [glideMenu, setGlideMenu] = useState<GlideChainOptions>({
@@ -558,6 +563,20 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
     observer.observe(containerRef.current)
     return () => observer.disconnect()
   }, [])
+
+  // A track with a VST3 instrument exposes its plugin parameters as lane targets.
+  useEffect(() => {
+    const trackId = currentTrack?.id
+    if (!vst3ParamTrackKey || !trackId || !currentTrack?.vst3InstrumentId) {
+      setVst3Params([])
+      return
+    }
+    let cancelled = false
+    audioEngine.getTrackVst3Parameters(trackId).then(list => {
+      if (!cancelled) setVst3Params(list)
+    })
+    return () => { cancelled = true }
+  }, [vst3ParamTrackKey, showAutomation, currentTrack?.id, currentTrack?.vst3InstrumentId])
 
   // Synchronize local pan.x with sharedPanX if scrollBoth is enabled
   useEffect(() => {
@@ -2102,9 +2121,12 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
       )
 
       if (points.length === 0) {
+        // The dashed baseline is the value the lane holds when untouched: the old 100
+        // default for velocity, unity gain for volume, dead centre for pan.
+        const baselineValue = laneNeutralValue(laneTarget, 100)
         ctx.beginPath()
-        ctx.moveTo(0, canvasHeight - (100 / 127) * canvasHeight)
-        ctx.lineTo(tickToX(maxTick), canvasHeight - (100 / 127) * canvasHeight)
+        ctx.moveTo(0, canvasHeight - (baselineValue / 127) * canvasHeight)
+        ctx.lineTo(tickToX(maxTick), canvasHeight - (baselineValue / 127) * canvasHeight)
         ctx.strokeStyle = 'rgba(255,255,255,0.18)'
         ctx.lineWidth = 1 / zoom
         ctx.setLineDash([5 / zoom, 5 / zoom])
@@ -3576,8 +3598,13 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
             }}
             onClick={() => setShowAutomation(prev => !prev)}
           >
-            <span>{automationTarget === 'velocity' ? 'Velocity' : automationTarget === 'volume' ? 'Volume' : 'Pan'} Automation</span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {automationTarget === 'velocity' ? 'Velocity'
+                : automationTarget === 'volume' ? 'Volume'
+                : automationTarget === 'pan' ? 'Pan'
+                : `VST3 · ${vst3TargetParam?.name ?? `#${vst3TargetIndex + 1}`}`} Automation
+            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
               {(['velocity', 'volume', 'pan'] as const).map(t => (
                 <button
                   key={t}
@@ -3599,6 +3626,40 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                   {t === 'velocity' ? 'Velocity' : t === 'volume' ? 'Volume' : 'Pan'}
                 </button>
               ))}
+              {vst3Params.length > 0 && (
+                <select
+                  value={vst3TargetIndex >= 0 ? String(vst3TargetIndex) : ''}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => {
+                    e.stopPropagation()
+                    if (e.currentTarget.value !== '') {
+                      setAutomationTarget(targetTrackId, `vst3:${Number(e.currentTarget.value)}`)
+                    }
+                  }}
+                  title="Automate a VST3 parameter"
+                  style={{
+                    padding: '3px 6px',
+                    borderRadius: '4px',
+                    border: `1px solid ${vst3TargetIndex >= 0 ? 'rgba(77,171,247,0.45)' : 'rgba(255,255,255,0.07)'}`,
+                    background: vst3TargetIndex >= 0 ? 'rgba(77,171,247,0.16)' : 'rgba(255,255,255,0.03)',
+                    color: vst3TargetIndex >= 0 ? '#4dabf7' : '#8a8a95',
+                    fontSize: '9px',
+                    fontWeight: 700,
+                    textTransform: 'none',
+                    letterSpacing: 0,
+                    cursor: 'pointer',
+                    lineHeight: 1.2,
+                    maxWidth: '150px'
+                  }}
+                >
+                  <option value="">VST3 Param…</option>
+                  {vst3Params.map(p => (
+                    <option key={p.index} value={String(p.index)} style={{ background: '#12141c', color: '#e0e0e0' }}>
+                      {p.name || `Param ${p.index + 1}`}
+                    </option>
+                  ))}
+                </select>
+              )}
               <span style={{ marginLeft: '6px' }}>{showAutomation ? '▼' : '▲'}</span>
             </div>
           </div>

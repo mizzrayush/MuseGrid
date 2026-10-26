@@ -31,6 +31,8 @@ private:
     void handleSaveMidi(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
     void handleSaveFile(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
     void handleRenderAudio(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
+    void handleRenderAudioTemp(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
+    void handleReleaseNativeRender(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
     void handleShowOpenDialog(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
     void handleToggleFullscreen(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
     void handleIsFullscreen(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);

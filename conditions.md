@@ -1638,22 +1638,24 @@ one bar at a slow tempo. Both were UI-only limits — the engines already accept
 
 ### 19.9 Limits that remain (honest list)
 
+> §20 rectified four of these. The entries below are kept as written so the history stays
+> readable; where §20 supersedes one it says so explicitly.
+
 - **VST3 CC mapping is a convention, not a guarantee.** CC7/CC10 are the standard volume/pan
   controllers; a plugin that maps them to something else will respond differently. A plugin that
   ignores RPN 0 and exposes no bend-range parameter keeps its own fixed range, so wide glides clamp.
-- **VST3 parameter automation is still not host-driven.** MuseGrid does not expose a plugin's
-  parameters as automation lanes; the plugin GUI is the way to edit them. The expression fields
-  above are note-level MIDI, not plugin parameters.
-- **Per-note VST3 clones snapshot their state at load time.** Two notes referencing the same plugin
-  identifier share one instance per track; changing a macro inside the plugin affects all notes on
-  that track (a per-note override is a different plugin instance, not a preset fork).
-- **Tone drum preview ignores per-note pan/gain.** The native drum engine applies both
-  (`DrumEngine.cpp:128`–`:131`), but `DrumMachine` triggers each pad into a pre-wired destination
-  and has no per-hit output node, so volume/pan automation on a drum track only affects the native
-  preview/export. Percussion pitch slides do work in Tone (`slideOpts`).
-- **Tone export is an approximation.** MP3 / multi-region / browser exports now contain
-  destination and morph glides (§19.4), but they are rendered by Tone synths, not by the JUCE
-  voices, so timbre and envelope tails differ from the WAV bounce.
+- **VST3 parameter automation was not host-driven.** *(Superseded by §20.3.)* MuseGrid did not
+  expose a plugin's parameters as automation lanes; the plugin GUI was the way to edit them.
+- **Per-note VST3 clones shared one instance per track.** *(Superseded by §20.4.)* Two notes
+  referencing the same plugin identifier used one instance per track; a per-note override was one
+  shared plugin instance, not a preset fork.
+- **Tone drum preview ignored per-note pan/gain.** *(Superseded by §20.2.)* The native drum engine
+  applied both, but `DrumMachine` triggered each pad into a pre-wired destination, so volume/pan
+  automation on a drum track only affected the native preview/export.
+- **Tone export is an approximation.** Native MP3 and multi-region WAV/MP3 now render through JUCE
+  (§20.5). Tone still renders: the browser/Electron build, real-time bounce mode, and exports with
+  script-driven procedural FX enabled. Those files use Tone voices, so timbre and envelope tails
+  can differ from a native WAV bounce.
 - **More than 15 simultaneous gliding notes on one VST3 instance** still reuse channels
   round-robin (§18) and can steal each other's bends. The same applies to 15 simultaneous
   per-note pan/gain notes on one instance.
@@ -1768,4 +1770,318 @@ of this repository's commit. It is preserved as
 `native/patches/juce-webview2-local.patch`; apply it inside `JUCE/` before building on a fresh
 clone if the native shell fails to serve resources. The patch is development tooling only; the
 audio/renderer changes in this pass do not depend on it.
+
+## 20. REMAINING §19.9 LIMITS RECTIFIED — 2026-10-26
+
+§19.9 listed four limits. This pass fixes all four. Verification also exposed a routing defect
+that mattered for parity: Tone's per-track `Channel` folded every track to mono, which made
+per-note pan inaudible and cost 3 dB at centre in both preview and export. Native JUCE is still
+the reference engine; the Tone path now matches it wherever the browser API allows.
+
+### 20.1 What changed, at a glance
+
+| §19.9 item | Status | Where |
+| --- | --- | --- |
+| Tone drum preview ignored per-note pan/gain | Fixed (live + offline) | §20.2 |
+| VST3 parameters were not automation lanes | Fixed (live + offline) | §20.3 |
+| VST3 clones shared one instance per track | Fixed (instance per note) | §20.4 |
+| Tone exports approximated JUCE timbre | Native MP3 + multi-region now render through JUCE | §20.5 |
+| (new) Tone tracks were mono and erased per-note pan | Fixed | §20.6 |
+
+### 20.2 Tone drum per-note pan/gain/fades, and the mono fold
+
+- **Live drum preview.** `DrumMachine.buildOutputChain` ([AudioEngine.ts:720](src/engine/AudioEngine.ts#L720))
+  builds a private per-hit `Tone.Gain` (automation gain + morph fades) followed by a `Tone.Panner`
+  only when the requested pan is non-zero, then feeds the track rack. The old chain always inserted
+  the panner; a centred `Tone.Panner` folds the mono pad to 0.707(−3 dB), which is why a volume
+  lane at 64 previously measured 0.356× a full-velocity hit instead of 0.504×.
+- **Offline drum render.** `triggerDrum` ([audioRender.ts:129](src/utils/audioRender.ts#L129)) does
+  the same: private gain → panner (pan ≠ 0 only) → track input. Both the pad pool and the private
+  clone path (morph A/B hits) route through it, so a hit that needs an output ride is not shared
+  with the pooled voice.
+- **Root cause of the inaudible pan.** `Tone.Channel` wires its `PanVol` through a
+  `StereoPannerNode` with `channelCount = 1`, `channelCountMode = "explicit"`. Every track was
+  therefore downmixed to mono at the channel strip, so a hard-left note arrived at the master on
+  both channels at half level. The fix is a shared helper
+  ([toneChannel.ts:16](src/utils/toneChannel.ts#L16)): a centred strip keeps two channels (unity,
+  stereo preserved); a panned strip keeps the mono equal-power panner. It is used by the live rack
+  ([AudioEngine.ts:3437](src/engine/AudioEngine.ts#L3437), pan updates at
+  [AudioEngine.ts:3918](src/engine/AudioEngine.ts#L3918)) and the offline rack
+  ([audioRender.ts:1366](src/utils/audioRender.ts#L1366)).
+- **Note pan from an automation lane now reaches the hard stops.**
+  `laneValueToPan` ([automation.ts:96](src/utils/automation.ts#L96)) anchors at lane 64:
+  0/1 → −1, 64 → 0, 127 → +1. The old `(lane/127)*2−1` mapping could not reach −1 because lane
+  values are clamped to 1, leaving a 1.2 % bleed on a "hard left" note. Used by live scheduling
+  ([Scheduler.ts:73](src/engine/Scheduler.ts#L73)) and both offline note loops.
+- **Per-note panners on raw Web Audio nodes** (drum sample pads, sampler voices, vocal/physical
+  models) now set `channelCount = 1` / `explicit`. The default stereo panner up-mixes a mono hit to
+  two channels and sums it at hard pan, which doubled its level.
+- **Behaviour change to expect:** at centre pan the Tone mix is now stereo and 3 dB hotter than
+  before. That is the correction, not a regression; normalized exports are unchanged in balance,
+  and the master limiter still catches peaks.
+
+### 20.3 VST3 parameters as automation lanes
+
+- **Native bridge.** `vst3-track-parameters` returns `getParameters()` for the track instrument as
+  `{index, name, label, value, valueText, min, max, default, discrete}`
+  ([JuceBridge.cpp:242](native/Source/Bridge/JuceBridge.cpp#L242)). `setTrackVst3Parameter`
+  queues normalized writes, which the audio thread applies under the recursive track lock with a
+  short per-block ramp (`applyPendingVst3Parameters`, [AudioEngine.cpp:1078](native/Source/Audio/AudioEngine.cpp#L1078));
+  the queue is capped at 512 writes.
+- **Live lanes.** The automation target can now be `` `vst3:${index}` ``. While transport runs,
+  `pushVst3Automation` streams the lane at 20 Hz with a 20–200 ms ramp
+  ([AudioEngine.ts:5311](src/engine/AudioEngine.ts#L5311)). The footer of the automation lane
+  shows a flat `<select>` listing the plugin's parameters (`VST3 · <name>`) and writes the target
+  key into the track.
+- **Offline lanes.** The native bounce samples VST3 lanes at 32 Hz and emits `vst3Param` events,
+  dispatched by `OfflineRenderer::dispatchNoteOn` before note events/at their times. A render with
+  only parameter events is rejected as empty. Tone exports cannot host VST3, so the Tone path
+  keeps using the track synth (documented limitation, not silent).
+- **Limits.** Parameters are a snapshot taken when the lane UI opens/refreshes; a plugin that
+  creates parameters dynamically needs a refresh. Host-side recording of knob moves into a lane is
+  not implemented (you draw the lane). Lane resolution is 20/32 Hz, fine for musical rides but not
+  for audio-rate modulation.
+
+### 20.4 One VST3 instance per note
+
+- `syncNoteVst3Overrides` now sends `instanceKey = String(note.id)`
+  ([nativeNoteCommand.ts](src/engine/nativeNoteCommand.ts), [AudioEngine.ts:5359](src/engine/AudioEngine.ts#L5359)); the bridge/engine create, match and
+  prune slots by that key (`ensureNoteVst3Instrument`, `pruneNoteVst3Instruments`,
+  [JuceBridge.cpp:919](native/Source/Bridge/JuceBridge.cpp#L919)). Each slot owns its plugin
+  instance, an editor window, and follows the note's per-note FX rack (`fxChainId`).
+- Notes with the same plugin id but different `instanceKey` no longer share processor state or
+  parameters. Changing a note's per-note FX chain moves its slot to the new chain instead of
+  creating a duplicate.
+- Polyphony is still limited by a plugin instance's MIDI channels: 15 simultaneous gliding or
+  pan/gain-riding notes per instance reuse channels round-robin (§18). A per-note instance is per
+  note id, not per voice retrigger.
+
+### 20.5 Native MP3 and multi-region export
+
+- **Temporary native render.** `render-audio-temp` renders through JUCE into a private WAV under
+  `%TEMP%/MuseGridRenders`, returns `{path, url: "/musegrid-render/<name>", peakLinear,
+  appliedGain}`, and the WebView resource provider serves only validated plain filenames
+  ([JuceBridge.cpp:556](native/Source/Bridge/JuceBridge.cpp#L556),
+  [Main.cpp](native/Source/Main.cpp)). The page decodes it with `decodeAudioData`, then calls
+  `release-native-render` (deletes only files inside that temp dir,
+  [JuceBridge.cpp:606](native/Source/Bridge/JuceBridge.cpp#L606)). Temp renders older than one hour
+  are pruned.
+- **Why temp WAV:** the WAV path can copy bytes directly, but MP3 and multi-region exports need an
+  `AudioBuffer` in the page to encode/stitch. The temp file is never left behind (released in a
+  `finally`).
+- **Multi-region.** Each region renders without normalize/fade (`normalize:false, autoFade:false`),
+  empty regions become silence of the right length, regions are stitched with their gaps, and one
+  post-pass applies fade then normalize over the stitched buffer. Order matches the Tone path and
+  keeps the regions' relative levels; the native path and Tone path now agree here.
+- **Still Tone-rendered:** the browser/Electron build (no JUCE), real-time bounce mode, and
+  exports with procedural custom FX enabled. Those files use Tone voices, so timbre and tails can
+  differ from a native bounce. This is a platform limit, not an unimplemented wire.
+
+### 20.6 Stereo routing verification (what the harness found)
+
+Measured in a browser against an offline `Tone.OfflineContext`, 44.1 kHz, one 384-tick note at
+120 BPM (a 100-velocity note is 0.7874 of a 127 lane hit):
+
+| Case | Before | After |
+| --- | --- | --- |
+| mono source through `Tone.Channel()` at centre | L 0.707 / R 0.707 | L 1.0 / R 1.0 |
+| `Tone.Panner(1)` then default channel | 0.354 / 0.354 (pan erased) | — |
+| `Tone.Panner(1)` then two-channel strip | — | 0 / 1.0 (pan preserved) |
+| pan lane 1 (left) | both channels ≈0.5× | L 0.711 / R 0 (full, no bleed) |
+| pan lane 64 (centre) | both ≈0.5× | L 0.711 / R 0.711 |
+| pan lane 127 (right) | both ≈0.5× | L 0 / R 0.711 |
+| drum volume 64 | 0.356× base (−3 dB fold) | 0.504× base |
+| drum pan 1 / 127 | both channels equal | 0.551/0 and 0/0.551 |
+| two tracks panned hard L/R | mono sum | L 0.711 / R 0.704 (image kept) |
+| track pan centre / ±1 | 0.5 / 0.5 | 0.711 / 0.711 and 0.711 / 0 (equal power) |
+
+The live rack was inspected after `createInstrument`: centre → `channelCount 2`, pan 0.4 →
+`channelCount 1, pan 0.4`, back to centre → `channelCount 2`. `mapNoteToScheduledEvent` returned
+`pan −1 / 0 / 1` for lane values 1 / 64 / 127 and kept volume/velocity at 0.5039 for lane 64.
+
+### 20.7 What honestly remains
+
+- **Tone timbre approximation.** Native WAV/MP3 and multi-region exports use JUCE. Browser,
+  Electron, real-time bounce and procedural-FX exports still use Tone voices and can sound
+  different. The Tone engine is a fallback, not a bit-exact renderer.
+- **VST3 parameter snapshots and lane rate.** See §20.3: parameters are enumerated on demand, and
+  lane streams are 20 Hz (live) / 32 Hz (offline). Plugins whose parameters appear dynamically
+  need the lane list reopened.
+- **Per-note VST3 audio.** Each note gets an instance, but one instance still has 15 MIDI channels;
+  more than 15 simultaneous gliding/pan-riding notes reuse channels (§18). A multi-output plugin
+  still exposes its first output pair to the track.
+- **Track pan is mono equal-power.** With a non-zero track pan the strip intentionally uses the
+  mono panner, so a stereo image is narrowed. At centre, stereo is preserved. This is a stable pan
+  law, not a bug to "fix" by summing duplicated channels (which doubled level).
+- **Tone has no VST3 host.** VST3 overrides and plugin-parameter lanes exist only in the JUCE
+  build; Tone renders keep the track synth, and the UI says so.
+- **Native UI/export cannot be driven by browser automation.** All native claims above were
+  verified structurally (bridge handlers, engine code paths, build) plus the browser harness for
+  the Tone path and shared mapping code. A hands-on native export/listen check is still the final
+  acceptance step.
+
+### 20.8 Verification run for this pass
+
+- `npx tsc --noEmit -p tsconfig.app.json` → clean.
+- `npx vite build` → clean (client + electron main/preload).
+- `cmd /c scripts\build_native.bat` → ninja reported no C++ work (this round changed TS only),
+  and `bin/dist` was resynced.
+- Browser (port 5181, dev server serving this checkout): offline `renderProjectAudio` for
+  synth and drum, per-note pan/volume/velocity lanes, track pan, two-track stereo image, rack
+  channel switching, `mapNoteToScheduledEvent` mapping, and multi-region stitching (144000 +
+  144000 = 288000 samples, gap 0, peakA exactly −6 dB target, peakB/peakA = 0.166945 ≈ 20/120
+  velocity ratio).
+- No new console errors; the only recurring error remains the pre-existing WASM
+  `audio-processor.js` detached-ArrayBuffer message.
+
+### 20.9 Change accounting (this pass, §20)
+
+Working tree vs the last commit, `conditions.md` excluded: **17 tracked files changed,
+1103 insertions(+), 143 deletions(-)**, plus one new file
+[toneChannel.ts](src/utils/toneChannel.ts) (27 lines). Total 18 files, 1130 insertions. The
+user-visible "156 deletions" figure includes the 13 superseded lines removed from
+`conditions.md` itself.
+
+The review pass that followed (§20.11) added 2 files, 49 insertions and 12 deletions, taking the
+whole change to **19 tracked files, 1152 insertions(+), 155 deletions(-)** plus
+[toneChannel.ts](src/utils/toneChannel.ts). The table below is left as written for the §20 pass.
+
+| File | + | - | What changed |
+| --- | --- | --- | --- |
+| `native/Source/Audio/AudioEngine.cpp` | 236 | 9 | VST3 parameter queue/ramps, per-note instance slots |
+| `native/Source/Audio/AudioEngine.h` | 33 | 1 | parameter queue, slot keys |
+| `native/Source/Audio/NoteExpression.h` | 4 | 0 | `instanceKey`, `fxChainId` |
+| `native/Source/Audio/OfflineRenderer.cpp` | 15 | 2 | `vst3Param` events, per-note slot prep |
+| `native/Source/Bridge/JuceBridge.cpp` | 158 | 44 | temp render, release, VST3 param/instance commands, shared job parser |
+| `native/Source/Bridge/JuceBridge.h` | 2 | 0 | new handlers |
+| `native/Source/Main.cpp` | 24 | 10 | temp-render resource route (folded duplicate lookup) |
+| `src/engine/AudioEngine.ts` | 295 | 41 | drum output chain, VST3 lanes/instances, stereo channel helper, mono panner fixes |
+| `src/engine/Scheduler.ts` | 3 | 3 | target-aware lane mapping, `laneValueToPan` |
+| `src/engine/nativeNoteCommand.ts` | 3 | 0 | `instanceKey` |
+| `src/engine/store.ts` | 1 | 1 | `vst3:<index>` target type |
+| `src/renderer/GridCanvas.tsx` | 59 | 1 | VST3 lane target picker + label |
+| `src/ui/LeftPane.tsx` | 31 | 9 | native bounce branch, MP3/multi-region, Tone fallback on host failure |
+| `src/ui/RightPane.tsx` | 24 | 3 | per-note instance editor button |
+| `src/utils/audioRender.ts` | 80 | 13 | drum output, deferred region normalize/fade, pan mapping, stereo channel |
+| `src/utils/automation.ts` | 5 | 0 | `laneValueToPan` |
+| `src/utils/nativeBounce.ts` | 130 | 6 | temp render pipeline, param sampling, region stitch |
+| `src/utils/toneChannel.ts` | 27 | 0 | new stereo-safe track channel (untracked) |
+
+### 20.10 Deletion audit
+
+Every deleted line in §20.9 was checked against the replacement:
+
+- **JuceBridge.cpp (44).** The old inline render-job parsing in `handleRenderAudio` was moved
+  verbatim into `parseRenderJob` (same defaults, same event/override/metronome parsing, same
+  "Nothing to render" guard). The duplicate `getResource` filename lookups in `Main.cpp` were
+  folded into the existing provider block; no URL branch was dropped.
+- **AudioEngine.cpp (9).** Old VST3 slot lookup by identifier alone became identifier + optional
+  `instanceKey`; the no-key path falls back to the old matching, so track-level overrides behave
+  as before.
+- **AudioEngine.ts (41).** `rack.channel.pan.value = ...` became `setTrackChannelPan`;
+  `new Tone.Channel()` became `createTrackChannel`; `buildOutputChain`'s unconditional panner
+  became conditional; the four raw `createStereoPanner` call sites only gained
+  `channelCount`/`channelCountMode`. No voice, FX or disposal path was removed.
+- **audioRender.ts (13).** The drum output chain gained a panner branch; the region export now
+  sets `normalize:false, autoFade:false` per region and applies both once after stitching (the
+  removed per-region calls moved to the post-pass). The pan expression became `laneValueToPan`.
+- **Scheduler.ts (3), store.ts (1), GridCanvas.tsx (1), LeftPane.tsx (9), RightPane.tsx (3),
+  nativeBounce.ts (6).** Old pan arithmetic, the single-target footer chip, the direct-WAV-only
+  export branch, the per-track VST3 dedupe, and the old single-region render body were replaced by
+  their target-aware/multi-region/per-note equivalents; the previous behaviours are still reachable
+  (velocity target, single-track WAV, one region = one region). A failed native MP3/region render
+  now falls back to the Tone renderer instead of aborting, so the pre-§20 export path remains
+  available.
+- No feature, parameter, or UI control was deleted. The only intentional behaviour change is the
+  stereo-correct channel strip in §20.2.
+
+### 20.11 Independent review of the §20 pass — 2026-10-26
+
+Re-audited the §20 work against the two questions asked: is the new UI in line with the rest of the
+app, and did the ~156 deleted lines lose anything. The deletion audit above holds — every removal is
+a moved or superseded line. The style check holds too (see "UI check" below). The audit did find
+**five real defects in the new lane-target feature**, all fixed here.
+
+**Defects found and fixed**
+
+1. **Lane target was not saved.** `getProjectDataString` enumerates the project fields
+   ([App.tsx:69](src/App.tsx#L69)) and `automationCurves` was listed while `automationTargets` was
+   not. A project saved with a Pan lane reloaded as a Velocity lane, so the same curve started
+   meaning something else. Autosave already carried the map, so only `.muz` files were affected.
+2. **Stale targets survived New Project and Open.** `automationTargets` is keyed by track id, and the
+   default project reuses the fixed ids `track_synth` / `track_drum`
+   ([App.tsx:315](src/App.tsx#L315)). Leaving the previous map in place made the new project's plain
+   velocity lane read as the old project's volume/pan/VST3 lane. `loadState` spreads its argument
+   ([store.ts:2146](src/engine/store.ts#L2146)) and is also called with partial payloads
+   ([LeftPane.tsx:2978](src/ui/LeftPane.tsx#L2978)), so the reset had to sit at the four project-load
+   call sites rather than inside `loadState`: New Project, native Open, file-input Open, and the
+   script loader each now pass `automationTargets` (`{}` for blank/muztrack imports,
+   `parsed.automationTargets ?? {}` for `.muz`).
+3. **Deleting tracks left their lane meanings behind.** `removeTrack` / `removeTracks` pruned
+   `automationCurves` only ([store.ts:1716](src/engine/store.ts#L1716)). Both now prune the target map
+   beside it.
+4. **Duplicating a track duplicated the curve but not its meaning.**
+   `duplicateTracks` ([store.ts:1824](src/engine/store.ts#L1824)) copied the lane points to the new id
+   while the new track fell back to velocity, so a copied Pan lane became a velocity lane. It now
+   copies the target with the curve.
+5. **An untouched lane applied velocity as gain/pan.** Every lane sampler passed the note's own
+   velocity as the no-points fallback. That is right for velocity and wrong for the other two: an
+   empty volume lane became `gain = velocity/127` (velocity applied twice) and an empty pan lane
+   became "pan by how hard the note was hit". `laneNeutralValue`
+   ([automation.ts:100](src/utils/automation.ts#L100)) now supplies the fallback — note velocity,
+   127 (unity) for volume, 64 (centre) for pan — at the three note-mapping sites
+   ([Scheduler.ts:67](src/engine/Scheduler.ts#L67), [audioRender.ts:574](src/utils/audioRender.ts#L574)
+   and [audioRender.ts:774](src/utils/audioRender.ts#L774)). The VST3 sites were already neutral
+   (they skip empty curves and sample at 64). The dashed "no points yet" baseline in the lane footer
+   now draws at the same neutral value instead of a fixed 100
+   ([GridCanvas.tsx:2123](src/renderer/GridCanvas.tsx#L2123)), so the picture matches the sound.
+   Live "complete tails on pause" needed no change: it only uses the lane when the target is velocity.
+
+**UI check**
+
+- Grid footer picker ([GridCanvas.tsx:3630](src/renderer/GridCanvas.tsx#L3630)): 9px/700 label, 4px
+  radius, 1px hairline border, `rgba(77,171,247,*)` when active — the same tokens as the three chips
+  beside it and the existing tuning `<select>` at [GridCanvas.tsx:3395](src/renderer/GridCanvas.tsx#L3395).
+  Options are given the app's dark `#12141c` / `#e0e0e0` inline styling. `colorScheme` is not used
+  anywhere in `GridCanvas.tsx`, so the picker deliberately follows its neighbour instead of the
+  pane convention.
+- The footer row is a fixed 30px strip inside an `overflow:hidden` box, so the added control could
+  have pushed the collapse chevron out of view on a narrow grid with a long plugin parameter name. The
+  label now ellipsises (`minWidth:0`, `text-overflow:ellipsis`) and the control group is
+  `flexShrink:0` ([GridCanvas.tsx:3603](src/renderer/GridCanvas.tsx#L3603)) — controls stay
+  reachable, text gives way. No wrapping, no new chrome.
+- Note Inspector button ([RightPane.tsx:1418](src/ui/RightPane.tsx#L1418)): transparent background,
+  1px `rgba(0,230,255,0.25)` border, 4px radius, 10px/700 — the instrument-override card's own accent
+  tokens. It sits in a `flex-direction:column` card, so `alignSelf:'flex-start'` keeps it at its
+  natural width instead of stretching a full-width bar.
+
+**Verification run (§20.11)**
+
+- `npx tsc --noEmit -p tsconfig.app.json` → clean. `npx vite build` → clean. `scripts\build_native.bat`
+  → `ninja: no work to do`, `bin/dist` resynced (this pass changed TypeScript only).
+- Browser harness (port 5181, offline `renderProjectAudio`, one 384-tick note, velocity 100, then 127):
+  neutral-lane equality — velocity-with-no-curve, volume-with-no-curve, pan-with-no-curve, volume held
+  flat at 127 and pan held flat at 64 all rendered `[0.538868, 0.538868]`; before the fix the first two
+  differed by the velocity factor (0.538868 × 100/127 = 0.42431).
+- Drawn curves still work: pan 127 → `[0, 0.684305]`, pan 1 → `[0.684305, 0]` (exactly the unpanned
+  peak on one side, zero bleed), volume 64 → `0.344876` = 0.5040 × the 127-lane level. Drum path
+  identical in shape: pan 127 → `[0, 0.700312]`, volume 64 → `0.352937`, centre `[0.700312, 0.700312]`.
+- Store behaviour: set Pan + 2 curve points, duplicate → both target and curve on the new id, original
+  intact; `removeTracks` and `removeTrack` → target and curve both gone; `loadState({ notes: [] })`
+  (partial) leaves `automationTargets` untouched, confirming the reset had to live at the call sites.
+- Per-note VST3 keys match across paths: JS sends `instanceKey = note.id`
+  ([nativeNoteCommand.ts:148](src/engine/nativeNoteCommand.ts#L148)), the offline renderer pre-loads with
+  `trackId::pluginId::instanceKey` ([OfflineRenderer.cpp:420](native/Source/Audio/OfflineRenderer.cpp#L420)),
+  and the live editor/ensure calls use the same note id.
+
+**§20.11 accounting**: 20 files touched in total for §20 + §20.11 (19 tracked +
+`toneChannel.ts`), **1152 insertions(+), 155 deletions(-)** in code. This review pass added
++49/−12 across `src/App.tsx` (+8/−3), `src/engine/store.ts` (+15/−1), `src/utils/automation.ts`
+(+12/−1), `src/renderer/GridCanvas.tsx` (+7/−4), `src/engine/Scheduler.ts` (+5/−1),
+`src/engine/ScriptAPI.ts` (+1/−1), `src/utils/audioRender.ts` (+1/−1). All 12 deletions are
+in-place replacements — the velocity-fallback argument of a lane sample, a dashed-baseline literal, a
+footer style line, the curves-only prune lines, the old `loadState` payloads, and import lines that
+gained a symbol. The `automationTargets` map itself was already declared, so no field, branch, style
+rule or call site disappeared; `git diff -U0` output for these seven files contains no removed
+statement that lacks a replacement.
 

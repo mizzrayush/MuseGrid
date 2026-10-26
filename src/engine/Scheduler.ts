@@ -2,7 +2,7 @@ import * as Tone from 'tone'
 import { audioEngine } from './AudioEngine'
 import { useStore } from './store'
 import type { Track, Note, AutomationPoint, AutomationTarget } from './store'
-import { getAutomationValueAtTick } from '../utils/automation'
+import { getAutomationValueAtTick, laneNeutralValue, laneValueToPan } from '../utils/automation'
 import { buildGlideIntoMap, resolveGlidePlayback, type GlideIntoSpec } from '../utils/midiEditing'
 import { getActiveDPreverbInstances } from './fxDefaults'
 
@@ -64,14 +64,18 @@ export function mapNoteToScheduledEvent(
 
   // The lane drives velocity, per-note volume, or per-note pan. All are sampled at the
   // note's centre, the same way the original velocity lane has always behaved.
-  const laneValue = getAutomationValueAtTick(automationPoints, n.time + n.duration / 2, n.velocity)
+  const laneValue = getAutomationValueAtTick(
+    automationPoints,
+    n.time + n.duration / 2,
+    laneNeutralValue(automationTarget, n.velocity)
+  )
   let velocity = n.velocity / 127
   let note = playback.note
   if (automationTarget === 'volume') {
     note = { ...note, automationGain: Math.max(0, Math.min(1, laneValue / 127)) }
   } else if (automationTarget === 'pan') {
-    note = { ...note, pan: Math.max(-1, Math.min(1, (laneValue / 127) * 2 - 1)) }
-  } else {
+    note = { ...note, pan: laneValueToPan(laneValue) }
+  } else if (automationTarget === 'velocity') {
     velocity = laneValue / 127
   }
 

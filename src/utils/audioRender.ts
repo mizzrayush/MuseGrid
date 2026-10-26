@@ -1,12 +1,13 @@
 import * as Tone from 'tone'
 import type { AppState, CustomFxConfig, Note, Track, TrackGroup } from '../engine/store'
-import { getAutomationValueAtTick } from './automation'
+import { getAutomationValueAtTick, laneNeutralValue, laneValueToPan } from './automation'
 import { getEffectiveTrackLevel } from './groupAudio'
 import { buildGlideIntoMap, resolveGlidePlayback } from './midiEditing'
 import { buildCurveLut, evaluateGlideCurve } from './glideCurves'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET, type SynthPreset, type DrumKit } from './instruments'
-import { CustomScriptProcessorNode, DPreverbNode, audioEngine, VocalModelVoice, PhysicalModelVoice } from '../engine/AudioEngine'
+import { CustomScriptProcessorNode, DPreverbNode, audioEngine, VocalModelVoice, PhysicalModelVoice, type DrumOutputOptions } from '../engine/AudioEngine'
 import { getActiveDPreverbInstances, getTrackFxInstances, getTrackFxSetting as readTrackFxSetting, type BuiltInFxType } from '../engine/fxDefaults'
+import { createTrackChannel } from './toneChannel'
 
 const PPQ = 192
 
@@ -136,13 +137,42 @@ function triggerDrum(
   cache: Record<string, any>,
   pitchOffset = 0,
   pitchSlide?: number,
-  pitchSlideTime?: number
+  pitchSlideTime?: number,
+  output?: DrumOutputOptions
 ): void {
   const kit = drumKitOverride ?? track.drumKit ?? DEFAULT_DRUM_KIT
   const tight = kit === 'tight'
   const electro = kit === 'electro'
   const eightOhEight = kit === 'eightOhEight'
   const tabla = kit === 'tabla'
+
+  // Per-note volume automation, pan and morph fades get a private output chain, so the
+  // exported drum hit is trimmed the same way the JUCE drum engine trims it.
+  const perNoteOutput = !!output && (
+    !!output.pan ||
+    (output.gain !== undefined && Math.abs(output.gain - 1) > 0.001) ||
+    (output.fadeIn ?? 0) > 0 ||
+    (output.fadeOut ?? 0) > 0
+  )
+  let dest: Tone.ToneAudioNode = input
+  if (perNoteOutput && output) {
+    const g = new Tone.Gain(1)
+    const target = Math.max(0, Math.min(2, output.gain ?? 1))
+    const fadeIn = Math.max(0, output.fadeIn ?? 0)
+    const fadeOut = Math.max(0, output.fadeOut ?? 0)
+    g.gain.setValueAtTime(fadeIn > 0 ? 0 : target, time)
+    if (fadeIn > 0) g.gain.linearRampToValueAtTime(target, time + fadeIn)
+    if (fadeOut > 0) g.gain.linearRampToValueAtTime(0, time + fadeOut)
+    const pan = Math.max(-1, Math.min(1, output.pan ?? 0))
+    // A centred panner would fold the mono pad and cost 3 dB; only pan when asked to.
+    if (pan !== 0) {
+      const p = new Tone.Panner(pan)
+      g.chain(p, input)
+    } else {
+      g.connect(input)
+    }
+    dest = g
+  }
 
   let defaultDecay = getDecayDefaultByPitch(pitch)
   if (kit === 'custom' && track.customMuxins?.config) {
@@ -167,12 +197,17 @@ function triggerDrum(
   // in typical cases) while guaranteeing zero crashes.
   const EPSILON = 0.002
   const getPooledSynth = <T extends any>(createFn: () => T): T => {
+    if (perNoteOutput) {
+      const s = createFn()
+        ; (s as any).connect(dest)
+      return s
+    }
     if (!cache[cacheKey]) cache[cacheKey] = []
     const pool = cache[cacheKey] as Array<{ synth: T, lastStart: number, lastEnd: number }>
     let entry = pool.find(item => time > item.lastEnd + EPSILON && time > item.lastStart + EPSILON)
     if (!entry) {
       const s = createFn()
-        ; (s as any).connect(input)
+        ; (s as any).connect(dest)
       entry = { synth: s, lastStart: -1, lastEnd: -1 }
       pool.push(entry)
     }
@@ -187,7 +222,7 @@ function triggerDrum(
     const safeTime = typeof time === 'number' && isFinite(time) ? time : 0
     try {
       const synth = createFn()
-        ; (synth as any).connect(input)
+        ; (synth as any).connect(dest)
       synth.volume.setValueAtTime(safeVol, safeTime)
       synth.triggerAttackRelease(duration, safeTime)
     } catch (_err) {
@@ -536,13 +571,13 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
       const duration = Math.max(0.01, noteLength / noteTicksPerSecond)
 
       // The automation lane drives velocity, per-note volume or per-note pan.
-      const laneValue = getAutomationValueAtTick(state.automationCurves[track.id], note.time + note.duration / 2, note.velocity)
+      const laneValue = getAutomationValueAtTick(state.automationCurves[track.id], note.time + note.duration / 2, laneNeutralValue(automationTarget, note.velocity))
       let velocity = note.velocity / 127
       let autoGain = 1
       let notePan = 0
       if (automationTarget === 'volume') autoGain = Math.max(0, Math.min(1, laneValue / 127))
-      else if (automationTarget === 'pan') notePan = Math.max(-1, Math.min(1, (laneValue / 127) * 2 - 1))
-      else velocity = laneValue / 127
+      else if (automationTarget === 'pan') notePan = laneValueToPan(laneValue)
+      else if (automationTarget === 'velocity') velocity = laneValue / 127
       velocity = typeof velocity === 'number' && isFinite(velocity) ? Math.max(0, Math.min(1, velocity)) : 0.8
 
       const fadeInSec = playNoteData.morphFadeIn ? playNoteData.morphFadeIn / noteTicksPerSecond : 0
@@ -719,6 +754,8 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
   }
 
   const drumSynthsCache: Record<string, any> = {}
+  const glideIntoMap = buildGlideIntoMap(state.notes)
+  const automationTarget = state.automationTargets?.[track.id] ?? 'velocity'
   const sortedNotes = [...notes].sort((a, b) => a.time - b.time)
   sortedNotes.forEach(note => {
     const relativeTime = note.time - startOffset
@@ -731,12 +768,32 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
 
     const start = Math.max(0, relativeTime / noteTicksPerSecond)
     const duration = Math.max(0.01, note.duration / noteTicksPerSecond)
-    const rawVel = getAutomationValueAtTick(state.automationCurves[track.id], note.time + note.duration / 2, note.velocity) / 127
-    const velocity = typeof rawVel === 'number' && isFinite(rawVel) ? Math.max(0, Math.min(1, rawVel)) : 0.8
+    const laneValue = getAutomationValueAtTick(state.automationCurves[track.id], note.time + note.duration / 2, laneNeutralValue(automationTarget, note.velocity))
+    let velocity = note.velocity / 127
+    let autoGain = 1
+    let notePan = 0
+    if (automationTarget === 'volume') autoGain = Math.max(0, Math.min(1, laneValue / 127))
+    else if (automationTarget === 'pan') notePan = laneValueToPan(laneValue)
+    else if (automationTarget === 'velocity') velocity = laneValue / 127
+    velocity = typeof velocity === 'number' && isFinite(velocity) ? Math.max(0, Math.min(1, velocity)) : 0.8
+
+    // Morph crossfades link drums too: a destination hit fades in, a source hit fades out.
+    const glideInto = glideIntoMap.get(note.id)
+    const fadeInTicks = glideInto?.morph ? glideInto.slideTicks : 0
+    const fadeOutTicks = note.glideVoice === 'morph' && note.glideToNoteId
+      ? (note.pitchSlideTime ?? note.duration)
+      : 0
+
     const totalTranspose = (track.transpose ?? 0) + (options.semitoneOffset ?? 0) + ((options.octaveOffset ?? 0) * 12)
     const notePitchOffset = (note.pitchOffset ?? 0) + ((note.detune ?? 0) / 100)
     const drumOffset = totalTranspose + notePitchOffset
-    triggerDrum(note.pitch, duration, start, velocity, trackInput, track, note.instrumentOverride as DrumKit, drumSynthsCache, drumOffset, note.pitchSlide, note.pitchSlideTime)
+    const drumOutput: DrumOutputOptions = {
+      pan: notePan,
+      gain: autoGain,
+      fadeIn: fadeInTicks > 0 ? fadeInTicks / noteTicksPerSecond : undefined,
+      fadeOut: fadeOutTicks > 0 ? fadeOutTicks / noteTicksPerSecond : undefined
+    }
+    triggerDrum(note.pitch, duration, start, velocity, trackInput, track, note.instrumentOverride as DrumKit, drumSynthsCache, drumOffset, note.pitchSlide, note.pitchSlideTime, drumOutput)
   })
 }
 
@@ -1073,7 +1130,10 @@ export async function renderProjectAudio(state: AppState, options: RenderOptions
         exportRegionMode: false,
         exportRegions: [],
         startTick: region.startTick,
-        endTick: region.endTick
+        endTick: region.endTick,
+        // Normalize/fade once over the stitched result so regions keep their relative level.
+        normalize: false,
+        autoFade: false
       };
       try {
         const buf = await renderProjectAudio(state, regionOptions);
@@ -1092,7 +1152,14 @@ export async function renderProjectAudio(state: AppState, options: RenderOptions
       }
     }
 
-    return stitchAudioBuffers(buffers, gaps);
+    const stitched = stitchAudioBuffers(buffers, gaps);
+    if (options.autoFade) {
+      applyAudioBufferFadeOut(stitched, state.studioSettings.renderFadeDuration)
+    }
+    if (options.normalize) {
+      normalizeAudioBuffer(stitched, state.studioSettings.normalizationTarget)
+    }
+    return stitched;
   }
 
   const { notes, tracks, bpm } = state
@@ -1296,7 +1363,7 @@ export async function renderProjectAudio(state: AppState, options: RenderOptions
       })
 
       const effective = getEffectiveTrackLevel(track, groups)
-      const channel = new Tone.Channel({
+      const channel = createTrackChannel({
         volume: gainToDb(effective.volume),
         pan: typeof track.pan === 'number' && isFinite(track.pan) ? track.pan : 0,
         mute: effective.muted,

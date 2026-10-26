@@ -66,7 +66,9 @@ export const getProjectDataString = () => {
     scaleLock: state.scaleLock, snapEnabled: state.snapEnabled, snapResolution: state.snapResolution, gridBlockTicks: state.gridBlockTicks,
     gridShadeEvery: state.gridShadeEvery, gridColumnCount: state.gridColumnCount, swing: state.swing, metronomeEnabled: state.metronomeEnabled,
     metronomeVolume: state.metronomeVolume, quantizeInputEnabled: state.quantizeInputEnabled,
-    playheadFollowMode: state.playheadFollowMode, automationCurves: state.automationCurves, clips: state.clips, groups: state.groups, drumSteps: state.drumSteps,
+    playheadFollowMode: state.playheadFollowMode, automationCurves: state.automationCurves,
+    // Without the target map a reloaded project would read a pan/volume/VST3 curve as velocity.
+    automationTargets: state.automationTargets, clips: state.clips, groups: state.groups, drumSteps: state.drumSteps,
     timeSignature: state.timeSignature, metronomeSettings: state.metronomeSettings, studioSettings: state.studioSettings, customFxConfigs: state.customFxConfigs,
     pitchSnapEnabled: state.pitchSnapEnabled, pitchDropSnap: state.pitchDropSnap, pitchSnapSensitivity: state.pitchSnapSensitivity, verticalMergeThreshold: state.verticalMergeThreshold,
     verticalStretchMode: state.verticalStretchMode, customSynthRows: state.customSynthRows, customDrumRows: state.customDrumRows, synthLowerOctave: state.synthLowerOctave,
@@ -353,6 +355,7 @@ function App() {
         clips: [],
         groups: [],
         automationCurves: {},
+        automationTargets: {},
         playheadFollowMode: 'playhead',
         snapResolution: 48,
         projectExportData: null,
@@ -793,6 +796,7 @@ function App() {
                     useStore.getState().loadState({
                       projectName: res.filePath.split(/[\\/]/).pop().replace(/\.(muz|muztrack)$/i, ''),
                       projectFilePath: res.filePath,
+                      automationTargets: {},
                       bpm: data.bpm || 120,
                       timeSignature: data.timeSignature || '4/4',
                       tracks: data.tracks.map((t: any) => ({
@@ -820,7 +824,7 @@ function App() {
                     useStore.getState().showToast(`Opened .muztrack project (${data.tracks.length} tracks)`, 'success')
                     return
                   }
-                  useStore.getState().loadState({ ...parsed, projectFilePath: res.filePath, projectName: res.filePath.split(/[\\/]/).pop().replace('.muz', '') })
+                  useStore.getState().loadState({ ...parsed, automationTargets: parsed.automationTargets ?? {}, projectFilePath: res.filePath, projectName: res.filePath.split(/[\\/]/).pop().replace('.muz', '') })
                   audioEngine.setBpm(parsed.bpm || 120)
                   useStore.getState().tracks.forEach(track => { audioEngine.createInstrument(track.id, track.instrument || 'synth') })
                   const state = useStore.getState()
@@ -840,6 +844,7 @@ function App() {
                       const data = parsed
                       useStore.getState().loadState({
                         projectName: file.name.replace(/\.(muz|muztrack)$/i, ''),
+                        automationTargets: {},
                         bpm: data.bpm || 120,
                         timeSignature: data.timeSignature || '4/4',
                         tracks: data.tracks.map((t: any) => ({
@@ -867,7 +872,7 @@ function App() {
                       useStore.getState().showToast(`Opened .muztrack project (${data.tracks.length} tracks)`, 'success')
                       return
                     }
-                    useStore.getState().loadState({ ...parsed, projectName: file.name.replace('.muz', '') })
+                    useStore.getState().loadState({ ...parsed, automationTargets: parsed.automationTargets ?? {}, projectName: file.name.replace('.muz', '') })
                     audioEngine.setBpm(parsed.bpm || 120)
                     useStore.getState().tracks.forEach(track => { audioEngine.createInstrument(track.id, track.instrument || 'synth') })
                     const state = useStore.getState()

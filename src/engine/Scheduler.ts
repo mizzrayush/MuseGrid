@@ -36,7 +36,8 @@ export function mapNoteToScheduledEvent(
   automationPoints: AutomationPoint[] | undefined,
   glideInto?: GlideIntoSpec,
   automationTarget: AutomationTarget = 'velocity',
-  automationLane?: AutomationLane
+  automationLane?: AutomationLane,
+  allTrackCurves?: Record<string, AutomationPoint[]>
 ): ScheduledNoteMapping {
   const trackBpm = track?.targetTempo ?? globalBpm
   const multiplier = trackBpm / globalBpm
@@ -64,28 +65,59 @@ export function mapNoteToScheduledEvent(
       ? (isMicrotonal ? Tone.Frequency(n.pitchEnd + transpose, 'midi').toFrequency() : Tone.Frequency(n.pitchEnd + transpose, 'midi').toNote())
       : undefined)
 
-  // The lane drives velocity, per-note volume, per-note pan or one per-note expression parameter.
-  // All are sampled at the note's centre, the same way the original velocity lane has always behaved.
-  const laneValue = getLaneValueAtTick({
-    points: automationPoints,
-    lane: automationLane,
-    target: automationTarget,
-    tick: n.time + n.duration / 2,
-    fallback: laneFallbackValue(automationTarget, n),
-    bpm: globalBpm,
-  })
   let velocity = n.velocity / 127
   let note = playback.note
-  if (automationTarget === 'volume') {
-    note = { ...note, automationGain: Math.max(0, Math.min(1, laneValue / 127)) }
-  } else if (automationTarget === 'pan') {
-    note = { ...note, pan: laneValueToPan(laneValue) }
-  } else if (automationTarget === 'velocity') {
-    velocity = laneValue / 127
-  } else if (parseAutomationTarget(automationTarget)?.kind === 'expr' && laneIsActive(automationPoints, automationLane)) {
-    note = applyExpressionLaneToNote(note, automationTarget, laneValue, {
-      lane: automationLane, points: automationPoints, bpm: globalBpm,
+
+  // Concurrent Multi-Parameter Curve Evaluation
+  const trackId = track?.id || n.trackId
+  const trackCurveEntries = allTrackCurves
+    ? Object.entries(allTrackCurves).filter(([key, pts]) => (key === trackId || key.startsWith(`${trackId}::`)) && pts && pts.length > 0)
+    : []
+
+  if (trackCurveEntries.length > 0) {
+    for (const [key, pts] of trackCurveEntries) {
+      const targetStr = (key.includes('::') ? key.split('::').slice(1).join('::') : automationTarget) as AutomationTarget
+      const laneValue = getLaneValueAtTick({
+        points: pts,
+        lane: automationLane,
+        target: targetStr,
+        tick: n.time + n.duration / 2,
+        fallback: laneFallbackValue(targetStr, n),
+        bpm: globalBpm,
+      })
+      if (targetStr === 'volume') {
+        note = { ...note, automationGain: Math.max(0, Math.min(1, laneValue / 127)) }
+      } else if (targetStr === 'pan') {
+        note = { ...note, pan: laneValueToPan(laneValue) }
+      } else if (targetStr === 'velocity') {
+        velocity = laneValue / 127
+      } else if (parseAutomationTarget(targetStr)?.kind === 'expr' && laneIsActive(pts, automationLane)) {
+        note = applyExpressionLaneToNote(note, targetStr, laneValue, {
+          lane: automationLane, points: pts, bpm: globalBpm,
+        })
+      }
+    }
+  } else {
+    // Single lane fallback
+    const laneValue = getLaneValueAtTick({
+      points: automationPoints,
+      lane: automationLane,
+      target: automationTarget,
+      tick: n.time + n.duration / 2,
+      fallback: laneFallbackValue(automationTarget, n),
+      bpm: globalBpm,
     })
+    if (automationTarget === 'volume') {
+      note = { ...note, automationGain: Math.max(0, Math.min(1, laneValue / 127)) }
+    } else if (automationTarget === 'pan') {
+      note = { ...note, pan: laneValueToPan(laneValue) }
+    } else if (automationTarget === 'velocity') {
+      velocity = laneValue / 127
+    } else if (parseAutomationTarget(automationTarget)?.kind === 'expr' && laneIsActive(automationPoints, automationLane)) {
+      note = applyExpressionLaneToNote(note, automationTarget, laneValue, {
+        lane: automationLane, points: automationPoints, bpm: globalBpm,
+      })
+    }
   }
 
   return {
@@ -182,12 +214,14 @@ class Scheduler {
     const notesByTrack = new Map<string, Note[]>()
     tracks.forEach(t => notesByTrack.set(t.id, []))
     notes.forEach(n => {
+      if (n.muted) return
       const trackNotes = notesByTrack.get(n.trackId)
       if (trackNotes) trackNotes.push(n)
     })
 
     const globalBpm = useStore.getState().bpm
-    const glideIntoMap = buildGlideIntoMap(notes)
+    const audibleNotes = notes.filter(n => !n.muted)
+    const glideIntoMap = buildGlideIntoMap(audibleNotes)
     const automationTargets = useStore.getState().automationTargets
     const automationLanes = useStore.getState().automationLanes
 
@@ -197,10 +231,11 @@ class Scheduler {
       const trackBpm = track?.targetTempo ?? globalBpm
       const multiplier = trackBpm / globalBpm
       const globalTPS = (globalBpm / 60) * TICKS_PER_BEAT
-      const automationPoints = useStore.getState().automationCurves[trackId]
+      const allCurves = useStore.getState().automationCurves
+      const automationPoints = allCurves[trackId]
       const events: ScheduledTrackEvent[] = trackNotes.map(n => ({
         kind: 'note',
-        ...mapNoteToScheduledEvent(n, track, globalBpm, automationPoints, glideIntoMap.get(n.id), automationTargets[trackId] ?? 'velocity', automationLanes[trackId])
+        ...mapNoteToScheduledEvent(n, track, globalBpm, automationPoints, glideIntoMap.get(n.id), automationTargets[trackId] ?? 'velocity', automationLanes[trackId], allCurves)
       }))
 
       if (track) {

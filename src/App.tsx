@@ -111,6 +111,17 @@ function App() {
   const bpm = useStore(state => state.bpm)
   const isInit = useRef(false)
 
+  useEffect(() => {
+    const handleGlobalContextMenu = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null
+      const tagName = target?.tagName?.toLowerCase()
+      if (tagName === 'input' || tagName === 'textarea') return
+      e.preventDefault()
+    }
+    window.addEventListener('contextmenu', handleGlobalContextMenu)
+    return () => window.removeEventListener('contextmenu', handleGlobalContextMenu)
+  }, [])
+
 
   const tracks = useStore(s => s.tracks)
   const updateTracks = useStore(s => s.updateTracks)

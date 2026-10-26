@@ -12,7 +12,7 @@
     "build:native:full": "npm run build:wasm && vite build && scripts\\build_native.bat",
     "build:setup": "scripts\\build_setup.bat",
     "build:installer": "scripts\\build_setup.bat",
-    "start:native": "bin\\MuseGrid.exe",
+    "start:native": "node scripts/sync_bin.js && bin\\MuseGrid.exe",
     "build": "scripts\\build_setup.bat",
     "build:electron": "npm run build:wasm && tsc -b && vite build && electron-builder",
     "bundle-ai": "node scripts/bundle_ai_models.js",

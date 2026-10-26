@@ -1,12 +1,16 @@
 import { useCallback, useState, useEffect, useMemo, useRef } from 'react'
 import * as Tone from 'tone'
-import { IconPin, IconPlus, IconTrash, IconChevronLeft, IconMusic, IconDrum, IconSettings } from '../ui/Icons'
+import {
+  IconPin, IconPlus, IconTrash, IconChevronLeft, IconMusic, IconDrum, IconSettings,
+  IconVolume, IconVolumeX, IconCopy, IconPaste, IconScissors, IconZap,
+  IconLayers, IconArrowUp, IconArrowDown, IconSparkles, IconShuffle, IconList, IconAlign
+} from '../ui/Icons'
 import { useContextMenuDismissal } from '../ui/useContextMenuDismissal'
-import { useStore, DEFAULT_DRUM_ROWS, EXPRESSION_LANE_TARGETS, expressionLaneLabel, parseAutomationTarget, type ExpressionLaneTarget } from '../engine/store'
+import { useStore, DEFAULT_DRUM_ROWS, EXPRESSION_LANE_TARGETS, expressionLaneLabel, parseAutomationTarget, getTrackAutomationPoints, type ExpressionLaneTarget } from '../engine/store'
 import { audioEngine } from '../engine/AudioEngine'
 import type { Vst3ParameterInfo } from '../engine/AudioEngine'
 import { isInScale, snapToScale, snapTick, NOTE_NAMES_SHARP, NOTE_NAMES_FLAT, CHORD_STAMPS, getDiatonicChord, detectScaleDegree } from '../utils/musicTheory'
-import { getAutomationValueAtTick, getLaneValueAtTick, laneNeutralValue, laneTargetLabel, sortAutomationPoints } from '../utils/automation'
+import { getLaneValueAtTick, laneNeutralValue, laneTargetLabel, sortAutomationPoints } from '../utils/automation'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET } from '../utils/instruments'
 import {
   applyLegato,
@@ -16,6 +20,9 @@ import {
   applyChop,
   applyHumanize,
   applyFlipHorizontal,
+  applyFlipVertical,
+  applyVelocityRamp,
+  applyMicroNudge,
   applyGlideChain,
   clearNoteGlides,
   type GlideChainOptions
@@ -69,7 +76,7 @@ const AUTOMATION_HEIGHT = 100
 const SIDEBAR_WIDTH = 110
 const PLAYHEAD_ANCHOR_X = 128
 
-type DragMode = 'none' | 'pan' | 'move_note' | 'resize_note_right' | 'resize_note_top' | 'resize_note_bottom' | 'resize_column' | 'box_select' | 'draw_automation' | 'scrub_playhead' | 'stretch_left' | 'stretch_right' | 'adjust_loop_start' | 'adjust_loop_end' | 'edit_note_velocity' | 'draw_export_region'
+type DragMode = 'none' | 'pan' | 'move_note' | 'resize_note_right' | 'resize_note_top' | 'resize_note_bottom' | 'resize_column' | 'box_select' | 'draw_automation' | 'scrub_playhead' | 'stretch_left' | 'stretch_right' | 'adjust_loop_start' | 'adjust_loop_end' | 'edit_note_velocity' | 'draw_export_region' | 'draw_timeline_range'
 
 interface GridCanvasProps {
   instrument: 'synth' | 'drum'
@@ -350,7 +357,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   // four paths, so a drum lane gets those two plus pitch; tremolo stays synth-only by design.
   const exprTargets: ExpressionLaneTarget[] = instrument === 'drum'
     ? ['filterCutoff', 'vibratoDepth', 'vibratoRate', 'detune', 'glideAmount']
-    : instrument === 'vst3'
+    : currentTrack?.instrument === 'vst3'
       ? ['detune', 'glideAmount']
       : EXPRESSION_LANE_TARGETS
   const exprTargetId = laneTargetKind === 'expr' ? automationTarget.slice(5) : ''
@@ -365,7 +372,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   const vst3TargetIndex = automationTarget.startsWith('vst3:') ? Number(automationTarget.slice(5)) : -1
   const vst3TargetParam = vst3TargetIndex >= 0 ? vst3Params.find(p => p.index === vst3TargetIndex) : undefined
   const [dragVelocityNoteId, setDragVelocityNoteId] = useState<string | null>(null)
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tick: number; mode: 'main' | 'subtrack_parent' | 'glide' } | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tick: number; mode: 'main' | 'subtrack_parent' | 'glide' | 'timeline_range' } | null>(null)
   const [glideMenu, setGlideMenu] = useState<GlideChainOptions>({
     order: 'time',
     curve: 'cubicInOut',
@@ -394,6 +401,17 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   const removeExportRegion = useStore(state => state.removeExportRegion)
   const setExportRegions = useStore(state => state.setExportRegions)
 
+  const timelineSelection = useStore(state => state.timelineSelection)
+  const setTimelineSelection = useStore(state => state.setTimelineSelection)
+  const duplicateTimelineRange = useStore(state => state.duplicateTimelineRange)
+  const muteTimelineRange = useStore(state => state.muteTimelineRange)
+  const deleteTimelineRange = useStore(state => state.deleteTimelineRange)
+  const splitTimelineRange = useStore(state => state.splitTimelineRange)
+  const quantizeTimelineRange = useStore(state => state.quantizeTimelineRange)
+  const [timelineRangeStart, setTimelineRangeStart] = useState<number | null>(null)
+  const timelineDragStateRef = useRef<{ startX: number; startClientX: number; startTick: number; isRight: boolean } | null>(null)
+  const gridTimelineDragRef = useRef<{ startX: number; startClientX: number; startTick: number } | null>(null)
+
   const [activeDragRegion, setActiveDragRegion] = useState<{ startTick: number, endTick: number } | null>(null)
   const snapEnabled = useStore(state => state.snapEnabled)
   const snapResolution = useStore(state => state.snapResolution)
@@ -416,18 +434,18 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   const stateRef = useRef({
     pan, zoom, dragMode, boxSelectStart, boxSelectCurrent, canvasSize, showAutomation, scaleLock,
     snapEnabled, snapResolution, loopEnabled, loopStart, loopEnd, activeDragRegion, exportRegionMode, exportRegions,
-    scrollBoth, sharedPanX, isHorizScrollLocked, isVertScrollLocked
+    timelineSelection, scrollBoth, sharedPanX, isHorizScrollLocked, isVertScrollLocked
   })
   useEffect(() => {
     stateRef.current = {
       pan, zoom, dragMode, boxSelectStart, boxSelectCurrent, canvasSize, showAutomation, scaleLock,
       snapEnabled, snapResolution, loopEnabled, loopStart, loopEnd, activeDragRegion, exportRegionMode, exportRegions,
-      scrollBoth, sharedPanX, isHorizScrollLocked, isVertScrollLocked
+      timelineSelection, scrollBoth, sharedPanX, isHorizScrollLocked, isVertScrollLocked
     }
   }, [
     pan, zoom, dragMode, boxSelectStart, boxSelectCurrent, canvasSize, showAutomation, scaleLock,
     snapEnabled, snapResolution, loopEnabled, loopStart, loopEnd, activeDragRegion, exportRegionMode, exportRegions,
-    scrollBoth, sharedPanX, isHorizScrollLocked, isVertScrollLocked
+    timelineSelection, scrollBoth, sharedPanX, isHorizScrollLocked, isVertScrollLocked
   ])
 
   const cachedColsRef = useRef<{ cols: any[]; key: string }>({ cols: [], key: '' })
@@ -471,7 +489,17 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   }, [columnWidths, gridBlockTicks, gridColumnCount])
 
   useEffect(() => {
-    if (dragMode === 'none' || dragMode === 'pan') {
+    const isGridScrollableDrag = [
+      'box_select',
+      'move_note',
+      'resize_note_right',
+      'resize_note_top',
+      'resize_note_bottom',
+      'stretch_left',
+      'stretch_right'
+    ].includes(dragMode)
+
+    if (!isGridScrollableDrag) {
       if (dragScrollIntervalRef.current !== null) {
         clearInterval(dragScrollIntervalRef.current)
         dragScrollIntervalRef.current = null
@@ -661,10 +689,109 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); store.undo(); return }
       if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); store.redo(); return }
 
+      // Timeline Selection Shortcuts
+      if (store.timelineSelection) {
+        const { startTick, endTick } = store.timelineSelection
+        const minT = Math.min(startTick, endTick)
+        const maxT = Math.max(startTick, endTick)
+
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          store.setTimelineSelection(null)
+          return
+        }
+        if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
+          e.preventDefault()
+          store.duplicateTimelineRange(startTick, endTick, targetTrackId)
+          return
+        }
+        if (!e.ctrlKey && !e.metaKey && (e.key.toLowerCase() === 'm' || (e.altKey && e.key.toLowerCase() === 'm'))) {
+          e.preventDefault()
+          store.muteTimelineRange(startTick, endTick, targetTrackId)
+          return
+        }
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+          e.preventDefault()
+          store.deleteTimelineRange(startTick, endTick, targetTrackId)
+          return
+        }
+        if ((e.ctrlKey || e.metaKey) && e.key === 'e') {
+          e.preventDefault()
+          store.splitTimelineRange(startTick, endTick, targetTrackId)
+          return
+        }
+        if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'q') {
+          e.preventDefault()
+          store.quantizeTimelineRange(startTick, endTick, targetTrackId)
+          return
+        }
+        if ((e.ctrlKey || e.metaKey) && e.key === 'l') {
+          e.preventDefault()
+          store.setLoopStart(minT)
+          store.setLoopEnd(maxT)
+          store.setLoopEnabled(true)
+          return
+        }
+        if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+          e.preventDefault()
+          const notesToCopy = allNotes.filter(n => n.time >= minT && n.time < maxT && (!targetTrackId || n.trackId === targetTrackId))
+          if (notesToCopy.length > 0) {
+            store.setClipboard(notesToCopy)
+            store.showToast(`Copied ${notesToCopy.length} note${notesToCopy.length === 1 ? '' : 's'} in region`, 'info')
+          }
+          return
+        }
+        if ((e.ctrlKey || e.metaKey) && e.key === 'x') {
+          e.preventDefault()
+          const notesToCopy = allNotes.filter(n => n.time >= minT && n.time < maxT && (!targetTrackId || n.trackId === targetTrackId))
+          if (notesToCopy.length > 0) {
+            store.setClipboard(notesToCopy)
+            store.deleteTimelineRange(startTick, endTick, targetTrackId)
+            store.showToast(`Cut ${notesToCopy.length} note${notesToCopy.length === 1 ? '' : 's'} in region`, 'info')
+          }
+          return
+        }
+      }
+
       if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
         e.preventDefault()
         const notesToCopy = allNotes.filter(n => selectedNoteIds.includes(n.id))
-        if (notesToCopy.length > 0) store.setClipboard(notesToCopy)
+        if (notesToCopy.length > 0) {
+          store.setClipboard(notesToCopy)
+          store.showToast(`Copied ${notesToCopy.length} note${notesToCopy.length === 1 ? '' : 's'}`, 'info')
+        }
+        return
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key === 'x') {
+        e.preventDefault()
+        const notesToCopy = allNotes.filter(n => selectedNoteIds.includes(n.id))
+        if (isReadOnly || notesToCopy.length === 0) return
+        store.commitHistory()
+        store.setClipboard(notesToCopy)
+        selectedNoteIds.forEach(id => removeNote(id))
+        setSelectedNoteIds([])
+        store.showToast(`Cut ${notesToCopy.length} note${notesToCopy.length === 1 ? '' : 's'}`, 'info')
+        return
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
+        e.preventDefault()
+        const selectedNotes = allNotes.filter(n => selectedNoteIds.includes(n.id))
+        if (isReadOnly || !targetTrackId || selectedNotes.length === 0) return
+        store.commitHistory()
+        const minTime = Math.min(...selectedNotes.map(n => n.time))
+        const maxEndTime = Math.max(...selectedNotes.map(n => n.time + n.duration))
+        const span = maxEndTime - minTime
+        const offset = Math.max(snapResolution || 48, span)
+        const newSelectedIds: string[] = []
+        selectedNotes.forEach(note => {
+          const id = Math.random().toString(36).substr(2, 9)
+          newSelectedIds.push(id)
+          addNote({ ...note, id, trackId: targetTrackId, time: note.time + offset })
+        })
+        setSelectedNoteIds(newSelectedIds)
+        store.showToast(`Duplicated ${selectedNotes.length} note${selectedNotes.length === 1 ? '' : 's'}`, 'info')
         return
       }
 
@@ -682,6 +809,18 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         })
         setSelectedNoteIds(newSelectedIds)
         store.commitHistory()
+        store.showToast(`Pasted ${clipboard.length} note${clipboard.length === 1 ? '' : 's'}`, 'info')
+        return
+      }
+
+      if (!e.ctrlKey && !e.metaKey && (e.key.toLowerCase() === 'm' || (e.altKey && e.key.toLowerCase() === 'm'))) {
+        e.preventDefault()
+        const selectedNotes = allNotes.filter(n => selectedNoteIds.includes(n.id))
+        if (isReadOnly || selectedNotes.length === 0) return
+        store.commitHistory()
+        const allMuted = selectedNotes.every(n => n.muted)
+        store.updateNotes(selectedNoteIds, { muted: !allMuted })
+        store.showToast(allMuted ? `Unmuted ${selectedNotes.length} note(s)` : `Muted ${selectedNotes.length} note(s)`, 'info')
         return
       }
 
@@ -806,6 +945,25 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         e.preventDefault()
         applyMidiTransform(applyFlipHorizontal, 'Flip Horizontal / Reverse (Alt+Y)')
         return
+      }
+
+      // Mute / Unmute Selected Notes ('m' key)
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'm') {
+        if (selectedNoteIds.length > 0) {
+          e.preventDefault()
+          store.commitHistory()
+          const selected = store.notes.filter(n => selectedNoteIds.includes(n.id))
+          const allMuted = selected.length > 0 && selected.every(n => n.muted)
+          const targetMute = !allMuted
+          store.updateNotes(selectedNoteIds, { muted: targetMute })
+          store.showToast(
+            targetMute
+              ? `Muted ${selectedNoteIds.length} note${selectedNoteIds.length === 1 ? '' : 's'}`
+              : `Unmuted ${selectedNoteIds.length} note${selectedNoteIds.length === 1 ? '' : 's'}`,
+            'info'
+          )
+          return
+        }
       }
 
       // Select All on Active Track (Ctrl+A)
@@ -1046,6 +1204,31 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         const loopWidth = (tickToX(storeState.loopEnd) - tickToX(storeState.loopStart)) * zoom
         ctx.fillStyle = 'rgba(77,171,247,0.14)'
         ctx.fillRect(loopXStart, 0, loopWidth, height)
+      }
+
+      if (storeState.timelineSelection) {
+        const minT = Math.min(storeState.timelineSelection.startTick, storeState.timelineSelection.endTick)
+        const maxT = Math.max(storeState.timelineSelection.startTick, storeState.timelineSelection.endTick)
+        const sxStart = effectivePanX + SIDEBAR_WIDTH + tickToX(minT) * zoom
+        const sxEnd = effectivePanX + SIDEBAR_WIDTH + tickToX(maxT) * zoom
+        const sWidth = sxEnd - sxStart
+        if (sWidth > 0) {
+          ctx.fillStyle = 'rgba(255, 170, 0, 0.22)'
+          ctx.fillRect(sxStart, 0, sWidth, height)
+          ctx.strokeStyle = '#ffa94d'
+          ctx.lineWidth = 1.5
+          ctx.strokeRect(sxStart, 0, sWidth, height)
+
+          if (sWidth > 24) {
+            ctx.fillStyle = '#ffa94d'
+            ctx.fillRect(sxStart, 0, Math.min(sWidth, 64), 11)
+            ctx.fillStyle = '#14141c'
+            ctx.font = 'bold 8.5px "Inter", sans-serif'
+            ctx.textAlign = 'left'
+            ctx.textBaseline = 'middle'
+            ctx.fillText(`${maxT - minT}t Range`, sxStart + 4, 6)
+          }
+        }
       }
 
       if (exportRegionMode) {
@@ -1364,7 +1547,26 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
           ctx.fillRect(rxStart, TIMELINE_HEIGHT, rWidth, gridHeight)
 
           ctx.fillStyle = `rgba(18, 184, 134, ${0.22 * visualActive.opacity})`
-          ctx.fillRect(rxStart, 0, rWidth, TIMELINE_HEIGHT)
+        }
+      }
+
+      if (storeState.timelineSelection) {
+        const minT = Math.min(storeState.timelineSelection.startTick, storeState.timelineSelection.endTick)
+        const maxT = Math.max(storeState.timelineSelection.startTick, storeState.timelineSelection.endTick)
+        const sxStart = tickToX(minT)
+        const sxEnd = tickToX(maxT)
+        const sWidth = sxEnd - sxStart
+        if (sWidth > 0) {
+          ctx.fillStyle = 'rgba(255, 170, 0, 0.08)'
+          ctx.fillRect(sxStart, TIMELINE_HEIGHT, sWidth, gridHeight)
+          ctx.fillStyle = 'rgba(255, 170, 0, 0.20)'
+          ctx.fillRect(sxStart, 0, sWidth, TIMELINE_HEIGHT)
+          ctx.strokeStyle = 'rgba(255, 170, 0, 0.7)'
+          ctx.lineWidth = 1.5 / zoom
+          ctx.beginPath()
+          ctx.moveTo(sxStart, 0); ctx.lineTo(sxStart, TIMELINE_HEIGHT + gridHeight)
+          ctx.moveTo(sxEnd, 0); ctx.lineTo(sxEnd, TIMELINE_HEIGHT + gridHeight)
+          ctx.stroke()
         }
       }
 
@@ -1536,12 +1738,31 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         const noteColor = noteTrack?.color || '#4dabf7'
 
         const isSelected = selectedNoteSet.has(note.id)
-        ctx.fillStyle = isSelected ? '#ffffff' : noteColor
-        ctx.globalAlpha = isFromCurrentTrack ? 0.9 : ghostNoteOpacity
+        const isMuted = note.muted === true
+        ctx.fillStyle = isSelected ? '#ffffff' : (isMuted ? '#686b7c' : noteColor)
+        ctx.globalAlpha = isMuted
+          ? (isFromCurrentTrack ? (isSelected ? 0.75 : 0.35) : 0.18)
+          : (isFromCurrentTrack ? 0.9 : ghostNoteOpacity)
         ctx.fillRect(x, y, w, h)
 
-        ctx.strokeStyle = isFromCurrentTrack ? 'rgba(255, 255, 255, 0.5)' : 'rgba(255, 255, 255, 0.3)'
-        if (!isFromCurrentTrack && Math.abs(otherStepSize - stepSize) > 0.001) {
+        ctx.strokeStyle = isMuted
+          ? (isSelected ? 'rgba(255, 255, 255, 0.45)' : 'rgba(255, 255, 255, 0.25)')
+          : (isFromCurrentTrack ? 'rgba(255, 255, 255, 0.5)' : 'rgba(255, 255, 255, 0.3)')
+        if (isMuted) {
+          ctx.setLineDash([2, 2])
+          ctx.strokeRect(x, y, w, h)
+          ctx.setLineDash([])
+          if (w >= 8 && h >= 5) {
+            ctx.save()
+            ctx.strokeStyle = isSelected ? 'rgba(0, 0, 0, 0.65)' : 'rgba(255, 255, 255, 0.45)'
+            ctx.lineWidth = 1
+            ctx.beginPath()
+            ctx.moveTo(x + 2, y + h / 2)
+            ctx.lineTo(x + w - 2, y + h / 2)
+            ctx.stroke()
+            ctx.restore()
+          }
+        } else if (!isFromCurrentTrack && Math.abs(otherStepSize - stepSize) > 0.001) {
           ctx.setLineDash([3, 2])
           ctx.strokeRect(x, y, w, h)
           ctx.setLineDash([])
@@ -2039,8 +2260,8 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
       const storeState = useStore.getState()
       const isTrackHidden = storeState.tracks.find(t => t.id === targetTrackId)?.hidden
       const notes = isTrackHidden ? [] : storeState.notes.filter(n => n.trackId === targetTrackId)
-      const points = sortAutomationPoints(storeState.automationCurves[targetTrackId] ?? [])
       const laneTarget = storeState.automationTargets[targetTrackId] ?? 'velocity'
+      const points = sortAutomationPoints(getTrackAutomationPoints(storeState.automationCurves, targetTrackId, laneTarget))
 
       // Measure directly from the canvas DOM element — always accurate
       const canvasWidth = canvas.clientWidth
@@ -2221,7 +2442,211 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
     return () => cancelAnimationFrame(animationFrameId)
   }, [showAutomation, editTrack, targetTrackId, dragAutomationPointId, isHorizScrollLocked, tickToX])
 
-  // --- Note Selection Actions ---
+  // --- Note Selection Actions & DAW Controls ---
+  const selectedNotesList = useMemo(() => allNotes.filter(n => selectedNoteIds.includes(n.id)), [allNotes, selectedNoteIds])
+  const mutedCount = useMemo(() => selectedNotesList.filter(n => n.muted).length, [selectedNotesList])
+  const allSelectedNotesMuted = useMemo(() => selectedNotesList.length > 0 && mutedCount === selectedNotesList.length, [selectedNotesList, mutedCount])
+  const hasMixedMuteState = useMemo(() => mutedCount > 0 && mutedCount < selectedNotesList.length, [mutedCount, selectedNotesList])
+
+  const handleMuteSelectedNotes = (targetMute: boolean) => {
+    if (selectedNoteIds.length === 0) return
+    useStore.getState().commitHistory()
+    useStore.getState().updateNotes(selectedNoteIds, { muted: targetMute })
+    useStore.getState().showToast(
+      targetMute
+        ? `Muted ${selectedNoteIds.length} note${selectedNoteIds.length === 1 ? '' : 's'}`
+        : `Unmuted ${selectedNoteIds.length} note${selectedNoteIds.length === 1 ? '' : 's'}`,
+      'info'
+    )
+    setContextMenu(null)
+  }
+
+  const handleToggleMuteSelectedNotes = () => {
+    handleMuteSelectedNotes(!allSelectedNotesMuted)
+  }
+
+  const handleCopyNotes = () => {
+    if (selectedNotesList.length === 0) return
+    useStore.getState().setClipboard(selectedNotesList)
+    useStore.getState().showToast(`Copied ${selectedNotesList.length} note${selectedNotesList.length === 1 ? '' : 's'}`, 'info')
+    setContextMenu(null)
+  }
+
+  const handleCutNotes = () => {
+    if (selectedNotesList.length === 0 || isReadOnly) return
+    const store = useStore.getState()
+    store.commitHistory()
+    store.setClipboard(selectedNotesList)
+    selectedNoteIds.forEach(id => removeNote(id))
+    setSelectedNoteIds([])
+    store.showToast(`Cut ${selectedNotesList.length} note${selectedNotesList.length === 1 ? '' : 's'}`, 'info')
+    setContextMenu(null)
+  }
+
+  const handlePasteNotes = (targetTick?: number) => {
+    const store = useStore.getState()
+    const clipboard = store.clipboard
+    if (isReadOnly || !targetTrackId || clipboard.length === 0) return
+    store.commitHistory()
+    const minTime = Math.min(...clipboard.map(n => n.time))
+    const pasteTick = targetTick !== undefined ? targetTick : store.playheadPosition
+    const offset = pasteTick - minTime
+    const newSelectedIds: string[] = []
+    clipboard.forEach(note => {
+      const id = Math.random().toString(36).substr(2, 9)
+      newSelectedIds.push(id)
+      addNote({ ...note, id, trackId: targetTrackId, time: Math.max(0, note.time + offset) })
+    })
+    setSelectedNoteIds(newSelectedIds)
+    store.showToast(`Pasted ${clipboard.length} note${clipboard.length === 1 ? '' : 's'}`, 'info')
+    setContextMenu(null)
+  }
+
+  const handleDuplicateSelectedNotes = () => {
+    if (selectedNotesList.length === 0 || !targetTrackId || isReadOnly) return
+    const store = useStore.getState()
+    store.commitHistory()
+    const minTime = Math.min(...selectedNotesList.map(n => n.time))
+    const maxEndTime = Math.max(...selectedNotesList.map(n => n.time + n.duration))
+    const span = maxEndTime - minTime
+    const offset = Math.max(snapResolution || 48, span)
+    const newSelectedIds: string[] = []
+    selectedNotesList.forEach(note => {
+      const id = Math.random().toString(36).substr(2, 9)
+      newSelectedIds.push(id)
+      addNote({ ...note, id, trackId: targetTrackId, time: note.time + offset })
+    })
+    setSelectedNoteIds(newSelectedIds)
+    store.showToast(`Duplicated ${selectedNotesList.length} note${selectedNotesList.length === 1 ? '' : 's'}`, 'info')
+    setContextMenu(null)
+  }
+
+  const handleQuantizeSelectedNotes = () => {
+    if (selectedNoteIds.length === 0 || isReadOnly) return
+    useStore.getState().commitHistory()
+    useStore.getState().quantizeSelectedNotes()
+    useStore.getState().showToast('Quantized selected notes', 'info')
+    setContextMenu(null)
+  }
+
+  const handleTransposeSelectedNotes = (semitones: number) => {
+    if (selectedNotesList.length === 0 || isReadOnly) return
+    useStore.getState().commitHistory()
+    const byId = new Map(applyTranspose(selectedNotesList, semitones).map(n => [n.id, n]))
+    useStore.setState(s => ({ notes: s.notes.map(n => byId.get(n.id) ?? n) }))
+    useStore.getState().showToast(`Transposed ${semitones > 0 ? '+' : ''}${semitones} semitone${Math.abs(semitones) === 1 ? '' : 's'}`, 'info')
+    setContextMenu(null)
+  }
+
+  const handleLegatoSelectedNotes = () => {
+    if (selectedNotesList.length === 0 || isReadOnly) return
+    useStore.getState().commitHistory()
+    const byId = new Map(applyLegato(selectedNotesList).map(n => [n.id, n]))
+    useStore.setState(s => ({ notes: s.notes.map(n => byId.get(n.id) ?? n) }))
+    useStore.getState().showToast('Legato applied', 'info')
+    setContextMenu(null)
+  }
+
+  const handleGlueSelectedNotes = () => {
+    if (selectedNotesList.length === 0 || isReadOnly) return
+    useStore.getState().commitHistory()
+    const targetIdSet = new Set(selectedNotesList.map(n => n.id))
+    const remaining = useStore.getState().notes.filter(n => !targetIdSet.has(n.id))
+    const glued = applyGlue(selectedNotesList)
+    useStore.setState({ notes: [...remaining, ...glued] })
+    setSelectedNoteIds(glued.map(n => n.id))
+    useStore.getState().showToast('Glue applied', 'info')
+    setContextMenu(null)
+  }
+
+  const handleStrumSelectedNotes = () => {
+    if (selectedNotesList.length === 0 || isReadOnly) return
+    useStore.getState().commitHistory()
+    const byId = new Map(applyStrum(selectedNotesList).map(n => [n.id, n]))
+    useStore.setState(s => ({ notes: s.notes.map(n => byId.get(n.id) ?? n) }))
+    useStore.getState().showToast('Strum applied', 'info')
+    setContextMenu(null)
+  }
+
+  const handleChopSelectedNotes = (pattern: '1/16' | '1/8' | '1/32' = '1/16') => {
+    if (selectedNotesList.length === 0 || isReadOnly) return
+    useStore.getState().commitHistory()
+    const targetIdSet = new Set(selectedNotesList.map(n => n.id))
+    const remaining = useStore.getState().notes.filter(n => !targetIdSet.has(n.id))
+    const chopped = applyChop(selectedNotesList, { pattern })
+    useStore.setState({ notes: [...remaining, ...chopped] })
+    setSelectedNoteIds(chopped.map(n => n.id))
+    useStore.getState().showToast(`Chop (${pattern}) applied`, 'info')
+    setContextMenu(null)
+  }
+
+  const handleHumanizeSelectedNotes = () => {
+    if (selectedNotesList.length === 0 || isReadOnly) return
+    useStore.getState().commitHistory()
+    const byId = new Map(applyHumanize(selectedNotesList).map(n => [n.id, n]))
+    useStore.setState(s => ({ notes: s.notes.map(n => byId.get(n.id) ?? n) }))
+    useStore.getState().showToast('Humanize applied', 'info')
+    setContextMenu(null)
+  }
+
+  const handleReverseSelectedNotes = () => {
+    if (selectedNotesList.length === 0 || isReadOnly) return
+    useStore.getState().commitHistory()
+    const byId = new Map(applyFlipHorizontal(selectedNotesList).map(n => [n.id, n]))
+    useStore.setState(s => ({ notes: s.notes.map(n => byId.get(n.id) ?? n) }))
+    useStore.getState().showToast('Reverse (time) applied', 'info')
+    setContextMenu(null)
+  }
+
+  const handleInvertPitchSelectedNotes = () => {
+    if (selectedNotesList.length === 0 || isReadOnly) return
+    useStore.getState().commitHistory()
+    const byId = new Map(applyFlipVertical(selectedNotesList).map(n => [n.id, n]))
+    useStore.setState(s => ({ notes: s.notes.map(n => byId.get(n.id) ?? n) }))
+    useStore.getState().showToast('Invert (pitch) applied', 'info')
+    setContextMenu(null)
+  }
+
+  const handleSetVelocitySelectedNotes = (vel: number) => {
+    if (selectedNoteIds.length === 0 || isReadOnly) return
+    useStore.getState().commitHistory()
+    useStore.getState().updateNotes(selectedNoteIds, { velocity: vel, velocityInspectorModified: true })
+    useStore.getState().showToast(`Velocity set to ${vel}`, 'info')
+    setContextMenu(null)
+  }
+
+  const handleNudgeSelectedNotes = (direction: 'left' | 'right') => {
+    if (selectedNotesList.length === 0 || isReadOnly) return
+    useStore.getState().commitHistory()
+    const step = snapResolution || 48
+    const ticks = direction === 'left' ? -step : step
+    const byId = new Map(applyMicroNudge(selectedNotesList, ticks).map(n => [n.id, n]))
+    useStore.setState(s => ({ notes: s.notes.map(n => byId.get(n.id) ?? n) }))
+    useStore.getState().showToast(`Nudged ${direction} (${ticks > 0 ? '+' : ''}${ticks} ticks)`, 'info')
+    setContextMenu(null)
+  }
+
+  const handleVelocityRampSelectedNotes = (direction: 'crescendo' | 'decrescendo') => {
+    if (selectedNotesList.length === 0 || isReadOnly) return
+    useStore.getState().commitHistory()
+    const startVelocity = direction === 'crescendo' ? 36 : 124
+    const endVelocity = direction === 'crescendo' ? 124 : 36
+    const byId = new Map(applyVelocityRamp(selectedNotesList, { startVelocity, endVelocity, curve: 'linear' }).map(n => [n.id, n]))
+    useStore.setState(s => ({ notes: s.notes.map(n => byId.get(n.id) ?? n) }))
+    useStore.getState().showToast(`${direction === 'crescendo' ? 'Crescendo (ramp up)' : 'Decrescendo (ramp down)'} applied`, 'info')
+    setContextMenu(null)
+  }
+
+  const handleInvertTrackSelection = () => {
+    if (!targetTrackId) return
+    const trackNotes = allNotes.filter(n => n.trackId === targetTrackId)
+    const currentSet = new Set(selectedNoteIds)
+    const inverted = trackNotes.filter(n => !currentSet.has(n.id)).map(n => n.id)
+    setSelectedNoteIds(inverted)
+    useStore.getState().showToast(`Inverted selection (${inverted.length} note${inverted.length === 1 ? '' : 's'})`, 'info')
+    setContextMenu(null)
+  }
+
   const handleCreateNewTrackFromSelection = () => {
     if (selectedNoteIds.length === 0) return
     const selectedNotes = allNotes.filter(n => selectedNoteIds.includes(n.id))
@@ -2547,8 +2972,39 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
       }
     }
 
-    setDragMode('scrub_playhead')
-    setPlayheadFromWorldX(x)
+    const rawTick = xToTick(x)
+    const startTick = snapEnabled ? snapTick(rawTick, snapResolution) : Math.round(rawTick)
+
+    if (e.button === 2) {
+      canvasEl.setPointerCapture(e.pointerId)
+      timelineDragStateRef.current = {
+        startX: x,
+        startClientX: e.clientX,
+        startTick,
+        isRight: true
+      }
+      return
+    }
+
+    if (e.button === 0) {
+      canvasEl.setPointerCapture(e.pointerId)
+      timelineDragStateRef.current = {
+        startX: x,
+        startClientX: e.clientX,
+        startTick,
+        isRight: false
+      }
+      if (e.ctrlKey || e.shiftKey) {
+        setDragMode('draw_timeline_range')
+        setTimelineRangeStart(startTick)
+        setTimelineSelection({ startTick, endTick: startTick, trackId: targetTrackId })
+        return
+      }
+
+      setDragMode('scrub_playhead')
+      setPlayheadFromWorldX(x)
+      return
+    }
   }
 
   const handleTimelinePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -2573,6 +3029,29 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
       }
 
       e.currentTarget.style.cursor = 'ew-resize'
+      return
+    }
+
+    // Auto-transition to timeline range selection when dragging horizontally on ruler
+    if (timelineDragStateRef.current && (dragMode === 'scrub_playhead' || timelineDragStateRef.current.isRight)) {
+      const dist = Math.abs(e.clientX - timelineDragStateRef.current.startClientX)
+      if (dist >= 5) {
+        setDragMode('draw_timeline_range')
+        const sTick = timelineDragStateRef.current.startTick
+        setTimelineRangeStart(sTick)
+        const rawTick = xToTick(x)
+        const curTick = snapEnabled ? snapTick(rawTick, snapResolution) : Math.round(rawTick)
+        setTimelineSelection({ startTick: sTick, endTick: curTick, trackId: targetTrackId })
+        e.currentTarget.style.cursor = 'crosshair'
+        return
+      }
+    }
+
+    if (dragMode === 'draw_timeline_range' && timelineRangeStart !== null) {
+      e.currentTarget.style.cursor = 'crosshair'
+      const rawTick = xToTick(x)
+      const curTick = snapEnabled ? snapTick(rawTick, snapResolution) : Math.round(rawTick)
+      setTimelineSelection({ startTick: timelineRangeStart, endTick: curTick, trackId: targetTrackId })
       return
     }
 
@@ -2608,8 +3087,54 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
     if (dragMode === 'draw_export_region') {
       commitDragExportRegion(e, x)
     }
+
+    if (dragMode === 'draw_timeline_range') {
+      const currentSel = useStore.getState().timelineSelection
+      if (currentSel && Math.abs(currentSel.endTick - currentSel.startTick) < (snapEnabled ? Math.max(6, snapResolution / 4) : 6)) {
+        setTimelineSelection(null)
+      }
+      setTimelineRangeStart(null)
+      setDragMode('none')
+      timelineDragStateRef.current = null
+      return
+    }
+
+    if (timelineDragStateRef.current?.isRight) {
+      const clickTick = Math.max(0, Math.round(xToTick(x)))
+      const currentSel = useStore.getState().timelineSelection
+      if (currentSel) {
+        const minT = Math.min(currentSel.startTick, currentSel.endTick)
+        const maxT = Math.max(currentSel.startTick, currentSel.endTick)
+        if (clickTick >= minT && clickTick <= maxT) {
+          setContextMenu({ x: e.clientX, y: e.clientY, tick: clickTick, mode: 'timeline_range' })
+          timelineDragStateRef.current = null
+          setDragMode('none')
+          return
+        }
+      }
+      setPlayheadFromWorldX(x)
+      setSelectedNoteIds([])
+      setContextMenu({ x: e.clientX, y: e.clientY, tick: clickTick, mode: 'main' })
+      timelineDragStateRef.current = null
+      setDragMode('none')
+      return
+    }
+
+    if (dragMode === 'scrub_playhead') {
+      const currentSel = useStore.getState().timelineSelection
+      if (currentSel) {
+        const clickTick = Math.max(0, Math.round(xToTick(x)))
+        const minT = Math.min(currentSel.startTick, currentSel.endTick)
+        const maxT = Math.max(currentSel.startTick, currentSel.endTick)
+        if (clickTick < minT || clickTick > maxT) {
+          setTimelineSelection(null)
+        }
+      }
+    }
+
     setDragMode('none')
     setDragTargetCol(null)
+    timelineDragStateRef.current = null
     const { loopEnabled, loopStart, loopEnd } = useStore.getState()
     const threshold = 10 / zoom
     if (loopEnabled && (Math.abs(x - loopStart) < threshold || Math.abs(x - loopEnd) < threshold)) {
@@ -2707,10 +3232,34 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
           setDragMode('adjust_loop_end')
           setDragStartPos({ x: rawX, y: rawY })
           setDragStartValue(loopEnd)
-        } else {
-          setDragMode('scrub_playhead')
-          el.setPointerCapture(e.pointerId)
+        } else if (e.button === 2) {
+          const clickTick = Math.max(0, Math.round(xToTick(x)))
+          if (timelineSelection) {
+            const minT = Math.min(timelineSelection.startTick, timelineSelection.endTick)
+            const maxT = Math.max(timelineSelection.startTick, timelineSelection.endTick)
+            if (clickTick >= minT && clickTick <= maxT) {
+              setContextMenu({ x: e.clientX, y: e.clientY, tick: clickTick, mode: 'timeline_range' })
+              return
+            }
+          }
           setPlayheadFromWorldX(x)
+          setSelectedNoteIds([])
+          setContextMenu({ x: e.clientX, y: e.clientY, tick: clickTick, mode: 'main' })
+          return
+        } else {
+          el.setPointerCapture(e.pointerId)
+          const rawTick = xToTick(x)
+          const startTick = snapEnabled ? snapTick(rawTick, snapResolution) : Math.round(rawTick)
+          gridTimelineDragRef.current = { startX: x, startClientX: e.clientX, startTick }
+
+          if (e.ctrlKey || e.shiftKey) {
+            setDragMode('draw_timeline_range')
+            setTimelineRangeStart(startTick)
+            setTimelineSelection({ startTick, endTick: startTick, trackId: targetTrackId })
+          } else {
+            setDragMode('scrub_playhead')
+            setPlayheadFromWorldX(x)
+          }
         }
       }
       return
@@ -2771,17 +3320,24 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
     if (e.button === 2) {
       if (contextMenu) {
         setContextMenu(null)
-        return
       }
-      if (selectedNoteIds.length > 0) {
-        setContextMenu({ x: e.clientX, y: e.clientY, tick: Math.max(0, Math.round(xToTick(x))), mode: 'main' })
-      } else {
-        if (!isReadOnly && clickedNote) {
-          useStore.getState().commitHistory()
-          removeNote(clickedNote.id)
-        } else {
-          setContextMenu({ x: e.clientX, y: e.clientY, tick: Math.max(0, Math.round(xToTick(x))), mode: 'main' })
+      const clickTick = Math.max(0, Math.round(xToTick(x)))
+      if (timelineSelection) {
+        const minT = Math.min(timelineSelection.startTick, timelineSelection.endTick)
+        const maxT = Math.max(timelineSelection.startTick, timelineSelection.endTick)
+        if (clickTick >= minT && clickTick <= maxT) {
+          setContextMenu({ x: e.clientX, y: e.clientY, tick: clickTick, mode: 'timeline_range' })
+          return
         }
+      }
+      if (clickedNote) {
+        if (!selectedNoteIds.includes(clickedNote.id)) {
+          setSelectedNoteIds([clickedNote.id])
+        }
+        setContextMenu({ x: e.clientX, y: e.clientY, tick: clickTick, mode: 'main' })
+      } else {
+        setSelectedNoteIds([])
+        setContextMenu({ x: e.clientX, y: e.clientY, tick: clickTick, mode: 'main' })
       }
       return
     }
@@ -2815,6 +3371,15 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
             setDragMode('stretch_right'); el.setPointerCapture(e.pointerId); return
           }
         }
+      }
+
+      if (!isReadOnly && !clickedNote && (e.ctrlKey || e.metaKey)) {
+        setDragMode('draw_timeline_range')
+        const rawTick = xToTick(x)
+        const startTick = snapEnabled ? snapTick(rawTick, snapResolution) : Math.round(rawTick)
+        setTimelineRangeStart(startTick)
+        setTimelineSelection({ startTick, endTick: startTick, trackId: targetTrackId })
+        return
       }
 
       if (!isReadOnly && (!clickedNote && (activeTool === 'select' || e.shiftKey))) {
@@ -3148,8 +3713,27 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         }
       }
     } else if (dragMode === 'scrub_playhead') {
+      if (gridTimelineDragRef.current) {
+        const dist = Math.abs((e as any).clientX - gridTimelineDragRef.current.startClientX)
+        if (dist >= 5) {
+          setDragMode('draw_timeline_range')
+          const sTick = gridTimelineDragRef.current.startTick
+          setTimelineRangeStart(sTick)
+          const rawTick = xToTick(x)
+          const curTick = snapEnabled ? snapTick(rawTick, snapResolution) : Math.round(rawTick)
+          setTimelineSelection({ startTick: sTick, endTick: curTick, trackId: targetTrackId })
+          e.currentTarget.style.cursor = 'crosshair'
+          return
+        }
+      }
       e.currentTarget.style.cursor = 'ew-resize'
       setPlayheadFromWorldX(x)
+    } else if (dragMode === 'draw_timeline_range' && timelineRangeStart !== null) {
+      e.currentTarget.style.cursor = 'crosshair'
+      const rawTick = xToTick(x)
+      const curTick = snapEnabled ? snapTick(rawTick, snapResolution) : Math.round(rawTick)
+      setTimelineSelection({ startTick: timelineRangeStart, endTick: curTick, trackId: targetTrackId })
+      return
     } else if (dragMode === 'box_select') {
       e.currentTarget.style.cursor = 'cell'
       setBoxSelectCurrent({ x, y })
@@ -3201,6 +3785,32 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
       const rect = e.currentTarget.getBoundingClientRect()
       const x = (e.clientX - rect.left - SIDEBAR_WIDTH - getEffectivePanX(rect.width)) / zoom
       commitDragExportRegion(e, x)
+    }
+
+    if (dragMode === 'draw_timeline_range') {
+      const currentSel = useStore.getState().timelineSelection
+      if (currentSel && Math.abs(currentSel.endTick - currentSel.startTick) < (snapEnabled ? Math.max(6, snapResolution / 4) : 6)) {
+        setTimelineSelection(null)
+      }
+      setTimelineRangeStart(null)
+      setDragMode('none')
+      gridTimelineDragRef.current = null
+      return
+    }
+
+    if (dragMode === 'scrub_playhead' && gridTimelineDragRef.current) {
+      const currentSel = useStore.getState().timelineSelection
+      if (currentSel) {
+        const rect = e.currentTarget.getBoundingClientRect()
+        const x = (e.clientX - rect.left - SIDEBAR_WIDTH - getEffectivePanX(rect.width)) / zoom
+        const clickTick = Math.max(0, Math.round(xToTick(x)))
+        const minT = Math.min(currentSel.startTick, currentSel.endTick)
+        const maxT = Math.max(currentSel.startTick, currentSel.endTick)
+        if (clickTick < minT || clickTick > maxT) {
+          setTimelineSelection(null)
+        }
+      }
+      gridTimelineDragRef.current = null
     }
 
     if (dragMode === 'box_select') {
@@ -3511,6 +4121,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
             <canvas
               ref={canvasRef}
               style={{ width: '100%', height: '100%', display: 'block' }}
+              onContextMenu={e => e.preventDefault()}
             />
 
             {/* Custom Vertical Scrollbar */}
@@ -3628,27 +4239,37 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                 : laneTargetLabel(automationTarget)} Automation
             </span>
             <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
-              {(['velocity', 'volume', 'pan'] as const).map(t => (
-                <button
-                  key={t}
-                  onClick={(e) => { e.stopPropagation(); setAutomationTarget(targetTrackId, t) }}
-                  style={{
-                    padding: '3px 7px',
-                    borderRadius: '4px',
-                    border: `1px solid ${automationTarget === t ? 'rgba(77,171,247,0.45)' : 'rgba(255,255,255,0.07)'}`,
-                    background: automationTarget === t ? 'rgba(77,171,247,0.16)' : 'rgba(255,255,255,0.03)',
-                    color: automationTarget === t ? '#4dabf7' : '#8a8a95',
-                    fontSize: '9px',
-                    fontWeight: 700,
-                    textTransform: 'none',
-                    letterSpacing: 0,
-                    cursor: 'pointer',
-                    lineHeight: 1.2
-                  }}
-                >
-                  {t === 'velocity' ? 'Velocity' : t === 'volume' ? 'Volume' : 'Pan'}
-                </button>
-              ))}
+              {(['velocity', 'volume', 'pan'] as const).map(t => {
+                const curvePoints = getTrackAutomationPoints(useStore.getState().automationCurves, targetTrackId, t)
+                const hasActiveData = curvePoints.length > 0
+                return (
+                  <button
+                    key={t}
+                    onClick={(e) => { e.stopPropagation(); setAutomationTarget(targetTrackId, t) }}
+                    style={{
+                      padding: '3px 7px',
+                      borderRadius: '4px',
+                      border: `1px solid ${automationTarget === t ? 'rgba(77,171,247,0.45)' : hasActiveData ? 'rgba(0,230,255,0.3)' : 'rgba(255,255,255,0.07)'}`,
+                      background: automationTarget === t ? 'rgba(77,171,247,0.16)' : 'rgba(255,255,255,0.03)',
+                      color: automationTarget === t ? '#4dabf7' : hasActiveData ? '#00e6ff' : '#8a8a95',
+                      fontSize: '9px',
+                      fontWeight: 700,
+                      textTransform: 'none',
+                      letterSpacing: 0,
+                      cursor: 'pointer',
+                      lineHeight: 1.2,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '4px'
+                    }}
+                  >
+                    <span>{t === 'velocity' ? 'Velocity' : t === 'volume' ? 'Volume' : 'Pan'}</span>
+                    {hasActiveData && (
+                      <span style={{ width: 4, height: 4, borderRadius: '50%', background: '#00e6ff', boxShadow: '0 0 5px #00e6ff' }} title="Active curve modulation" />
+                    )}
+                  </button>
+                )
+              })}
               {vst3Params.length > 0 && (
                 <select
                   value={vst3TargetIndex >= 0 ? String(vst3TargetIndex) : ''}
@@ -3794,7 +4415,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                   }
 
                   // 2. Fallback to general automation curves
-                  const points = useStore.getState().automationCurves[targetTrackId] ?? []
+                  const points = getTrackAutomationPoints(useStore.getState().automationCurves, targetTrackId, automationTarget)
                   const nearest = points.find(point => {
                     const pointX = tickToX(point.time)
                     const pointY = rect.height - (point.value / 127) * rect.height
@@ -3802,16 +4423,16 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                   })
 
                   if (e.button === 2) {
-                    if (nearest) removeAutomationPoint(targetTrackId, nearest.id)
+                    if (nearest) removeAutomationPoint(targetTrackId, nearest.id, automationTarget)
                     return
                   }
 
                   if (nearest) {
                     setDragAutomationPointId(nearest.id)
-                    updateAutomationPoint(targetTrackId, nearest.id, { time, value: clickVelocity })
+                    updateAutomationPoint(targetTrackId, nearest.id, { time, value: clickVelocity }, automationTarget)
                   } else {
                     const id = Math.random().toString(36).substr(2, 9)
-                    addAutomationPoint(targetTrackId, { id, time, value: clickVelocity })
+                    addAutomationPoint(targetTrackId, { id, time, value: clickVelocity }, automationTarget)
                     setDragAutomationPointId(id)
                   }
                   setDragMode('draw_automation')
@@ -3829,7 +4450,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                     const x = Math.max(0, (rawX - SIDEBAR_WIDTH - getEffectivePanX(rect.width)) / zoom)
                     const rawTick = xToTick(x)
                     const time = snapEnabled ? snapTick(rawTick, snapResolution) : Math.round(rawTick)
-                    updateAutomationPoint(targetTrackId, dragAutomationPointId, { time, value: velocity })
+                    updateAutomationPoint(targetTrackId, dragAutomationPointId, { time, value: velocity }, automationTarget)
                   }
                 }}
                 onPointerUp={() => {
@@ -3853,13 +4474,14 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         <div
           style={{
             position: 'fixed',
-            top: contextMenu.mode === 'glide' ? Math.max(8, Math.min(contextMenu.y, window.innerHeight - 360)) : contextMenu.y,
-            left: contextMenu.mode === 'glide' ? Math.max(8, Math.min(contextMenu.x, window.innerWidth - 260)) : contextMenu.x,
+            top: contextMenu.mode === 'glide' ? Math.max(8, Math.min(contextMenu.y, window.innerHeight - 360)) : Math.max(8, Math.min(contextMenu.y, window.innerHeight - 520)),
+            left: contextMenu.mode === 'glide' ? Math.max(8, Math.min(contextMenu.x, window.innerWidth - 260)) : Math.max(8, Math.min(contextMenu.x, window.innerWidth - 280)),
             background: '#14141c',
             border: '1px solid rgba(255, 255, 255, 0.08)',
             borderRadius: '8px',
             zIndex: 9999,
-            minWidth: contextMenu.mode === 'glide' ? '248px' : '180px',
+            minWidth: contextMenu.mode === 'glide' ? '248px' : '230px',
+            maxWidth: '280px',
             boxShadow: '0 10px 30px rgba(0,0,0,0.6)',
             overflow: 'hidden'
           }}
@@ -3867,54 +4489,407 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
           onClick={e => e.stopPropagation()}
         >
           {contextMenu.mode === 'main' ? (
-            <div style={{ padding: '4px 0' }}>
+            <div style={{ padding: '4px 0', maxHeight: '520px', overflowY: 'auto' }} className="thin-scroll">
               <button
-                style={{ width: '100%', padding: '8px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '8px' }}
+                style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
                 onClick={() => {
                   setPlayheadFromWorldX(contextMenu.tick)
                   setContextMenu(null)
                 }}
-                onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
                 onMouseLeave={e => e.currentTarget.style.background = 'none'}
               >
-                <IconPin size={13} style={{ color: '#ff3366' }} /> Place playhead here
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <IconPin size={13} style={{ color: '#ff3366' }} /> Place playhead here
+                </div>
               </button>
 
-              {selectedNoteIds.length > 0 && (
+              {selectedNoteIds.length > 0 ? (
                 <>
-                  {noteInspectorEnabled && (
-                    <>
-                      <div style={{ height: '1px', background: 'rgba(255,255,255,0.05)', margin: '4px 0' }} />
-                      
-                      <button
-                        style={{ width: '100%', padding: '8px 12px', background: 'none', border: 'none', color: '#4dabf7', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600 }}
-                        onClick={() => {
-                          useStore.getState().setIsRightPaneVisible(!isRightPaneVisible)
-                          setContextMenu(null)
-                        }}
-                        onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}
-                        onMouseLeave={e => e.currentTarget.style.background = 'none'}
-                      >
-                        <IconSettings size={13} /> {isRightPaneVisible ? 'Hide Note Inspector' : 'Show Note Inspector'}
-                      </button>
-                    </>
-                  )}
+                  <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />
 
-                  <div style={{ height: '1px', background: 'rgba(255,255,255,0.05)', margin: '4px 0' }} />
+                  {/* Header with selection info */}
+                  <div style={{ padding: '4px 12px 6px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.6px', color: '#888', fontWeight: 800 }}>
+                      {selectedNoteIds.length === 1 ? '1 Note Selected' : `${selectedNoteIds.length} Notes Selected`}
+                    </span>
+                    {allSelectedNotesMuted ? (
+                      <span style={{ fontSize: '8px', padding: '1px 5px', borderRadius: '3px', background: 'rgba(255,51,102,0.18)', color: '#ff6b8b', fontWeight: 700, letterSpacing: '0.4px' }}>
+                        MUTED
+                      </span>
+                    ) : hasMixedMuteState ? (
+                      <span style={{ fontSize: '8px', padding: '1px 5px', borderRadius: '3px', background: 'rgba(255,170,0,0.18)', color: '#ffa94d', fontWeight: 700, letterSpacing: '0.4px' }}>
+                        PARTIALLY MUTED
+                      </span>
+                    ) : null}
+                  </div>
+
+                  {/* Group Mute / Unmute Button */}
+                  <button
+                    style={{
+                      width: '100%',
+                      padding: '7px 12px',
+                      background: allSelectedNotesMuted ? 'rgba(105, 219, 124, 0.08)' : 'rgba(255, 51, 102, 0.08)',
+                      border: 'none',
+                      color: allSelectedNotesMuted ? '#69db7c' : '#ff6b8b',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      fontSize: '11px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      fontWeight: 700
+                    }}
+                    onClick={handleToggleMuteSelectedNotes}
+                    onMouseEnter={e => e.currentTarget.style.background = allSelectedNotesMuted ? 'rgba(105, 219, 124, 0.16)' : 'rgba(255, 51, 102, 0.16)'}
+                    onMouseLeave={e => e.currentTarget.style.background = allSelectedNotesMuted ? 'rgba(105, 219, 124, 0.08)' : 'rgba(255, 51, 102, 0.08)'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      {allSelectedNotesMuted ? <IconVolume size={13} /> : <IconVolumeX size={13} />}
+                      {allSelectedNotesMuted ? 'Unmute Selection' : 'Mute Selection'}
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#888', fontWeight: 600 }}>M</span>
+                  </button>
+
+                  <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />
+
+                  {/* Clipboard Section */}
+                  <div style={{ padding: '3px 12px 2px', fontSize: '8.5px', textTransform: 'uppercase', color: '#555', fontWeight: 800, letterSpacing: '0.6px' }}>
+                    Clipboard
+                  </div>
 
                   <button
-                    style={{ width: '100%', padding: '8px 12px', background: 'none', border: 'none', color: '#69db7c', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600 }}
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={handleCopyNotes}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconCopy size={13} style={{ color: '#4dabf7' }} /> Copy
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+C</span>
+                  </button>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={handleCutNotes}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconScissors size={13} style={{ color: '#da77f2' }} /> Cut
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+X</span>
+                  </button>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={handleDuplicateSelectedNotes}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconLayers size={13} style={{ color: '#ffd43b' }} /> Duplicate
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+D</span>
+                  </button>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: useStore.getState().clipboard.length > 0 ? 'pointer' : 'default', opacity: useStore.getState().clipboard.length > 0 ? 1 : 0.4, textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={() => {
+                      if (useStore.getState().clipboard.length > 0) {
+                        handlePasteNotes(contextMenu.tick)
+                      }
+                    }}
+                    onMouseEnter={e => { if (useStore.getState().clipboard.length > 0) e.currentTarget.style.background = 'rgba(255,255,255,0.05)' }}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconPaste size={13} style={{ color: '#69db7c' }} /> Paste (at click)
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+V</span>
+                  </button>
+
+                  <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />
+
+                  {/* Pitch & Transpose */}
+                  <div style={{ padding: '3px 12px 2px', fontSize: '8.5px', textTransform: 'uppercase', color: '#555', fontWeight: 800, letterSpacing: '0.6px' }}>
+                    Pitch & Transpose
+                  </div>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={() => handleTransposeSelectedNotes(12)}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconArrowUp size={13} style={{ color: '#4dabf7' }} /> Transpose +1 Octave
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Shift+↑</span>
+                  </button>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={() => handleTransposeSelectedNotes(-12)}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconArrowDown size={13} style={{ color: '#4dabf7' }} /> Transpose -1 Octave
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Shift+↓</span>
+                  </button>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={() => handleTransposeSelectedNotes(1)}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconArrowUp size={13} style={{ color: '#74c0fc' }} /> Transpose +1 Semitone
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+↑</span>
+                  </button>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={() => handleTransposeSelectedNotes(-1)}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconArrowDown size={13} style={{ color: '#74c0fc' }} /> Transpose -1 Semitone
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+↓</span>
+                  </button>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={handleInvertPitchSelectedNotes}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconShuffle size={13} style={{ color: '#b197fc' }} /> Invert Pitch
+                    </div>
+                  </button>
+
+                  <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />
+
+                  {/* Timing & Articulations */}
+                  <div style={{ padding: '3px 12px 2px', fontSize: '8.5px', textTransform: 'uppercase', color: '#555', fontWeight: 800, letterSpacing: '0.6px' }}>
+                    Timing & Articulation
+                  </div>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={handleQuantizeSelectedNotes}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconZap size={13} style={{ color: '#ffd43b' }} /> Quantize to Grid
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Q</span>
+                  </button>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={handleLegatoSelectedNotes}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconMusic size={13} style={{ color: '#69db7c' }} /> Quick Legato
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+L</span>
+                  </button>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={handleGlueSelectedNotes}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconLayers size={13} style={{ color: '#ff922b' }} /> Glue / Merge
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+G</span>
+                  </button>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={handleStrumSelectedNotes}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconSparkles size={13} style={{ color: '#da77f2' }} /> Strum Chords
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Alt+S</span>
+                  </button>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={() => handleChopSelectedNotes('1/16')}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconScissors size={13} style={{ color: '#fa5252' }} /> Chop 1/16th Notes
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Alt+U</span>
+                  </button>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={handleHumanizeSelectedNotes}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconSparkles size={13} style={{ color: '#20c997' }} /> Humanize (Jitter)
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Alt+R</span>
+                  </button>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={handleReverseSelectedNotes}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconShuffle size={13} style={{ color: '#4dabf7' }} /> Reverse (Time)
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Alt+Y</span>
+                  </button>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={() => handleNudgeSelectedNotes('left')}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconAlign size={13} style={{ color: '#4dabf7' }} /> Nudge Left
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Alt+←</span>
+                  </button>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={() => handleNudgeSelectedNotes('right')}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconAlign size={13} style={{ color: '#4dabf7' }} /> Nudge Right
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Alt+→</span>
+                  </button>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={() => handleVelocityRampSelectedNotes('crescendo')}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconArrowUp size={13} style={{ color: '#ffd43b' }} /> Crescendo (Ramp Up)
+                    </div>
+                  </button>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={() => handleVelocityRampSelectedNotes('decrescendo')}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconArrowDown size={13} style={{ color: '#ffd43b' }} /> Decrescendo (Ramp Down)
+                    </div>
+                  </button>
+
+                  <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />
+
+                  {/* Velocity Quick Bar */}
+                  <div style={{ padding: '3px 12px 4px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: '8.5px', textTransform: 'uppercase', color: '#555', fontWeight: 800, letterSpacing: '0.6px' }}>Velocity</span>
+                    <div style={{ display: 'flex', gap: '3px' }}>
+                      {[
+                        { label: '25%', val: 32 },
+                        { label: '50%', val: 64 },
+                        { label: '75%', val: 96 },
+                        { label: '100%', val: 127 },
+                      ].map(v => (
+                        <button
+                          key={v.val}
+                          onClick={() => handleSetVelocitySelectedNotes(v.val)}
+                          style={{
+                            padding: '2px 5px',
+                            background: 'rgba(255,255,255,0.05)',
+                            border: '1px solid rgba(255,255,255,0.08)',
+                            borderRadius: '3px',
+                            color: '#aaa',
+                            fontSize: '9px',
+                            fontWeight: 600,
+                            cursor: 'pointer'
+                          }}
+                          onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.12)'; e.currentTarget.style.color = '#fff' }}
+                          onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = '#aaa' }}
+                        >
+                          {v.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />
+
+                  {/* DAW Track & Linking Tools */}
+                  <div style={{ padding: '3px 12px 2px', fontSize: '8.5px', textTransform: 'uppercase', color: '#555', fontWeight: 800, letterSpacing: '0.6px' }}>
+                    DAW Tools
+                  </div>
+
+                  {noteInspectorEnabled && (
+                    <button
+                      style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#4dabf7', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600 }}
+                      onClick={() => {
+                        useStore.getState().setIsRightPaneVisible(!isRightPaneVisible)
+                        setContextMenu(null)
+                      }}
+                      onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                      onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                    >
+                      <IconSettings size={13} /> {isRightPaneVisible ? 'Hide Note Inspector' : 'Show Note Inspector'}
+                    </button>
+                  )}
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#69db7c', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600 }}
                     onClick={handleCreateNewTrackFromSelection}
-                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
                     onMouseLeave={e => e.currentTarget.style.background = 'none'}
                   >
                     <IconPlus size={13} /> Create New Track from Selection
                   </button>
 
                   <button
-                    style={{ width: '100%', padding: '8px 12px', background: 'none', border: 'none', color: '#ff9900', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600 }}
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#b197fc', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '8px' }}
+                    onClick={handleInvertTrackSelection}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <IconList size={13} /> Invert Selection on Track
+                  </button>
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#ff9900', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600 }}
                     onClick={() => setContextMenu(prev => prev ? { ...prev, mode: 'subtrack_parent' } : null)}
-                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
                     onMouseLeave={e => e.currentTarget.style.background = 'none'}
                   >
                     <IconPlus size={13} /> Create Subtrack of...
@@ -3922,27 +4897,256 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
 
                   {selectedNoteIds.length >= 2 && (
                     <button
-                      style={{ width: '100%', padding: '8px 12px', background: 'none', border: 'none', color: '#da77f2', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600 }}
+                      style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#da77f2', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600 }}
                       onClick={() => setContextMenu(prev => prev ? { ...prev, mode: 'glide' } : null)}
-                      onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}
+                      onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
                       onMouseLeave={e => e.currentTarget.style.background = 'none'}
                     >
                       <IconMusic size={13} /> Link Glides...
                     </button>
                   )}
 
-                  <div style={{ height: '1px', background: 'rgba(255,255,255,0.05)', margin: '4px 0' }} />
+                  <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />
 
+                  {/* Delete */}
                   <button
-                    style={{ width: '100%', padding: '8px 12px', background: 'none', border: 'none', color: '#ff3366', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '8px' }}
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#ff3366', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontWeight: 600 }}
                     onClick={handleDeleteSelectedNotes}
-                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,51,102,0.1)'}
                     onMouseLeave={e => e.currentTarget.style.background = 'none'}
                   >
-                    <IconTrash size={13} /> Delete Selected Notes
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconTrash size={13} /> Delete Selected Notes
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#888', fontWeight: 600 }}>Del</span>
                   </button>
                 </>
+              ) : (
+                <>
+                  {useStore.getState().clipboard.length > 0 && (
+                    <>
+                      <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />
+                      <button
+                        style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                        onClick={() => handlePasteNotes(contextMenu.tick)}
+                        onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                        onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <IconPaste size={13} style={{ color: '#69db7c' }} /> Paste at Cursor ({useStore.getState().clipboard.length} notes)
+                        </div>
+                        <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+V</span>
+                      </button>
+                    </>
+                  )}
+
+                  {targetTrackId && (
+                    <>
+                      <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />
+                      <button
+                        style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                        onClick={() => {
+                          const trackNotes = allNotes.filter(n => n.trackId === targetTrackId)
+                          setSelectedNoteIds(trackNotes.map(n => n.id))
+                          setContextMenu(null)
+                        }}
+                        onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                        onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <IconList size={13} style={{ color: '#4dabf7' }} /> Select All Notes on Track
+                        </div>
+                        <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+A</span>
+                      </button>
+                    </>
+                  )}
+                </>
               )}
+            </div>
+          ) : contextMenu.mode === 'timeline_range' ? (
+            <div style={{ padding: '4px 0', maxHeight: '520px', overflowY: 'auto' }} className="thin-scroll">
+              <div style={{ padding: '6px 12px 6px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                <span style={{ fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.6px', color: '#ffa94d', fontWeight: 800 }}>
+                  Timeline Region
+                </span>
+                {timelineSelection && (
+                  <span style={{ fontSize: '9px', color: '#888', fontFamily: 'monospace' }}>
+                    {Math.abs(timelineSelection.endTick - timelineSelection.startTick)} ticks
+                  </span>
+                )}
+              </div>
+
+              <button
+                style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                onClick={() => {
+                  if (timelineSelection) {
+                    duplicateTimelineRange(timelineSelection.startTick, timelineSelection.endTick, targetTrackId)
+                  }
+                  setContextMenu(null)
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'none'}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <IconLayers size={13} style={{ color: '#ffd43b' }} /> Duplicate Region
+                </div>
+                <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+D</span>
+              </button>
+
+              <button
+                style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                onClick={() => {
+                  if (timelineSelection) {
+                    muteTimelineRange(timelineSelection.startTick, timelineSelection.endTick, targetTrackId)
+                  }
+                  setContextMenu(null)
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'none'}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <IconVolumeX size={13} style={{ color: '#ff6b8b' }} /> Mute / Unmute Region
+                </div>
+                <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>M</span>
+              </button>
+
+              <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />
+
+              <button
+                style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                onClick={() => {
+                  if (timelineSelection) {
+                    const minT = Math.min(timelineSelection.startTick, timelineSelection.endTick)
+                    const maxT = Math.max(timelineSelection.startTick, timelineSelection.endTick)
+                    const notesToCopy = allNotes.filter(n => n.time >= minT && n.time < maxT && (!targetTrackId || n.trackId === targetTrackId))
+                    if (notesToCopy.length > 0) {
+                      useStore.getState().setClipboard(notesToCopy)
+                      deleteTimelineRange(timelineSelection.startTick, timelineSelection.endTick, targetTrackId)
+                      useStore.getState().showToast(`Cut ${notesToCopy.length} notes in region`, 'info')
+                    }
+                  }
+                  setContextMenu(null)
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'none'}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <IconScissors size={13} style={{ color: '#da77f2' }} /> Cut Region
+                </div>
+                <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+X</span>
+              </button>
+
+              <button
+                style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                onClick={() => {
+                  if (timelineSelection) {
+                    const minT = Math.min(timelineSelection.startTick, timelineSelection.endTick)
+                    const maxT = Math.max(timelineSelection.startTick, timelineSelection.endTick)
+                    const notesToCopy = allNotes.filter(n => n.time >= minT && n.time < maxT && (!targetTrackId || n.trackId === targetTrackId))
+                    if (notesToCopy.length > 0) {
+                      useStore.getState().setClipboard(notesToCopy)
+                      useStore.getState().showToast(`Copied ${notesToCopy.length} notes in region`, 'info')
+                    }
+                  }
+                  setContextMenu(null)
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'none'}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <IconCopy size={13} style={{ color: '#4dabf7' }} /> Copy Region
+                </div>
+                <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+C</span>
+              </button>
+
+              <button
+                style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#ff3366', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontWeight: 600 }}
+                onClick={() => {
+                  if (timelineSelection) {
+                    deleteTimelineRange(timelineSelection.startTick, timelineSelection.endTick, targetTrackId)
+                  }
+                  setContextMenu(null)
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,51,102,0.1)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'none'}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <IconTrash size={13} /> Delete Region
+                </div>
+                <span style={{ fontSize: '10px', color: '#888', fontWeight: 600 }}>Del</span>
+              </button>
+
+              <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />
+
+              <button
+                style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                onClick={() => {
+                  if (timelineSelection) {
+                    splitTimelineRange(timelineSelection.startTick, timelineSelection.endTick, targetTrackId)
+                  }
+                  setContextMenu(null)
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'none'}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <IconScissors size={13} style={{ color: '#fa5252' }} /> Split Notes at Boundaries
+                </div>
+                <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+E</span>
+              </button>
+
+              <button
+                style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                onClick={() => {
+                  if (timelineSelection) {
+                    quantizeTimelineRange(timelineSelection.startTick, timelineSelection.endTick, targetTrackId)
+                  }
+                  setContextMenu(null)
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'none'}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <IconZap size={13} style={{ color: '#ffd43b' }} /> Quantize Region
+                </div>
+                <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Q</span>
+              </button>
+
+              <button
+                style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                onClick={() => {
+                  if (timelineSelection) {
+                    const minT = Math.min(timelineSelection.startTick, timelineSelection.endTick)
+                    const maxT = Math.max(timelineSelection.startTick, timelineSelection.endTick)
+                    useStore.getState().setLoopStart(minT)
+                    useStore.getState().setLoopEnd(maxT)
+                    useStore.getState().setLoopEnabled(true)
+                  }
+                  setContextMenu(null)
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'none'}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <IconMusic size={13} style={{ color: '#4dabf7' }} /> Set as Loop Range
+                </div>
+                <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+L</span>
+              </button>
+
+              <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />
+
+              <button
+                style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#888', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                onClick={() => {
+                  setTimelineSelection(null)
+                  setContextMenu(null)
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'none'}
+              >
+                <span>Deselect Region</span>
+                <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Esc</span>
+              </button>
             </div>
           ) : contextMenu.mode === 'glide' ? (
             <div style={{ padding: '6px 0' }}>

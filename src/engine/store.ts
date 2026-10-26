@@ -12,6 +12,7 @@ export interface Note {
   duration: number
   pitch: number
   velocity: number
+  muted?: boolean
   bpm?: number
   instrumentOverride?: InstrumentOverride
   /** Per-note FX chain. When present this replaces the track rack for this note. */
@@ -22,6 +23,9 @@ export interface Note {
   detune?: number
   pitchOffset?: number // Semitone offset for drum hits (-24 to +24)
   pitchEnd?: number // The ending pitch (highest pitch if extended)
+  octaves?: number // Per-note punch octaves override for drum hits
+  resonance?: number // Per-note filter resonance/cutoff Hz override for drum hits
+  decay?: number // Per-note decay override in seconds for drum hits
 
   // MPE & Micro-Expression Properties
   pitchSlide?: number;      // Semitone offset from this note's own pitch (unbounded)
@@ -88,6 +92,27 @@ export type AutomationTarget =
   | 'pan'
   | `vst3:${number}`
   | `expr:${ExpressionLaneTarget}`
+
+export function getAutomationTargetKey(trackId: string, target?: AutomationTarget): string {
+  if (!target || target === 'velocity') return `${trackId}::velocity`
+  return `${trackId}::${target}`
+}
+
+export function getTrackAutomationPoints(
+  curves: Record<string, AutomationPoint[]> | undefined,
+  trackId: string,
+  target: AutomationTarget = 'velocity'
+): AutomationPoint[] {
+  if (!curves) return []
+  const specificKey = `${trackId}::${target}`
+  if (curves[specificKey] && curves[specificKey].length > 0) {
+    return curves[specificKey]
+  }
+  if (target === 'velocity' && curves[trackId] && curves[trackId].length > 0) {
+    return curves[trackId]
+  }
+  return curves[specificKey] ?? []
+}
 
 /** Where a lane's values come from. 'formula' evaluates an equation the way the FX modulators do. */
 export type AutomationLaneSource = 'drawn' | 'formula'
@@ -182,6 +207,8 @@ export function deduplicateNotes(notesList: Note[]): Note[] {
     const duplicateIdx = result.findIndex(existing => {
       // Notes on different tracks should never be deduplicated!
       if (existing.trackId !== note.trackId) return false
+      // Muted and unmuted notes should never merge
+      if (Boolean(existing.muted) !== Boolean(note.muted)) return false
 
       // For free-pitch, we check if they overlap in both time AND pitch.
       const existingMinPitch = Math.min(existing.pitch, existing.pitchEnd ?? existing.pitch)
@@ -1008,6 +1035,12 @@ export interface ExportRegion {
   gap: number; // silence gap in seconds
 }
 
+export interface TimelineSelection {
+  startTick: number;
+  endTick: number;
+  trackId?: string;
+}
+
 export interface MidiRemapData {
   midi: any | null;
   filename: string;
@@ -1150,6 +1183,14 @@ export interface AppState {
   removeExportRegion: (id: string) => void
   updateExportRegionGap: (id: string, gap: number) => void
 
+  timelineSelection: TimelineSelection | null
+  setTimelineSelection: (selection: TimelineSelection | null) => void
+  duplicateTimelineRange: (startTick: number, endTick: number, trackId?: string) => void
+  muteTimelineRange: (startTick: number, endTick: number, trackId?: string) => void
+  deleteTimelineRange: (startTick: number, endTick: number, trackId?: string) => void
+  splitTimelineRange: (startTick: number, endTick: number, trackId?: string) => void
+  quantizeTimelineRange: (startTick: number, endTick: number, trackId?: string) => void
+
   gridSplitOrder: 'synth-first' | 'drum-first'
   gridPaneMode: 'split' | 'synth-only' | 'drum-only' | 'active'
   setGridSplitOrder: (order: 'synth-first' | 'drum-first') => void
@@ -1291,11 +1332,11 @@ export interface AppState {
   extractGroove: (noteIds: string[], name: string) => void
   setQuantizeInputEnabled: (v: boolean) => void
   setQuantizeStrength: (v: number) => void
-  setAutomationCurve: (trackId: string, points: AutomationPoint[]) => void
-  addAutomationPoint: (trackId: string, point: AutomationPoint) => void
-  updateAutomationPoint: (trackId: string, pointId: string, updates: Partial<AutomationPoint>) => void
-  removeAutomationPoint: (trackId: string, pointId: string) => void
-  clearAutomationCurve: (trackId: string) => void
+  setAutomationCurve: (trackId: string, points: AutomationPoint[], target?: AutomationTarget) => void
+  addAutomationPoint: (trackId: string, point: AutomationPoint, target?: AutomationTarget) => void
+  updateAutomationPoint: (trackId: string, pointId: string, updates: Partial<AutomationPoint>, target?: AutomationTarget) => void
+  removeAutomationPoint: (trackId: string, pointId: string, target?: AutomationTarget) => void
+  clearAutomationCurve: (trackId: string, target?: AutomationTarget) => void
   setAutomationTarget: (trackId: string, target: AutomationTarget) => void
   updateAutomationLane: (trackId: string, updates: Partial<AutomationLane>) => void
   resetAutomationLane: (trackId: string) => void
@@ -1534,6 +1575,7 @@ export const useStore = create<AppState>((originalSet, get, api) => {
     projectExportData: null,
     exportRegionMode: false,
     exportRegions: [],
+    timelineSelection: null,
     midiRemapData: {
       midi: null,
       filename: '',
@@ -2537,27 +2579,32 @@ if (firstTrack) {
 
     setQuantizeInputEnabled: (v) => set({ quantizeInputEnabled: v }),
     setQuantizeStrength: (v) => set({ quantizeStrength: Math.max(1, Math.min(100, Math.round(v))) }),
-    setAutomationCurve: (trackId, points) => set((state) => {
+    setAutomationCurve: (trackId, points, target) => set((state) => {
+      const key = getAutomationTargetKey(trackId, target || state.automationTargets[trackId])
       const unique = Array.from(new Map(points.map(p => [p.time, p])).values())
       return {
         automationCurves: {
           ...state.automationCurves,
-          [trackId]: unique.sort((a, b) => a.time - b.time)
+          [key]: unique.sort((a, b) => a.time - b.time)
         }
       }
     }),
-    addAutomationPoint: (trackId, point) => set((state) => {
-      const existing = state.automationCurves[trackId] ?? []
+    addAutomationPoint: (trackId, point, target) => set((state) => {
+      const activeTarget = target || state.automationTargets[trackId] || 'velocity'
+      const key = getAutomationTargetKey(trackId, activeTarget)
+      const existing = state.automationCurves[key] ?? (activeTarget === 'velocity' ? state.automationCurves[trackId] : undefined) ?? []
       const filtered = existing.filter(p => p.time !== point.time)
       return {
         automationCurves: {
           ...state.automationCurves,
-          [trackId]: [...filtered, point].sort((a, b) => a.time - b.time)
+          [key]: [...filtered, point].sort((a, b) => a.time - b.time)
         }
       }
     }),
-    updateAutomationPoint: (trackId, pointId, updates) => set((state) => {
-      const existing = state.automationCurves[trackId] ?? []
+    updateAutomationPoint: (trackId, pointId, updates, target) => set((state) => {
+      const activeTarget = target || state.automationTargets[trackId] || 'velocity'
+      const key = getAutomationTargetKey(trackId, activeTarget)
+      const existing = state.automationCurves[key] ?? (activeTarget === 'velocity' ? state.automationCurves[trackId] : undefined) ?? []
       const targetTime = updates.time !== undefined ? updates.time : undefined
       const updated = existing.map(point => point.id === pointId ? { ...point, ...updates } : point)
       const filtered = targetTime !== undefined
@@ -2566,22 +2613,31 @@ if (firstTrack) {
       return {
         automationCurves: {
           ...state.automationCurves,
-          [trackId]: filtered.sort((a, b) => a.time - b.time)
+          [key]: filtered.sort((a, b) => a.time - b.time)
         }
       }
     }),
-    removeAutomationPoint: (trackId, pointId) => set((state) => ({
-      automationCurves: {
-        ...state.automationCurves,
-        [trackId]: (state.automationCurves[trackId] ?? []).filter(point => point.id !== pointId)
+    removeAutomationPoint: (trackId, pointId, target) => set((state) => {
+      const activeTarget = target || state.automationTargets[trackId] || 'velocity'
+      const key = getAutomationTargetKey(trackId, activeTarget)
+      const existing = state.automationCurves[key] ?? (activeTarget === 'velocity' ? state.automationCurves[trackId] : undefined) ?? []
+      return {
+        automationCurves: {
+          ...state.automationCurves,
+          [key]: existing.filter(point => point.id !== pointId)
+        }
       }
-    })),
-    clearAutomationCurve: (trackId) => set((state) => ({
-      automationCurves: {
-        ...state.automationCurves,
-        [trackId]: []
+    }),
+    clearAutomationCurve: (trackId, target) => set((state) => {
+      const activeTarget = target || state.automationTargets[trackId] || 'velocity'
+      const key = getAutomationTargetKey(trackId, activeTarget)
+      return {
+        automationCurves: {
+          ...state.automationCurves,
+          [key]: []
+        }
       }
-    })),
+    }),
     setAutomationTarget: (trackId, target) => set((state) => ({
       automationTargets: {
         ...state.automationTargets,
@@ -2728,6 +2784,182 @@ if (firstTrack) {
     addExportRegion: (region) => set(s => ({ exportRegions: [...s.exportRegions, region] })),
     removeExportRegion: (id) => set(s => ({ exportRegions: s.exportRegions.filter(r => r.id !== id) })),
     updateExportRegionGap: (id, gap) => set(s => ({ exportRegions: s.exportRegions.map(r => r.id === id ? { ...r, gap } : r) })),
+    setTimelineSelection: (selection) => set({ timelineSelection: selection }),
+    duplicateTimelineRange: (startTick, endTick, trackId) => set(state => {
+      const minT = Math.min(startTick, endTick)
+      const maxT = Math.max(startTick, endTick)
+      const rangeLen = maxT - minT
+      if (rangeLen <= 0) return state
+
+      const inRangeNotes = state.notes.filter(n =>
+        n.time >= minT && n.time < maxT && (!trackId || n.trackId === trackId)
+      )
+      if (inRangeNotes.length === 0) return state
+
+      const duplicatedNotes = inRangeNotes.map(n => ({
+        ...n,
+        id: `note-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        time: n.time + rangeLen
+      }))
+
+      const newCurves = { ...state.automationCurves }
+      Object.entries(newCurves).forEach(([key, pts]) => {
+        const keyTrackId = key.includes('::') ? key.split('::')[0] : key
+        if (!trackId || keyTrackId === trackId) {
+          const inRangePts = pts.filter(p => p.time >= minT && p.time < maxT)
+          if (inRangePts.length > 0) {
+            const dupPts = inRangePts.map(p => ({
+              ...p,
+              id: `auto-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+              time: p.time + rangeLen
+            }))
+            newCurves[key] = [...pts, ...dupPts].sort((a, b) => a.time - b.time)
+          }
+        }
+      })
+
+      const trimmed = state.history.slice(0, state.historyIndex + 1)
+      const nextHistory = [...trimmed, [...state.notes]].slice(-50)
+
+      return {
+        notes: deduplicateNotes([...state.notes, ...duplicatedNotes]),
+        automationCurves: newCurves,
+        selectedNoteIds: duplicatedNotes.map(n => n.id),
+        history: nextHistory,
+        historyIndex: nextHistory.length - 1,
+        isDirty: true
+      }
+    }),
+    muteTimelineRange: (startTick, endTick, trackId) => set(state => {
+      const minT = Math.min(startTick, endTick)
+      const maxT = Math.max(startTick, endTick)
+      const inRangeNotes = state.notes.filter(n =>
+        n.time >= minT && n.time < maxT && (!trackId || n.trackId === trackId)
+      )
+      if (inRangeNotes.length === 0) return state
+
+      const allMuted = inRangeNotes.every(n => n.muted)
+      const targetIds = new Set(inRangeNotes.map(n => n.id))
+
+      const trimmed = state.history.slice(0, state.historyIndex + 1)
+      const nextHistory = [...trimmed, [...state.notes]].slice(-50)
+
+      return {
+        notes: state.notes.map(n => targetIds.has(n.id) ? { ...n, muted: !allMuted } : n),
+        history: nextHistory,
+        historyIndex: nextHistory.length - 1,
+        isDirty: true
+      }
+    }),
+    deleteTimelineRange: (startTick, endTick, trackId) => set(state => {
+      const minT = Math.min(startTick, endTick)
+      const maxT = Math.max(startTick, endTick)
+      const targetIds = new Set(
+        state.notes
+          .filter(n => n.time >= minT && n.time < maxT && (!trackId || n.trackId === trackId))
+          .map(n => n.id)
+      )
+      if (targetIds.size === 0) return state
+
+      const newCurves = { ...state.automationCurves }
+      Object.entries(newCurves).forEach(([key, pts]) => {
+        const keyTrackId = key.includes('::') ? key.split('::')[0] : key
+        if (!trackId || keyTrackId === trackId) {
+          newCurves[key] = pts.filter(p => !(p.time >= minT && p.time < maxT))
+        }
+      })
+
+      const trimmed = state.history.slice(0, state.historyIndex + 1)
+      const nextHistory = [...trimmed, [...state.notes]].slice(-50)
+
+      return {
+        notes: state.notes.filter(n => !targetIds.has(n.id)),
+        automationCurves: newCurves,
+        selectedNoteIds: state.selectedNoteIds.filter(id => !targetIds.has(id)),
+        history: nextHistory,
+        historyIndex: nextHistory.length - 1,
+        isDirty: true
+      }
+    }),
+    splitTimelineRange: (startTick, endTick, trackId) => set(state => {
+      const minT = Math.min(startTick, endTick)
+      const maxT = Math.max(startTick, endTick)
+      const cuts = [minT, maxT]
+      let modified = false
+      let newNotes: Note[] = []
+
+      state.notes.forEach(note => {
+        if (trackId && note.trackId !== trackId) {
+          newNotes.push(note)
+          return
+        }
+        let segments: Note[] = [note]
+
+        cuts.forEach(cutTick => {
+          const nextSegments: Note[] = []
+          segments.forEach(seg => {
+            const segEnd = seg.time + seg.duration
+            if (seg.time < cutTick && segEnd > cutTick) {
+              modified = true
+              const dur1 = cutTick - seg.time
+              const dur2 = segEnd - cutTick
+              nextSegments.push({
+                ...seg,
+                duration: dur1
+              })
+              nextSegments.push({
+                ...seg,
+                id: `note-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+                time: cutTick,
+                duration: dur2
+              })
+            } else {
+              nextSegments.push(seg)
+            }
+          })
+          segments = nextSegments
+        })
+        newNotes.push(...segments)
+      })
+
+      if (!modified) return state
+
+      const trimmed = state.history.slice(0, state.historyIndex + 1)
+      const nextHistory = [...trimmed, [...state.notes]].slice(-50)
+
+      return {
+        notes: deduplicateNotes(newNotes),
+        history: nextHistory,
+        historyIndex: nextHistory.length - 1,
+        isDirty: true
+      }
+    }),
+    quantizeTimelineRange: (startTick, endTick, trackId) => set(state => {
+      const minT = Math.min(startTick, endTick)
+      const maxT = Math.max(startTick, endTick)
+      const { snapResolution } = state
+      const targetIds = new Set(
+        state.notes
+          .filter(n => n.time >= minT && n.time < maxT && (!trackId || n.trackId === trackId))
+          .map(n => n.id)
+      )
+      if (targetIds.size === 0) return state
+
+      const trimmed = state.history.slice(0, state.historyIndex + 1)
+      const nextHistory = [...trimmed, [...state.notes]].slice(-50)
+
+      return {
+        notes: deduplicateNotes(state.notes.map(n => {
+          if (targetIds.has(n.id)) {
+            return { ...n, time: Math.round(n.time / snapResolution) * snapResolution }
+          }
+          return n
+        })),
+        history: nextHistory,
+        historyIndex: nextHistory.length - 1,
+        isDirty: true
+      }
+    }),
     setMidiRemapData: (updates) => set((state) => ({
       midiRemapData: { ...state.midiRemapData, ...updates }
     })),

@@ -1,5 +1,5 @@
 import * as Tone from 'tone'
-import type { AppState, CustomFxConfig, Note, Track, TrackGroup } from '../engine/store'
+import type { AppState, CustomFxConfig, Note, Track, TrackGroup, AutomationTarget } from '../engine/store'
 import { getLaneValueAtTick, applyExpressionLaneToNote, laneFallbackValue, laneIsActive, laneValueToPan } from './automation'
 import { parseAutomationTarget } from '../engine/store'
 import { getEffectiveTrackLevel } from './groupAudio'
@@ -719,26 +719,54 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
       const start = Math.max(0, relativeTime / noteTicksPerSecond)
       const duration = Math.max(0.01, noteLength / noteTicksPerSecond)
 
-      // The automation lane drives velocity, per-note volume, per-note pan or one expression parameter.
-      const laneValue = getLaneValueAtTick({
-        points: state.automationCurves[track.id],
-        lane: state.automationLanes?.[track.id],
-        target: automationTarget,
-        tick: note.time + note.duration / 2,
-        fallback: laneFallbackValue(automationTarget, note),
-        bpm: state.bpm,
-      })
-      if (parseAutomationTarget(automationTarget)?.kind === 'expr' && laneIsActive(state.automationCurves[track.id], state.automationLanes?.[track.id])) {
-        playNoteData = applyExpressionLaneToNote(playNoteData, automationTarget, laneValue, {
-          lane: state.automationLanes?.[track.id], points: state.automationCurves[track.id], bpm: state.bpm,
-        })
-      }
+      // The automation lane drives velocity, per-note volume, per-note pan or expression parameters.
       let velocity = note.velocity / 127
       let autoGain = 1
       let notePan = 0
-      if (automationTarget === 'volume') autoGain = Math.max(0, Math.min(1, laneValue / 127))
-      else if (automationTarget === 'pan') notePan = laneValueToPan(laneValue)
-      else if (automationTarget === 'velocity') velocity = laneValue / 127
+
+      const allCurves = state.automationCurves || {}
+      const trackCurves = Object.entries(allCurves).filter(([key, pts]) =>
+        (key === track.id || key.startsWith(`${track.id}::`)) && pts && pts.length > 0
+      )
+
+      if (trackCurves.length > 0) {
+        for (const [key, pts] of trackCurves) {
+          const targetStr = (key.includes('::') ? key.split('::').slice(1).join('::') : automationTarget) as AutomationTarget
+          const laneVal = getLaneValueAtTick({
+            points: pts,
+            lane: state.automationLanes?.[track.id],
+            target: targetStr,
+            tick: note.time + note.duration / 2,
+            fallback: laneFallbackValue(targetStr, note),
+            bpm: state.bpm,
+          })
+          if (targetStr === 'volume') autoGain = Math.max(0, Math.min(1, laneVal / 127))
+          else if (targetStr === 'pan') notePan = laneValueToPan(laneVal)
+          else if (targetStr === 'velocity') velocity = laneVal / 127
+          else if (parseAutomationTarget(targetStr)?.kind === 'expr' && laneIsActive(pts, state.automationLanes?.[track.id])) {
+            playNoteData = applyExpressionLaneToNote(playNoteData, targetStr, laneVal, {
+              lane: state.automationLanes?.[track.id], points: pts, bpm: state.bpm,
+            })
+          }
+        }
+      } else {
+        const laneValue = getLaneValueAtTick({
+          points: state.automationCurves[track.id],
+          lane: state.automationLanes?.[track.id],
+          target: automationTarget,
+          tick: note.time + note.duration / 2,
+          fallback: laneFallbackValue(automationTarget, note),
+          bpm: state.bpm,
+        })
+        if (parseAutomationTarget(automationTarget)?.kind === 'expr' && laneIsActive(state.automationCurves[track.id], state.automationLanes?.[track.id])) {
+          playNoteData = applyExpressionLaneToNote(playNoteData, automationTarget, laneValue, {
+            lane: state.automationLanes?.[track.id], points: state.automationCurves[track.id], bpm: state.bpm,
+          })
+        }
+        if (automationTarget === 'volume') autoGain = Math.max(0, Math.min(1, laneValue / 127))
+        else if (automationTarget === 'pan') notePan = laneValueToPan(laneValue)
+        else if (automationTarget === 'velocity') velocity = laneValue / 127
+      }
       velocity = typeof velocity === 'number' && isFinite(velocity) ? Math.max(0, Math.min(1, velocity)) : 0.8
 
       const fadeInSec = playNoteData.morphFadeIn ? playNoteData.morphFadeIn / noteTicksPerSecond : 0
@@ -939,29 +967,55 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
 
     const start = Math.max(0, relativeTime / noteTicksPerSecond)
     const duration = Math.max(0.01, note.duration / noteTicksPerSecond)
-    const laneValue = getLaneValueAtTick({
-      points: state.automationCurves[track.id],
-      lane: state.automationLanes?.[track.id],
-      target: automationTarget,
-      tick: note.time + note.duration / 2,
-      fallback: laneFallbackValue(automationTarget, note),
-      bpm: state.bpm,
-    })
-    // A drum hit reads pitch through detune, so an expression lane has to land before that math.
-    // The shape context is what lets a cutoff lane keep its in-note curve here: without it the lane
-    // collapses to one flat value and the bounce disagrees with preview and the native renderer.
-    const laneNote = parseAutomationTarget(automationTarget)?.kind === 'expr'
-      && laneIsActive(state.automationCurves[track.id], state.automationLanes?.[track.id])
-      ? applyExpressionLaneToNote(note, automationTarget, laneValue, {
-        lane: state.automationLanes?.[track.id], points: state.automationCurves[track.id], bpm: state.bpm,
-      })
-      : note
+    let laneNote = note
     let velocity = note.velocity / 127
     let autoGain = 1
     let notePan = 0
-    if (automationTarget === 'volume') autoGain = Math.max(0, Math.min(1, laneValue / 127))
-    else if (automationTarget === 'pan') notePan = laneValueToPan(laneValue)
-    else if (automationTarget === 'velocity') velocity = laneValue / 127
+
+    const allCurves = state.automationCurves || {}
+    const trackCurves = Object.entries(allCurves).filter(([key, pts]) =>
+      (key === track.id || key.startsWith(`${track.id}::`)) && pts && pts.length > 0
+    )
+
+    if (trackCurves.length > 0) {
+      for (const [key, pts] of trackCurves) {
+        const targetStr = (key.includes('::') ? key.split('::').slice(1).join('::') : automationTarget) as AutomationTarget
+        const laneVal = getLaneValueAtTick({
+          points: pts,
+          lane: state.automationLanes?.[track.id],
+          target: targetStr,
+          tick: note.time + note.duration / 2,
+          fallback: laneFallbackValue(targetStr, note),
+          bpm: state.bpm,
+        })
+        if (targetStr === 'volume') autoGain = Math.max(0, Math.min(1, laneVal / 127))
+        else if (targetStr === 'pan') notePan = laneValueToPan(laneVal)
+        else if (targetStr === 'velocity') velocity = laneVal / 127
+        else if (parseAutomationTarget(targetStr)?.kind === 'expr' && laneIsActive(pts, state.automationLanes?.[track.id])) {
+          laneNote = applyExpressionLaneToNote(laneNote, targetStr, laneVal, {
+            lane: state.automationLanes?.[track.id], points: pts, bpm: state.bpm,
+          })
+        }
+      }
+    } else {
+      const laneValue = getLaneValueAtTick({
+        points: state.automationCurves[track.id],
+        lane: state.automationLanes?.[track.id],
+        target: automationTarget,
+        tick: note.time + note.duration / 2,
+        fallback: laneFallbackValue(automationTarget, note),
+        bpm: state.bpm,
+      })
+      laneNote = parseAutomationTarget(automationTarget)?.kind === 'expr'
+        && laneIsActive(state.automationCurves[track.id], state.automationLanes?.[track.id])
+        ? applyExpressionLaneToNote(note, automationTarget, laneValue, {
+          lane: state.automationLanes?.[track.id], points: state.automationCurves[track.id], bpm: state.bpm,
+        })
+        : note
+      if (automationTarget === 'volume') autoGain = Math.max(0, Math.min(1, laneValue / 127))
+      else if (automationTarget === 'pan') notePan = laneValueToPan(laneValue)
+      else if (automationTarget === 'velocity') velocity = laneValue / 127
+    }
     velocity = typeof velocity === 'number' && isFinite(velocity) ? Math.max(0, Math.min(1, velocity)) : 0.8
 
     // Morph crossfades link drums too: a destination hit fades in, a source hit fades out.
@@ -1226,12 +1280,12 @@ async function renderWithOfflineCustomFx(
 
   const baseTracks = renderableTracks.filter(track => !offlineTrackIds.has(track.id))
   const baseTrackIds = new Set(baseTracks.map(track => track.id))
-  const baseHasNotes = state.notes.some(note => baseTrackIds.has(note.trackId))
+  const baseHasNotes = state.notes.some(note => !note.muted && baseTrackIds.has(note.trackId))
   if (baseHasNotes || options.includeMetronome) {
     const baseState: AppState = {
       ...state,
       tracks: baseTracks,
-      notes: state.notes.filter(note => baseTrackIds.has(note.trackId)),
+      notes: state.notes.filter(note => !note.muted && baseTrackIds.has(note.trackId)),
       automationCurves: Object.fromEntries(
         baseTracks.map(track => [track.id, state.automationCurves[track.id] ?? []])
       )
@@ -1252,7 +1306,7 @@ async function renderWithOfflineCustomFx(
     const trackState: AppState = {
       ...state,
       tracks: [track],
-      notes: state.notes.filter(note => note.trackId === track.id),
+      notes: state.notes.filter(note => !note.muted && note.trackId === track.id),
       automationCurves: { [track.id]: state.automationCurves[track.id] ?? [] }
     }
 
@@ -1383,6 +1437,7 @@ export async function renderProjectAudio(state: AppState, options: RenderOptions
 
   const renderableTrackIds = new Set(renderableTracks.map(track => track.id))
   const renderableNotes = notes.filter(note =>
+    !note.muted &&
     renderableTrackIds.has(note.trackId) &&
     (note.time + note.duration) > startTick &&
     note.time < endTick

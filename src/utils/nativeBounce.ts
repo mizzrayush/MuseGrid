@@ -120,9 +120,10 @@ export function buildNativeBouncePayload(state: AppState, request: NativeBounceR
 
   const events: NativeBounceEvent[] = []
   let lastNoteEndSeconds = 0
-  const glideIntoMap = buildGlideIntoMap(state.notes)
+  const audibleNotes = state.notes.filter(n => !n.muted)
+  const glideIntoMap = buildGlideIntoMap(audibleNotes)
 
-  state.notes.forEach(note => {
+  audibleNotes.forEach(note => {
     if (!renderableTrackIds.has(note.trackId)) return
 
     const glideInto = glideIntoMap.get(note.id)
@@ -139,7 +140,8 @@ export function buildNativeBouncePayload(state: AppState, request: NativeBounceR
       state.automationCurves[note.trackId],
       glideInto,
       state.automationTargets[note.trackId] ?? 'velocity',
-      state.automationLanes?.[note.trackId]
+      state.automationLanes?.[note.trackId],
+      state.automationCurves
     )
     const command = buildNativeNoteOnCommand({
       trackId: note.trackId,

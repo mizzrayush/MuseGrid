@@ -23,6 +23,7 @@ public/ai_models/
 
 # Local scratch + audit output
 scratch/
+updates/
 
 # Editor directories and files
 .vscode/*

@@ -46,9 +46,14 @@ export interface Note {
   /**
    * Which instrument performs the glide into glideToNoteId.
    * 'source' (default) ramps this note's own voice; 'destination' starts the next note
-   * early at this note's pitch so the next note's instrument carries the glide.
+   * early at this note's pitch so the next note's instrument carries the glide;
+   * 'morph' starts the next note early too but crossfades the two instruments across
+   * the ramp instead of muting the source immediately.
    */
-  glideVoice?: 'source' | 'destination';
+  glideVoice?: 'source' | 'destination' | 'morph';
+
+  /** Per-note pan trim in -1..1, applied on top of the track pan. */
+  pan?: number;
 
   // Vocal properties
   lyric?: string            // Syllable/phonetic text (e.g. "la", "do")
@@ -60,6 +65,9 @@ export interface AutomationPoint {
   time: number
   value: number
 }
+
+/** What the track's automation lane drives. Values are still 1..127 in the lane. */
+export type AutomationTarget = 'velocity' | 'volume' | 'pan'
 
 export function deduplicateNotes(notesList: Note[]): Note[] {
   if (!notesList || notesList.length === 0) return []
@@ -1035,8 +1043,10 @@ export interface AppState {
   setDeduplicateOverlapThreshold: (val: number) => void
   setDeduplicateProximityTolerance: (val: number) => void
 
-  // Automation curves, currently velocity per track.
+  // Automation curves per track. The lane target decides what the stored values mean:
+  // note velocity, per-note volume, or per-note pan.
   automationCurves: Record<string, AutomationPoint[]>
+  automationTargets: Record<string, AutomationTarget>
 
   projectRevision: number
   drumSteps: number
@@ -1203,6 +1213,7 @@ export interface AppState {
   updateAutomationPoint: (trackId: string, pointId: string, updates: Partial<AutomationPoint>) => void
   removeAutomationPoint: (trackId: string, pointId: string) => void
   clearAutomationCurve: (trackId: string) => void
+  setAutomationTarget: (trackId: string, target: AutomationTarget) => void
   bakeProceduralAutomation: (trackId: string, formula: string, preset: string, density: number) => void
 
   setDrumSteps: (steps: number) => void
@@ -1407,6 +1418,7 @@ export const useStore = create<AppState>((originalSet, get, api) => {
     clips: [],
     groups: [],
     automationCurves: {},
+    automationTargets: {},
     projectRevision: 0,
     drumSteps: 16,
 
@@ -2457,6 +2469,12 @@ if (firstTrack) {
         [trackId]: []
       }
     })),
+    setAutomationTarget: (trackId, target) => set((state) => ({
+      automationTargets: {
+        ...state.automationTargets,
+        [trackId]: target
+      }
+    })),
     bakeProceduralAutomation: (trackId, formula, preset, density) => set((state) => {
       // Density: how many ticks between points (e.g., 48 = every 16th note, 12 = every 64th note)
       // We will generate 4 bars of automation (768 * 4 = 3072 ticks)
@@ -2937,6 +2955,7 @@ useStore.subscribe((state, prevState) => {
         quantizeInputEnabled: curState.quantizeInputEnabled,
         playheadFollowMode: curState.playheadFollowMode,
         automationCurves: curState.automationCurves,
+        automationTargets: curState.automationTargets,
         clips: curState.clips,
         groups: curState.groups,
         drumSteps: curState.drumSteps,

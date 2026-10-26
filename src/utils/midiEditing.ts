@@ -1109,7 +1109,7 @@ export interface GlideChainOptions {
   extendLegato?: boolean
   loopLastNote?: boolean
   /** Which instrument carries the ramp: the note that starts it, or the note it lands on. */
-  glideVoice?: 'source' | 'destination'
+  glideVoice?: 'source' | 'destination' | 'morph'
 }
 
 /**
@@ -1123,12 +1123,14 @@ export interface GlideIntoSpec {
   ramp?: Note['pitchSlideRamp']
   customCurve?: string
   glideStyle?: Note['glideStyle']
+  /** Both instruments overlap: the destination fades in while the source fades out. */
+  morph?: boolean
 }
 
 export function buildGlideIntoMap(notes: Note[]): Map<string, GlideIntoSpec> {
   const into = new Map<string, GlideIntoSpec>()
   for (const source of notes) {
-    if (source.glideVoice !== 'destination' || !source.glideToNoteId) continue
+    if ((source.glideVoice !== 'destination' && source.glideVoice !== 'morph') || !source.glideToNoteId) continue
     const slideTicks = source.pitchSlideTime ?? source.duration
     if (!(slideTicks > 0)) continue
     into.set(source.glideToNoteId, {
@@ -1138,21 +1140,34 @@ export function buildGlideIntoMap(notes: Note[]): Map<string, GlideIntoSpec> {
       ramp: source.pitchSlideRamp,
       customCurve: source.pitchSlideCustomCurve,
       glideStyle: source.glideStyle,
+      morph: source.glideVoice === 'morph',
     })
   }
   return into
+}
+
+/** Playback-only fields derived from a glide link or automation lane. Never written back to the store. */
+export interface GlidePlaybackNote extends Note {
+  /** Morph crossfade in ticks, measured from note start. */
+  morphFadeIn?: number
+  /** Morph crossfade out in ticks, measured from note start. */
+  morphFadeOut?: number
+  /** Per-note volume from the volume automation lane (0..1). */
+  automationGain?: number
 }
 
 export interface GlidePlaybackShape {
   startTick: number
   durationTicks: number
   pitch: number
-  note: Note
+  note: GlidePlaybackNote
 }
 
 /**
  * Turns a stored note into what playback should trigger. A destination-voiced link starts
- * the landed note early at the source pitch; its source is silenced for the ramp.
+ * the landed note early at the source pitch; its source is silenced for the ramp. A morph
+ * link keeps both voices: the source ramps and fades out, the destination starts early and
+ * fades in.
  */
 export function resolveGlidePlayback(n: Note, glideInto?: GlideIntoSpec): GlidePlaybackShape {
   if (glideInto) {
@@ -1168,6 +1183,7 @@ export function resolveGlidePlayback(n: Note, glideInto?: GlideIntoSpec): GlideP
         pitchSlideCustomCurve: glideInto.customCurve,
         glideStyle: glideInto.glideStyle ?? n.glideStyle,
         glideVoice: undefined,
+        morphFadeIn: glideInto.morph ? glideInto.slideTicks : undefined,
       },
     }
   }
@@ -1184,6 +1200,17 @@ export function resolveGlidePlayback(n: Note, glideInto?: GlideIntoSpec): GlideP
         pitchSlideRamp: undefined,
         pitchSlideCustomCurve: undefined,
       },
+    }
+  }
+
+  if (n.glideVoice === 'morph' && n.glideToNoteId) {
+    // The source keeps its own ramp and must stay alive for it; it fades out across the slide.
+    const fadeTicks = n.pitchSlideTime ?? n.duration
+    return {
+      startTick: n.time,
+      durationTicks: Math.max(n.duration, fadeTicks),
+      pitch: n.pitch,
+      note: { ...n, morphFadeOut: fadeTicks },
     }
   }
 
@@ -1272,7 +1299,7 @@ export function applyGlideChain(notes: Note[], options: GlideChainOptions = {}):
       current.pitchSlideTime = slideTicks
       current.pitchSlideRamp = rampType
       current.glideToNoteId = target.id
-      current.glideVoice = glideVoice === 'destination' ? 'destination' : undefined
+      current.glideVoice = glideVoice === 'source' ? undefined : glideVoice
       if (customCurve) {
         current.pitchSlideCustomCurve = customCurve
       } else {

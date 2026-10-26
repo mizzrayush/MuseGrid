@@ -111,7 +111,10 @@ void VoiceManager::noteOnPhysical(const juce::String& trackId,
                                   float durationSeconds,
                                   float damping,
                                   float pluckPos,
-                                  int fxChainId)
+                                  int fxChainId,
+                                  const musegrid::NoteExpression& expression,
+                                  float targetPitchMidi,
+                                  float slideTimeSeconds)
 {
     int index = nextPhysVoiceIndex;
     for (int i = 0; i < MAX_PHYS_VOICES; ++i)
@@ -127,8 +130,9 @@ void VoiceManager::noteOnPhysical(const juce::String& trackId,
 
     auto& pv = physVoices[index];
     pv.trackId = trackId;
-    pv.fxChainId = fxChainId;
-    pv.voice.triggerPluck(noteId, pitchMidi, velocity, durationSeconds, damping, pluckPos);
+    pv.fxChainId = fxChainId != 0 ? fxChainId : expression.fxChainId;
+    pv.voice.triggerPluck(noteId, pitchMidi, velocity, durationSeconds, damping, pluckPos, 0.0f,
+                          expression, targetPitchMidi, slideTimeSeconds);
 }
 
 void VoiceManager::noteOnVocal(const juce::String& trackId,
@@ -140,7 +144,10 @@ void VoiceManager::noteOnVocal(const juce::String& trackId,
                                float tractLength,
                                float breathiness,
                                float tension,
-                               int fxChainId)
+                               int fxChainId,
+                               const musegrid::NoteExpression& expression,
+                               float targetPitchMidi,
+                               float slideTimeSeconds)
 {
     int index = nextVocalVoiceIndex;
     for (int i = 0; i < MAX_VOCAL_VOICES; ++i)
@@ -156,8 +163,10 @@ void VoiceManager::noteOnVocal(const juce::String& trackId,
 
     auto& vv = vocalVoices[index];
     vv.trackId = trackId;
-    vv.fxChainId = fxChainId;
-    vv.voice.triggerVocal(noteId, pitchMidi, velocity, durationSeconds, vowel, tractLength, breathiness, tension);
+    vv.fxChainId = fxChainId != 0 ? fxChainId : expression.fxChainId;
+    vv.voice.triggerVocal(noteId, pitchMidi, velocity, durationSeconds, vowel, tractLength,
+                          breathiness, tension, 30.0f, 5.5f, expression,
+                          targetPitchMidi, slideTimeSeconds);
 }
 
 void VoiceManager::noteOff(const juce::String& trackId, int noteId)

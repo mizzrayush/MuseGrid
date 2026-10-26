@@ -284,6 +284,10 @@ void OfflineRenderer::dispatchNoteOn(AudioEngine& engine, const juce::var& comma
     expression.vibratoFadeSeconds = readFloat(obj, "vibratoFade", 0.0f);
     expression.vibratoWave = (int)readFloat(obj, "vibratoWave", 0.0f);
     expression.tremoloWave = (int)readFloat(obj, "tremoloWave", 0.0f);
+    expression.morphFadeInSeconds = readFloat(obj, "morphFadeIn", 0.0f);
+    expression.morphFadeOutSeconds = readFloat(obj, "morphFadeOut", 0.0f);
+    expression.pan = readFloat(obj, "pan", 0.0f);
+    expression.gain = readFloat(obj, "gain", 1.0f);
     if (obj->hasProperty("overrideKind"))
         expression.overrideKind = obj->getProperty("overrideKind").toString();
     if (obj->hasProperty("overrideValue"))

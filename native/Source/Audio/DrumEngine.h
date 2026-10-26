@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include "EnvelopeCurve.h"
+#include "NoteExpression.h"
 
 class DrumEngine
 {
@@ -38,6 +39,12 @@ public:
 
         // 0 = track FX rack; otherwise this hit renders through a per-note FX chain.
         int fxChainId = 0;
+
+        // Per-note expression output stage (pan/volume automation and morph crossfades).
+        float pan = 0.0f;
+        float gain = 1.0f;
+        float fadeInSeconds = 0.0f;
+        float fadeOutSeconds = 0.0f;
     };
 
     DrumEngine();
@@ -58,7 +65,7 @@ public:
         if (pad >= 0 && pad < 16) padCurves[pad].setTension(tension);
     }
 
-    void triggerHit(int drumPad, float velocity = 1.0f, float pitchOffsetSemitones = 0.0f, float customDecaySeconds = -1.0f, float slideSemitones = 0.0f, float slideTime = 0.0f, float punchOctaves = -1.0f, float resonanceHz = -1.0f, const juce::String& kitOverride = {}, int fxChainId = 0);
+    void triggerHit(int drumPad, float velocity = 1.0f, float pitchOffsetSemitones = 0.0f, float customDecaySeconds = -1.0f, float slideSemitones = 0.0f, float slideTime = 0.0f, float punchOctaves = -1.0f, float resonanceHz = -1.0f, const juce::String& kitOverride = {}, int fxChainId = 0, const musegrid::NoteExpression& expression = {});
     void allNotesOff()
     {
         for (auto& v : voices) v.active = false;

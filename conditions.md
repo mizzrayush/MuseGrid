@@ -1465,3 +1465,307 @@ VST3 hosting exposes note-on/off only, so a glide is sent as **per-note MIDI pit
   note no longer shows an in-note cyan ramp. No new console errors; the only error is the
   pre-existing WASM `audio-processor.js` detached-buffer one.
 
+## 19. EXPRESSION FREEDOM PASS — 2026-10-26
+
+This pass closes the eight expression gaps left open by §15–§18. The rule from §15 still governs:
+a per-note expression should sound the same in the JUCE engine and the Tone engine, with no
+artificial caps. Where a limit is physical (VST3 channel count, plugin ignoring RPN, Tone drum
+instrument routing) it is stated in §19.9 instead of being hidden.
+
+### 19.1 Glide is now a morph, not a handoff
+
+Until now a glide link was a handoff: either the source's voice ramped, or the destination's voice
+started early. Neither let both instruments overlap. A third voice mode now does:
+
+- `Note.glideVoice` gains `'morph'` (`src/engine/store.ts:53`).
+- `buildGlideIntoMap` records `morph: true` on the junction (`src/utils/midiEditing.ts:1133`,
+  `:1143`), so any consumer of the shared playback transform sees it.
+- `resolveGlidePlayback` (`src/utils/midiEditing.ts:1172`) produces both halves of the crossfade:
+  the destination starts `slideTicks` early at the source pitch with `morphFadeIn = slideTicks`
+  (`:1174`–`:1188`); the source keeps its own ramp, is extended to `max(duration, fadeTicks)`, and
+  carries `morphFadeOut = fadeTicks` (`:1206`–`:1214`). Fades are measured from each note's own
+  start, so the two ramps meet in the middle of the junction.
+- The transform is playback-only. Nothing is written back to the store, so switching modes never
+  rewrites notes; the applied chain stores `glideVoice: undefined` for Source and `'destination'` /
+  `'morph'` otherwise (`src/utils/midiEditing.ts:1302`).
+- `mapNoteToScheduledEvent` applies it for live playback (`src/engine/Scheduler.ts:42`, called at
+  `:188`), and the native bounce path feeds the same function (`src/utils/nativeBounce.ts`), so
+  playback and WAV export agree.
+- Native voices apply the crossfade as a gain envelope over the whole note:
+  `SynthVoice.cpp:474`–`:481`, `DrumEngine.cpp:128`–`:131`, `SampleEngine.cpp:224`–`:227`,
+  `VocalModelVoice.cpp:256`–`:261`, `PhysicalModelVoice.cpp:180`–`:185`.
+- The Tone engine gets the same shape through per-note output nodes: synth notes route through an
+  ephemeral synth + `Tone.Gain`/`Tone.Panner` when a fade/pan/gain exists
+  (`src/engine/AudioEngine.ts:5486`–`:5545`); vocal/physical/sampler pass `fadeIn`/`fadeOut`/
+  `pan`/`gain` into their own voice options (`:5382`–`:5387`, `:5443`–`:5451`,
+  `:5471`–`:5478`).
+- UI: the Glide Chain panel gains a flat **Morph** chip next to Source/Dest
+  (`src/renderer/GridCanvas.tsx:3840`), and the Note Inspector exposes the same three modes
+  (`src/ui/RightPane.tsx:1971`–`:1973`).
+
+A morph junction draws exactly like a destination junction on the grid (the destination starts
+early), which is why the connector test is `glideVoice === 'destination' || glideVoice === 'morph'`
+(`src/renderer/GridCanvas.tsx:1418`).
+
+### 19.2 Glide Voice is per junction, not per track
+
+The routing that §18 introduced in the Glide Chain menu is now also in the Note Inspector, so a
+single junction can be retargeted without re-applying a chain:
+
+- `commonGlideVoice = getCommonStringMPE('glideVoice', 'source')` (`src/ui/RightPane.tsx:741`)
+  feeds a `SelectRow` labelled **Glide Voice** with *Source instrument* / *Next note instrument* /
+  *Morph (both crossfade)* (`:1966`–`:1978`). `'source'` is stored as `undefined`, keeping default
+  notes byte-identical to before this pass.
+- A note that is not the source of a link stores nothing; the field only exists on the source end,
+  so selecting a mixed group shows Mixed and does not overwrite the others.
+
+### 19.3 Sampler, vocal and physical voices glide natively
+
+These three voices used to ignore `pitchSlide` in the JUCE engine (only synth and VST3 ramped).
+They now take a target pitch and glide duration like every other voice:
+
+- Shared API: `VoiceManager::noteOnPhysical` / `noteOnVocal` (`native/Source/Audio/VoiceManager.h:38`,
+  `:50`) and `SampleEngine::noteOn` (`native/Source/Audio/SampleEngine.h:43`) accept
+  `expression`, `targetPitchMidi` and `slideTimeSeconds`.
+- Sampler: rate ramps from `rate` to `targetRate` over the slide (`SampleEngine.cpp:198`–`:215`),
+  using the shared 33-point curve and stepped flag; `noteOn` is called with the resolved target in
+  `AudioEngine.cpp:1481`.
+- Vocal: `VocalModelVoice.cpp:135`–`:144` stores the glide, and the render loop walks the pitch per
+  sample through the same curve (`:206`–`:215`); triggered from `AudioEngine.cpp:1452`, `:1602`.
+- Physical: same model on the string delay — the delay length is recalculated per sample while
+  sliding (`PhysicalModelVoice.cpp:76`–`:85`, `:148`–`:163`), triggered from
+  `AudioEngine.cpp:1458`, `:1597`, `:1607`.
+- Transpose is applied once, by the scheduler, before the note command is built; the native
+  vocal/physical calls deliberately do not add `pitchOffsetSemitones` again
+  (`src/engine/Scheduler.ts:162`–`:240` vs `src/engine/nativeNoteCommand.ts:121`–`:158`).
+
+### 19.4 Export parity for destination and morph glides
+
+The Tone offline renderer (`src/utils/audioRender.ts`) used to schedule raw note times and
+pitches, which is why MP3 / multi-region / browser exports lost destination-voiced glides. It now
+runs the same transform as playback:
+
+- `resolveGlidePlayback(note, glideIntoMap.get(note.id))` per note (`:522`–`:552`), using
+  `buildGlideIntoMap` imported from `midiEditing.ts`.
+- `startTick` / `durationTicks` / `pitch` come from the resolved shape, so a destination note is
+  scheduled early at the source pitch and the source's stored ramp is suppressed.
+- Morph fades and automation become seconds and are applied to a per-note gain envelope
+  (`:548`–`:549`, `:632`–`:700`).
+- Synth notes that need a glide, fade, pan or gain are triggered on an ephemeral PolySynth with
+  its own `Gain`/`Panner` so one note can differ from the shared synth (`:639` onwards); plain
+  notes still use the cached synth.
+- The live Tone scheduler and the offline Tone renderer now share the transform
+  (`src/engine/Scheduler.ts:188` and `audioRender.ts:522`), so preview and export match.
+
+WAV export still goes through JUCE and remains the authoritative render; Tone export is a
+faithful approximation, not a sample-identical copy (see §19.9).
+
+### 19.5 VST3: microtonal notes, bend range, morph, pan and gain
+
+VST3 hosting only exposes note-on/off, so everything is expressed in MIDI CC / pitch bend:
+
+- **Microtonal pitch is no longer rounded away.** `startVst3Glide` computes a static base offset
+  `baseSemis = (startPitch + offset) - roundedMidiPitch` (`AudioEngine.cpp:1116`–`:1121`) and
+  `renderVst3Glides` adds it to the curve output for the whole note (`:1229`–`:1245`). A
+  1/4-tone or detuned note on a VST3 instrument now plays its fraction instead of snapping to
+  12-TET.
+- **Bend range** is still widened from a plugin parameter when one exists
+  (`widenPluginPitchBend`, `:1073`), never narrowed; range is clamped to 2–96 semitones.
+- **Morph crossfade** is streamed as CC7 on the note's reserved channel (`startVst3VolumeFade`,
+  `:1174`; rendered per block at `:1204`). It is started from all three VST3 paths
+  (per-note instrument slot `:1423`, chain-tagged clone `:1568`, track instrument `:1585`), and the
+  fade lands on the note's own automation level rather than always unity.
+- **Per-note pan** is CC10 on the reserved channel (`:1120`, `:1160`–`:1165`), with a CC10 64 reset
+  on reservation (`:1160`) so a recycled channel never inherits the previous note's position.
+  This is why a pan value forces a reservation even when there is no glide.
+- **Per-note volume automation** now also forces a reserved channel (`hasGain`, `:1122`) and sets
+  CC7 to the note's gain at note-on (`:1156`–`:1158`), so volume automation is audible on VST3
+  tracks instead of being silently dropped.
+- **Fade cleanup.** A note that dies mid fade-out would leave its channel at CC7 0 and silence
+  every later note. `clearVst3VolumeFades` (`:1276`) restores CC7 127 and drops that note's fade;
+  it is called from `noteOff` (`:1656`, `:1698`), from the three per-block scheduled note-off loops
+  (`:1891`, `:1970`, `:2035`), and `resetVst3VolumeFades` (`:1297`) wipes and restores CC7 on
+  all-notes-off / kill-track paths (`:1668`, `:1712`, `:1739`, `:1752`, `:1781`, `:1794`).
+  Fades are also cleared with the glides when a plugin is removed or released (`:2407`, `:2487`).
+
+### 19.6 Automation lanes drive velocity, volume or pan
+
+An automation lane used to be velocity-only. It now has a per-track target:
+
+- `AutomationTarget = 'velocity' | 'volume' | 'pan'` (`src/engine/store.ts:70`), stored per track in
+  `automationTargets` (`:1049`, action at `:1216`, implementation at `:2472`).
+- `mapNoteToScheduledEvent` samples the lane at the note centre and converts it
+  (`src/engine/Scheduler.ts:65`–`:73`): velocity → `velocity`; volume → `automationGain` (0..1);
+  pan → `pan` (-1..1). The target is passed in at `:188`.
+- Native rendering reads those fields from `NoteExpression` (`NoteExpression.h:41`–`:42`) and
+  applies them in every voice: `SynthVoice.cpp:242` (pan) and `:480` (gain), `DrumEngine.cpp:128`
+  –`:129`, `SampleEngine.cpp:226`–`:227`, `VocalModelVoice.cpp:190` / `:261`,
+  `PhysicalModelVoice.cpp:128` / `:185`.
+- Tone rendering mirrors it: sampler/vocal/physical receive `pan`/`gain`
+  (`src/engine/AudioEngine.ts:5383`–`:5384`, `:5443`–`:5444`, `:5471`–`:5472`), and synth notes get
+  the ephemeral gain/panner path (`:5486`–`:5545`).
+- Offline Tone export applies the same fields (`src/utils/audioRender.ts:508`, `:548`–`:549`).
+- UI: the automation footer header now shows flat **Velocity / Volume / Pan** chips with the same
+  chip styling as the rest of the panel (`src/renderer/GridCanvas.tsx:3579`–`:3600`); the label
+  switches with the target (`:3579`). Note-stem dragging is only enabled for velocity
+  (`:342`, `:2011`), because a stem gesture can only mean velocity — volume and pan are drawn as
+  lane curves, not stems. The chosen target is per track and persists in project state.
+
+### 19.7 Per-note pan, groups, and per-note FX (what was and was not changed)
+
+- Per-note pan is the new capability; it is a per-voice offset on top of the track pan (see
+  §19.6), applied before the track fader, exactly like the synth voices.
+- **Groups remain VCA-style** volume/mute/solo controls over their member tracks. There is still no
+  group insert bus, no group automation lane and no group-level pan. This is a product decision
+  (groups exist to balance a section quickly, see the groups semantics note), not an oversight;
+  adding buses would change the mix architecture and the native graph, and was out of scope for an
+  expression pass.
+- **A per-note FX chain still replaces the track rack for that note** (`AudioEngine.cpp:2001`–
+  `:2015` renders per-note chains outside `trackBuffer`). That is deliberate: a per-note insert
+  should not be re-processed by the track's own inserts. It is documented again here so it is not
+  mistaken for a routing bug.
+
+### 19.8 UI caps removed / raised
+
+The sliders used to clamp the interval to ±48 semitones and glides/sweeps to 3840 ticks, which is
+one bar at a slow tempo. Both were UI-only limits — the engines already accepted more.
+
+- Slide interval: `min={-96} max={96}` (`src/ui/RightPane.tsx:1940`), and the 808 card at `:1832`.
+- Slide time: `max={7680}` (`:1842`, `:1947`; sweep at `:2104`).
+- Width slider: `max={96}` (`:2376`).
+- The grid still draws the ramp across the note body, so a long slide is visible as a short line
+  even when the slide is longer than the note; the audio is unchanged because the time is honoured.
+
+### 19.9 Limits that remain (honest list)
+
+- **VST3 CC mapping is a convention, not a guarantee.** CC7/CC10 are the standard volume/pan
+  controllers; a plugin that maps them to something else will respond differently. A plugin that
+  ignores RPN 0 and exposes no bend-range parameter keeps its own fixed range, so wide glides clamp.
+- **VST3 parameter automation is still not host-driven.** MuseGrid does not expose a plugin's
+  parameters as automation lanes; the plugin GUI is the way to edit them. The expression fields
+  above are note-level MIDI, not plugin parameters.
+- **Per-note VST3 clones snapshot their state at load time.** Two notes referencing the same plugin
+  identifier share one instance per track; changing a macro inside the plugin affects all notes on
+  that track (a per-note override is a different plugin instance, not a preset fork).
+- **Tone drum preview ignores per-note pan/gain.** The native drum engine applies both
+  (`DrumEngine.cpp:128`–`:131`), but `DrumMachine` triggers each pad into a pre-wired destination
+  and has no per-hit output node, so volume/pan automation on a drum track only affects the native
+  preview/export. Percussion pitch slides do work in Tone (`slideOpts`).
+- **Tone export is an approximation.** MP3 / multi-region / browser exports now contain
+  destination and morph glides (§19.4), but they are rendered by Tone synths, not by the JUCE
+  voices, so timbre and envelope tails differ from the WAV bounce.
+- **More than 15 simultaneous gliding notes on one VST3 instance** still reuse channels
+  round-robin (§18) and can steal each other's bends. The same applies to 15 simultaneous
+  per-note pan/gain notes on one instance.
+- **Per-note pan on a VST3 drum track** uses CC10 on the reserved channel, i.e. it pans the whole
+  plugin output for that note's channel; a multi-output drum plugin that ignores CC10 will not pan.
+
+### 19.10 Change accounting
+
+Working tree after this pass (code only, conditions.md excluded): `26 files changed, 1142
+insertions(+), 163 deletions(-)` (`git diff --numstat`). The deletions are signature/default-argument updates, moved code and the
+old single-path trigger bodies that were replaced by the resolved-playback path — no feature was
+removed. Per file (added / deleted):
+
+| File | + | - | What changed |
+| --- | --- | --- | --- |
+| `native/Source/Audio/AudioEngine.cpp` | 166 | 19 | expression call sites, VST3 pan/gain/fade cleanup, voice glide args |
+| `native/Source/Audio/AudioEngine.h` | 18 | 0 | `Vst3VolumeFade::level` |
+| `native/Source/Audio/DrumEngine.cpp` | 16 | 5 | per-voice pan/gain/morph |
+| `native/Source/Audio/DrumEngine.h` | 8 | 1 | trigger signature |
+| `native/Source/Audio/NoteExpression.h` | 8 | 0 | morph fade, pan, gain |
+| `native/Source/Audio/OfflineRenderer.cpp` | 4 | 0 | parse new expression fields for export |
+| `native/Source/Audio/PhysicalModelVoice.cpp` | 68 | 3 | glide retune, pan, gain, morph |
+| `native/Source/Audio/PhysicalModelVoice.h` | 15 | 1 | glide members |
+| `native/Source/Audio/SampleEngine.cpp` | 60 | 5 | gliding playback rate, pan/gain/morph |
+| `native/Source/Audio/SampleEngine.h` | 21 | 1 | noteOn signature |
+| `native/Source/Audio/SynthVoice.cpp` | 10 | 2 | per-note pan, morph, gain |
+| `native/Source/Audio/VocalModelVoice.cpp` | 68 | 3 | glide, pan, gain, morph |
+| `native/Source/Audio/VocalModelVoice.h` | 14 | 1 | glide members |
+| `native/Source/Audio/VoiceManager.cpp` | 15 | 6 | pass-through args |
+| `native/Source/Audio/VoiceManager.h` | 8 | 2 | signatures |
+| `src/engine/AudioEngine.ts` | 316 | 51 | ephemeral per-note output, glides in all voice paths |
+| `src/engine/Scheduler.ts` | 21 | 5 | automation target sampling |
+| `src/engine/ScriptAPI.ts` | 2 | 0 | typed bridge call |
+| `src/engine/nativeNoteCommand.ts` | 12 | 1 | morph/pan/gain serialisation |
+| `src/engine/store.ts` | 22 | 3 | morph mode, automation targets |
+| `src/renderer/GridCanvas.tsx` | 52 | 20 | Morph chip, automation chips, connector |
+| `src/ui/RightPane.tsx` | 21 | 6 | Glide Voice row, raised caps |
+| `src/utils/audioRender.ts` | 150 | 20 | resolved playback + per-note output in offline renderer |
+| `src/utils/midiEditing.ts` | 32 | 5 | morph transform |
+| `src/utils/nativeBounce.ts` | 15 | 3 | glide map passed to bounce |
+
+The 51 removed lines in `AudioEngine.ts` are the old `trigger(..., endFrequency)` signatures (now
+`(..., opts)`), the single `voiceGain.connect(this.rackInput)` that became a gain→panner→rack
+chain, and the per-note `endFrequency` ramps whose logic moved into the shared glide scheduler.
+Every one of those behaviours is still present in the new code paths listed in §19.3/§19.4.
+
+### 19.11 Verification
+
+- `npx tsc --noEmit -p tsconfig.app.json` — exit 0.
+- `npx vite build` — succeeded earlier in this pass; `bin/dist` synced from `dist`.
+- `cmd //c "scripts\build_native.bat"` — rebuilt `AudioEngine.cpp` (twice: expression fields, then
+  VST3 gain/cleanup) and relinked `bin/MuseGrid.exe`; no warnings or errors.
+- Code-verified, not ear-verified: no VST3 instrument, no sampler loaded and no physical/vocal
+  audition were available in this environment. The morph crossfade, per-note pan/gain automation
+  and the three newly gliding voices were checked by reading the render paths and by the compiler,
+  so the first musical test should be one morph junction per voice family (synth, sampler, vocal,
+  physical, drum) at a slow tempo.
+- Browser (`npm run dev:web`, port 5174): created a C4 → C5 pair, applied a Morph chain
+  (`half`, `cubicInOut`, legato) and read the store back: the source stores `glideVoice: 'morph'`,
+  `pitchSlide: 12`, `pitchSlideTime: 48`, `glideToNoteId`; `resolveGlidePlayback` returns the
+  destination at `start 48`, `duration 144`, `pitch 60`, `morphFadeIn 48`, and the source at
+  `duration 96`, `morphFadeOut 48`.
+- Browser, automation and native payload: with the track target set to `pan`, `mapNoteToScheduledEvent`
+  returned `pan 0.496` for the sampled lane value 95.25; with `volume` it returned
+  `automationGain 0.748` and left velocity alone; with `velocity` it still returned
+  `velocity 0.748`. `buildNativeNoteOnCommand` for the same note carried `gain 0.748`,
+  `morphFadeIn 0.125` (s), `slideEnd 72`, `slideTime 0.125`; switching the target to `pan`
+  produced `pan 0.512` with `gain 1`.
+- Browser, DOM: the Note Inspector renders the **Glide Voice** select with value `morph` and the
+  three options (Source instrument / Next note instrument / Morph (both crossfade)); the
+  automation footer reads **Pan Automation** and contains the Velocity / Volume / Pan chips. No
+  new console errors; the only error is the pre-existing WASM `audio-processor.js`
+  detached-ArrayBuffer one.
+- Browser checks from §18 still hold (Glide Chain chips, connector rendering, store round-trip);
+  the new chips reuse the same `renderGlideChip`/footer button styling, so they inherit the flat
+  contract in §2.
+
+### 19.12 Deletion audit (nothing functional was removed)
+
+Every removed line in §19.10 was read against the new code before committing:
+
+- **Native (163 deletions, 15 files).** All are parameter-list extensions (`noteOn`/`trigger`
+  gained `expression`, `targetPitchMidi`, `slideTimeSeconds`), old `voiceGain.connect(rackInput)`
+  calls that became a per-note gain→panner stage, or early-return rewrites that now reserve a
+  VST3 channel only when the note actually needs one. No voice, effect, envelope or note-off path
+  was deleted. `expression.fxChainId` is still forwarded at every voice/drum call site
+  (`AudioEngine.cpp:1438`–`:1465`, `:1478`–`:1486`, `:1593`–`:1614`), and the physical/vocal
+  defaults that used to be hard-coded are still passed (`stiffness 0.0f`, vibrato 30/5.5).
+- **`AudioEngine.ts` (51 deletions).** Old `trigger(..., endFrequency)` signatures and the old
+  `noteOn(..., time)` signature became opts-based calls; the `endFrequency` ramps moved into
+  `scheduleDelayGlide`/`scheduleFreqGlide`/`pitchAt()`; `voiceGain.connect(rackInput)` became
+  gain→panner→rack; the smooth-glide path now reuses the ephemeral MPE synth instead of creating
+  and disposing a second one, and the MPE path still schedules the disposal.
+- **`audioRender.ts` (20 deletions).** The range checks and automation read moved above the
+  `resolveGlidePlayback` transform; the per-instrument `voice.trigger(...)` calls gained the
+  expression opts; the override-synth cache line is unchanged (`:700`–`:705`).
+- **`GridCanvas.tsx` (20 deletions).** The stem-drag proximity block is retained verbatim behind
+  `automationTarget === 'velocity'`; the footer label keeps its click-to-collapse behaviour and
+  now names the target.
+- **Smaller files.** `Scheduler.ts` (5) — the velocity read became target-aware and still returns
+  the same value for `velocity`. `midiEditing.ts` (5) — `glideVoice` storage still maps `source`
+  to `undefined`, and `destination` still stores `'destination'`; `morph` is the only addition.
+  `RightPane.tsx` (6) — only the four `min`/`max` cap lines changed. `store.ts` (3) and
+  `nativeNoteCommand.ts` (1) — comments/types/fields added, nothing removed. `nativeBounce.ts`
+  (3) — the range test now uses the resolved onset (superset of the old test).
+
+### 19.13 JUCE submodule local patch
+
+`JUCE` is a git submodule, so the local WebView2 fix (wildcard CORS headers, `\r\n` header join,
+`createWebResourceResponse`/`postMessage` logging and DevTools enabled in release) cannot be part
+of this repository's commit. It is preserved as
+`native/patches/juce-webview2-local.patch`; apply it inside `JUCE/` before building on a fresh
+clone if the native shell fails to serve resources. The patch is development tooling only; the
+audio/renderer changes in this pass do not depend on it.
+

@@ -143,6 +143,8 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   const addAutomationPoint = useStore(state => state.addAutomationPoint)
   const updateAutomationPoint = useStore(state => state.updateAutomationPoint)
   const removeAutomationPoint = useStore(state => state.removeAutomationPoint)
+  const automationTargets = useStore(state => state.automationTargets)
+  const setAutomationTarget = useStore(state => state.setAutomationTarget)
   const addTrack = useStore(state => state.addTrack)
   const updateTrack = useStore(state => state.updateTrack)
 
@@ -337,6 +339,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   const setShowDrumVelocity = useStore(state => state.setShowDrumVelocity)
 
   const showAutomation = instrument === 'drum' ? showDrumVelocity : showSynthVelocity
+  const automationTarget = automationTargets[targetTrackId] ?? 'velocity'
   const setShowAutomation = (val: boolean | ((prev: boolean) => boolean)) => {
     const newVal = typeof val === 'function' ? val(showAutomation) : val
     if (instrument === 'drum') setShowDrumVelocity(newVal)
@@ -1412,7 +1415,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         glideSources.forEach(note => {
           const target = notesById.get(note.glideToNoteId as string)
           if (!target) return
-          const destVoiced = note.glideVoice === 'destination'
+          const destVoiced = note.glideVoice === 'destination' || note.glideVoice === 'morph'
           const slideTicks = note.pitchSlideTime ?? note.duration
           const x1 = destVoiced
             ? tickToX(Math.max(0, target.time - slideTicks))
@@ -2005,6 +2008,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
       const isTrackHidden = storeState.tracks.find(t => t.id === targetTrackId)?.hidden
       const notes = isTrackHidden ? [] : storeState.notes.filter(n => n.trackId === targetTrackId)
       const points = sortAutomationPoints(storeState.automationCurves[targetTrackId] ?? [])
+      const laneTarget = storeState.automationTargets[targetTrackId] ?? 'velocity'
 
       // Measure directly from the canvas DOM element — always accurate
       const canvasWidth = canvas.clientWidth
@@ -2048,6 +2052,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
       ctx.scale(zoom, 1)
 
       notes.forEach(note => {
+        if (laneTarget !== 'velocity') return
         const x = tickToX(note.time + note.duration / 2)
         const targetY = canvasHeight - (note.velocity / 127) * canvasHeight
 
@@ -3571,8 +3576,31 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
             }}
             onClick={() => setShowAutomation(prev => !prev)}
           >
-            <span>Velocity Automation</span>
-            <span>{showAutomation ? '▼' : '▲'}</span>
+            <span>{automationTarget === 'velocity' ? 'Velocity' : automationTarget === 'volume' ? 'Volume' : 'Pan'} Automation</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              {(['velocity', 'volume', 'pan'] as const).map(t => (
+                <button
+                  key={t}
+                  onClick={(e) => { e.stopPropagation(); setAutomationTarget(targetTrackId, t) }}
+                  style={{
+                    padding: '3px 7px',
+                    borderRadius: '4px',
+                    border: `1px solid ${automationTarget === t ? 'rgba(77,171,247,0.45)' : 'rgba(255,255,255,0.07)'}`,
+                    background: automationTarget === t ? 'rgba(77,171,247,0.16)' : 'rgba(255,255,255,0.03)',
+                    color: automationTarget === t ? '#4dabf7' : '#8a8a95',
+                    fontSize: '9px',
+                    fontWeight: 700,
+                    textTransform: 'none',
+                    letterSpacing: 0,
+                    cursor: 'pointer',
+                    lineHeight: 1.2
+                  }}
+                >
+                  {t === 'velocity' ? 'Velocity' : t === 'volume' ? 'Volume' : 'Pan'}
+                </button>
+              ))}
+              <span style={{ marginLeft: '6px' }}>{showAutomation ? '▼' : '▲'}</span>
+            </div>
           </div>
           {showAutomation && (
             <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
@@ -3592,24 +3620,27 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                   const rawTick = xToTick(x)
                   const time = snapEnabled ? snapTick(rawTick, snapResolution) : Math.round(rawTick)
 
-                  // 1. Proximity check for note stems/handles in this track
-                  const notesInTrack = useStore.getState().notes.filter(n => n.trackId === targetTrackId)
-                  const horizontalThreshold = 15 / zoom
-                  const candidateNotes = notesInTrack.filter(n => {
-                    const noteCenterX = tickToX(n.time + n.duration / 2)
-                    return Math.abs(noteCenterX - x) < horizontalThreshold
-                  })
-
-                  let targetNote: typeof notesInTrack[0] | null = null
-                  if (candidateNotes.length > 0) {
-                    let minDiff = Infinity
-                    candidateNotes.forEach(n => {
-                      const diff = Math.abs(n.velocity - clickVelocity)
-                      if (diff < minDiff) {
-                        minDiff = diff
-                        targetNote = n
-                      }
+                  // 1. Proximity check for note stems/handles in this track. These handles
+                  // write note velocity, so they only apply when the lane targets velocity.
+                  let targetNote: { id: string; velocity: number } | null = null
+                  if (automationTarget === 'velocity') {
+                    const notesInTrack = useStore.getState().notes.filter(n => n.trackId === targetTrackId)
+                    const horizontalThreshold = 15 / zoom
+                    const candidateNotes = notesInTrack.filter(n => {
+                      const noteCenterX = tickToX(n.time + n.duration / 2)
+                      return Math.abs(noteCenterX - x) < horizontalThreshold
                     })
+
+                    if (candidateNotes.length > 0) {
+                      let minDiff = Infinity
+                      candidateNotes.forEach(n => {
+                        const diff = Math.abs(n.velocity - clickVelocity)
+                        if (diff < minDiff) {
+                          minDiff = diff
+                          targetNote = n
+                        }
+                      })
+                    }
                   }
 
                   if (targetNote) {
@@ -3806,6 +3837,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
                       {renderGlideChip('Source', (glideMenu.glideVoice ?? 'source') === 'source', () => setGlideMenu(m => ({ ...m, glideVoice: 'source' })), "The first note's instrument carries the pitch ramp")}
                       {renderGlideChip('Dest', glideMenu.glideVoice === 'destination', () => setGlideMenu(m => ({ ...m, glideVoice: 'destination' })), "The next note's instrument starts early at the previous pitch and carries the ramp")}
+                      {renderGlideChip('Morph', glideMenu.glideVoice === 'morph', () => setGlideMenu(m => ({ ...m, glideVoice: 'morph' })), "Both instruments sound across the junction: the source fades out while the next note fades in")}
                     </div>
                   </div>
 

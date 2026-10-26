@@ -1107,12 +1107,25 @@ static int startVst3Glide(std::vector<PitchGlide>& glides,
                           float endPitch,
                           float slideSeconds,
                           float durationSeconds,
-                          double sampleRate)
+                          double sampleRate,
+                          float pitchOffsetSemitones = 0.0f,
+                          bool forceReserve = false)
 {
-    if (endPitch < 0.0f || std::abs(endPitch - startPitch) < 0.001f) return 1;
+    // The note-on is an integer MIDI pitch, so any fractional / transposed pitch is carried
+    // by bend even when the note does not glide. This is what makes VST3 microtonal.
+    const float baseSemis = (startPitch + pitchOffsetSemitones) - (float)midiPitch;
+    const bool hasGlide = endPitch >= 0.0f && std::abs(endPitch - startPitch) >= 0.001f;
+    // Per-note pan also needs a private channel: CC10 is channel-wide, so it must not leak
+    // onto the shared channel-1 notes.
+    const bool hasPan = std::abs(expression.pan) > 0.001f;
+    // Per-note volume is CC7 as well, so it also needs a channel of its own.
+    const bool hasGain = std::abs(expression.gain - 1.0f) > 0.001f;
+    if (!forceReserve && !hasPan && !hasGain && !hasGlide && std::abs(baseSemis) < 0.0005f) return 1;
+    if (sampleRate <= 0.0) return 1;
 
-    const float totalSeconds = slideSeconds > 0.0f ? slideSeconds : durationSeconds;
-    if (totalSeconds <= 0.0f || sampleRate <= 0.0) return 1;
+    float totalSeconds = slideSeconds > 0.0f ? slideSeconds : durationSeconds;
+    if (hasGlide && totalSeconds <= 0.0f) totalSeconds = 1.0f;
+    if (!hasGlide) totalSeconds = 0.0f;
 
     const int channel = juce::jlimit(2, 16, nextChannel);
     nextChannel = channel >= 16 ? 2 : channel + 1;
@@ -1120,13 +1133,14 @@ static int startVst3Glide(std::vector<PitchGlide>& glides,
     PitchGlide glide;
     glide.channel = channel;
     glide.midiPitch = midiPitch;
-    glide.semitoneDelta = endPitch - startPitch;
+    glide.baseSemitones = baseSemis;
+    glide.semitoneDelta = hasGlide ? (endPitch - startPitch) : 0.0f;
     glide.stepped = expression.steppedGlide;
     glide.curveSize = juce::jlimit(0, musegrid::NoteExpression::kCurvePoints, expression.slideCurveSize);
     for (int i = 0; i < glide.curveSize; ++i)
         glide.curve[(size_t)i] = expression.slideCurve[(size_t)i];
 
-    const int bendRange = juce::jlimit(2, 96, (int)std::ceil(std::abs(glide.semitoneDelta)));
+    const int bendRange = juce::jlimit(2, 96, (int)std::ceil(std::abs(baseSemis) + std::abs(glide.semitoneDelta)) + 1);
     glide.bendRangeSemitones = bendRange;
     glide.totalSamples = juce::jmax(1.0f, totalSeconds * (float)sampleRate);
 
@@ -1137,10 +1151,76 @@ static int startVst3Glide(std::vector<PitchGlide>& glides,
     midi.addEvent(juce::MidiMessage::controllerEvent(channel, 6, bendRange), 0);
     midi.addEvent(juce::MidiMessage::controllerEvent(channel, 38, 0), 0);
     midi.addEvent(juce::MidiMessage::pitchWheel(channel, 8192), 0);
+    // A channel that hosted a morph fade may still be at CC7 0; start every glide note at its
+    // own level so per-note volume automation survives a recycled channel.
+    const int levelValue = juce::jlimit(0, 127,
+        (int)std::lround(juce::jlimit(0.0f, 1.0f, expression.gain) * 127.0f));
+    midi.addEvent(juce::MidiMessage::controllerEvent(channel, 7, levelValue), 0);
+    // Reset pan first so a recycled channel never inherits the previous note's position.
+    midi.addEvent(juce::MidiMessage::controllerEvent(channel, 10, 64), 0);
+    if (hasPan)
+    {
+        const int panValue = juce::jlimit(0, 127,
+            (int)std::lround((juce::jlimit(-1.0f, 1.0f, expression.pan) * 0.5f + 0.5f) * 127.0f));
+        midi.addEvent(juce::MidiMessage::controllerEvent(channel, 10, panValue), 0);
+    }
 
     widenPluginPitchBend(plugin, bendRange);
     glides.push_back(glide);
     return channel;
+}
+
+/** Morph crossfade for VST3 instruments, streamed as CC7 volume on the note's channel. */
+static void startVst3VolumeFade(std::vector<Vst3VolumeFade>& fades,
+                                juce::MidiBuffer& midi,
+                                int channel,
+                                int midiPitch,
+                                float fadeInSeconds,
+                                float fadeOutSeconds,
+                                double sampleRate,
+                                float level = 1.0f)
+{
+    if (sampleRate <= 0.0) return;
+    const bool fadingIn = fadeInSeconds > 0.0001f;
+    const bool fadingOut = fadeOutSeconds > 0.0001f;
+    if (!fadingIn && !fadingOut) return;
+
+    // A fade-in climbs to the note's own automation level, a fade-out falls from it.
+    level = juce::jlimit(0.0f, 1.0f, level);
+
+    Vst3VolumeFade fade;
+    fade.channel = channel;
+    fade.midiPitch = midiPitch;
+    fade.level = level;
+    fade.startValue = fadingIn ? 0.0f : level;
+    fade.endValue = fadingIn ? level : 0.0f;
+    const float seconds = fadingIn ? fadeInSeconds : fadeOutSeconds;
+    fade.totalSamples = juce::jmax(1.0f, seconds * (float)sampleRate);
+
+    midi.addEvent(juce::MidiMessage::controllerEvent(channel, 7, (int)std::lround(fade.startValue * 127.0f)), 0);
+    fades.push_back(fade);
+}
+
+static void renderVst3VolumeFades(std::vector<Vst3VolumeFade>& fades, juce::MidiBuffer& midi, int numSamples)
+{
+    for (auto it = fades.begin(); it != fades.end(); )
+    {
+        const bool endsInBlock = (it->totalSamples - it->elapsedSamples) <= (float)numSamples;
+        const float t = endsInBlock ? 1.0f
+                                    : juce::jlimit(0.0f, 1.0f, (it->elapsedSamples + (float)(numSamples - 1)) / it->totalSamples);
+        const int value = juce::jlimit(0, 127, (int)std::lround((it->startValue + (it->endValue - it->startValue) * t) * 127.0f));
+        if (value != it->lastValue)
+        {
+            midi.addEvent(juce::MidiMessage::controllerEvent(it->channel, 7, value), juce::jmax(0, numSamples - 1));
+            it->lastValue = value;
+        }
+
+        it->elapsedSamples += (float)numSamples;
+        if (endsInBlock)
+            it = fades.erase(it);
+        else
+            ++it;
+    }
 }
 
 static void renderVst3Glides(std::vector<PitchGlide>& glides, juce::MidiBuffer& midi, int numSamples)
@@ -1156,7 +1236,7 @@ static void renderVst3Glides(std::vector<PitchGlide>& glides, juce::MidiBuffer& 
                                         : juce::jmax(0, numSamples - 1);
         const float t = landsInBlock ? 1.0f
                                      : (it->totalSamples > 0.0f ? juce::jlimit(0.0f, 1.0f, (it->elapsedSamples + (float)offset) / it->totalSamples) : 1.0f);
-        float semitones = it->semitoneDelta * samplePitchCurve(it->curve, it->curveSize, t);
+        float semitones = it->baseSemitones + it->semitoneDelta * samplePitchCurve(it->curve, it->curveSize, t);
         if (it->stepped) semitones = std::round(semitones);
 
         const float normalised = semitones / (float)it->bendRangeSemitones;
@@ -1189,6 +1269,36 @@ static void clearPitchGlides(std::vector<PitchGlide>& glides, juce::MidiBuffer& 
             ++it;
         }
     }
+}
+
+/** Drops CC7 morph fades for a finished note. Without this a note that dies mid
+    fade-out would leave the shared channel at CC7 0 and silence every later note. */
+static void clearVst3VolumeFades(std::vector<Vst3VolumeFade>& fades,
+                                 juce::MidiBuffer& midi,
+                                 int channel,
+                                 int midiPitch,
+                                 int offset = 0)
+{
+    for (auto it = fades.begin(); it != fades.end(); )
+    {
+        if (it->channel == channel && (midiPitch < 0 || it->midiPitch == midiPitch))
+        {
+            midi.addEvent(juce::MidiMessage::controllerEvent(it->channel, 7, 127), juce::jmax(0, offset));
+            it = fades.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
+/** Restores CC7 on every channel before wiping all morph fades. */
+static void resetVst3VolumeFades(std::vector<Vst3VolumeFade>& fades, juce::MidiBuffer& midi)
+{
+    for (int ch = 1; ch <= 16; ++ch)
+        midi.addEvent(juce::MidiMessage::controllerEvent(ch, 7, 127), 0);
+    fades.clear();
 }
 
 void AudioEngine::playNote(const juce::String& trackId,
@@ -1306,8 +1416,13 @@ void AudioEngine::playNote(const juce::String& trackId,
                 const int channel = startVst3Glide(slot->pitchGlides, slot->pendingMidi, expression,
                                                    slot->nextGlideChannel, slot->plugin.get(),
                                                    midiPitch, pitchMidi, targetPitchMidi,
-                                                   slideTimeSeconds, durationSeconds, currentSampleRate);
+                                                   slideTimeSeconds, durationSeconds, currentSampleRate,
+                                                   pitchOffsetSemitones,
+                                                   expression.morphFadeInSeconds > 0.0f || expression.morphFadeOutSeconds > 0.0f);
                 slot->pendingMidi.addEvent(juce::MidiMessage::noteOn(channel, midiPitch, (juce::uint8)midiVel), 0);
+                startVst3VolumeFade(slot->volumeFades, slot->pendingMidi, channel, midiPitch,
+                                    expression.morphFadeInSeconds, expression.morphFadeOutSeconds, currentSampleRate,
+                                    expression.gain);
                 if (durationSeconds > 0.0f)
                 {
                     int samples = std::max(1, (int)(durationSeconds * currentSampleRate));
@@ -1326,7 +1441,7 @@ void AudioEngine::playNote(const juce::String& trackId,
             targetTrack->drumEngine.triggerHit((int)pitchMidi, velocity, pitchOffsetSemitones,
                                                drumDecay, slideSemitones, slideTimeSeconds,
                                                punchOctaves, resonanceHz, expression.overrideValue,
-                                               expression.fxChainId);
+                                               expression.fxChainId, expression);
             return;
         }
 
@@ -1335,12 +1450,14 @@ void AudioEngine::playNote(const juce::String& trackId,
             if (expression.overrideValue == "vocal")
             {
                 voiceManager.noteOnVocal(trackId, noteId, pitchMidi, velocity, durationSeconds, lyric,
-                                         1.0f, 0.1f, 0.85f, expression.fxChainId);
+                                         1.0f, 0.1f, 0.85f, expression.fxChainId,
+                                         expression, targetPitchMidi, slideTimeSeconds);
             }
             else if (expression.overrideValue == "physical")
             {
                 voiceManager.noteOnPhysical(trackId, noteId, pitchMidi, velocity, durationSeconds,
-                                            0.5f, 0.5f, expression.fxChainId);
+                                            0.5f, 0.5f, expression.fxChainId,
+                                            expression, targetPitchMidi, slideTimeSeconds);
             }
             else
             {
@@ -1361,7 +1478,8 @@ void AudioEngine::playNote(const juce::String& trackId,
 
     if (targetTrack->samplerEnabled && targetTrack->vst3Instrument == nullptr)
     {
-        targetTrack->sampleEngine.noteOn(noteId, pitchMidi, velocity, durationSeconds, pitchOffsetSemitones, expression.fxChainId);
+        targetTrack->sampleEngine.noteOn(noteId, pitchMidi, velocity, durationSeconds, pitchOffsetSemitones,
+                                         expression.fxChainId, expression, targetPitchMidi, slideTimeSeconds);
     }
     else if (inst == "vst3" || targetTrack->vst3Instrument != nullptr)
     {
@@ -1443,8 +1561,13 @@ void AudioEngine::playNote(const juce::String& trackId,
                 const int channel = startVst3Glide(slot->pitchGlides, slot->pendingMidi, expression,
                                                    slot->nextGlideChannel, slot->plugin.get(),
                                                    midiPitch, pitchMidi, targetPitchMidi,
-                                                   slideTimeSeconds, durationSeconds, currentSampleRate);
+                                                   slideTimeSeconds, durationSeconds, currentSampleRate,
+                                                   pitchOffsetSemitones,
+                                                   expression.morphFadeInSeconds > 0.0f || expression.morphFadeOutSeconds > 0.0f);
                 slot->pendingMidi.addEvent(juce::MidiMessage::noteOn(channel, midiPitch, (juce::uint8)midiVel), 0);
+                startVst3VolumeFade(slot->volumeFades, slot->pendingMidi, channel, midiPitch,
+                                    expression.morphFadeInSeconds, expression.morphFadeOutSeconds, currentSampleRate,
+                                    expression.gain);
                 if (samples > 0)
                     slot->scheduledNoteOffs.push_back({ midiPitch, samples, channel });
                 return;
@@ -1455,26 +1578,34 @@ void AudioEngine::playNote(const juce::String& trackId,
         const int channel = startVst3Glide(targetTrack->pitchGlides, targetTrack->pendingMidi, expression,
                                            targetTrack->nextGlideChannel, targetTrack->vst3Instrument.get(),
                                            midiPitch, pitchMidi, targetPitchMidi,
-                                           slideTimeSeconds, durationSeconds, currentSampleRate);
+                                           slideTimeSeconds, durationSeconds, currentSampleRate,
+                                           pitchOffsetSemitones,
+                                           expression.morphFadeInSeconds > 0.0f || expression.morphFadeOutSeconds > 0.0f);
         targetTrack->pendingMidi.addEvent(juce::MidiMessage::noteOn(channel, midiPitch, (juce::uint8)midiVel), 0);
+        startVst3VolumeFade(targetTrack->volumeFades, targetTrack->pendingMidi, channel, midiPitch,
+                            expression.morphFadeInSeconds, expression.morphFadeOutSeconds, currentSampleRate,
+                            expression.gain);
         if (samples > 0)
             targetTrack->scheduledNoteOffs.push_back({ midiPitch, samples, channel });
     }
     else if (inst == "drum")
     {
-        targetTrack->drumEngine.triggerHit((int)pitchMidi, velocity, pitchOffsetSemitones, drumDecay, slideSemitones, slideTimeSeconds, punchOctaves, resonanceHz, {}, expression.fxChainId);
+        targetTrack->drumEngine.triggerHit((int)pitchMidi, velocity, pitchOffsetSemitones, drumDecay, slideSemitones, slideTimeSeconds, punchOctaves, resonanceHz, {}, expression.fxChainId, expression);
     }
     else if (inst == "physical")
     {
-        voiceManager.noteOnPhysical(trackId, noteId, pitchMidi, velocity, durationSeconds, 0.5f, 0.5f, expression.fxChainId);
+        voiceManager.noteOnPhysical(trackId, noteId, pitchMidi, velocity, durationSeconds, 0.5f, 0.5f,
+                                    expression.fxChainId, expression, targetPitchMidi, slideTimeSeconds);
     }
     else if (inst == "vocal" || (inst == "synth" && targetTrack->synthPreset == "vocal"))
     {
-        voiceManager.noteOnVocal(trackId, noteId, pitchMidi, velocity, durationSeconds, lyric, 1.0f, 0.1f, 0.85f, expression.fxChainId);
+        voiceManager.noteOnVocal(trackId, noteId, pitchMidi, velocity, durationSeconds, lyric, 1.0f, 0.1f, 0.85f,
+                                 expression.fxChainId, expression, targetPitchMidi, slideTimeSeconds);
     }
     else if (inst == "synth" && targetTrack->synthPreset == "physical")
     {
-        voiceManager.noteOnPhysical(trackId, noteId, pitchMidi, velocity, durationSeconds, 0.5f, 0.5f, expression.fxChainId);
+        voiceManager.noteOnPhysical(trackId, noteId, pitchMidi, velocity, durationSeconds, 0.5f, 0.5f,
+                                    expression.fxChainId, expression, targetPitchMidi, slideTimeSeconds);
     }
     else // Default "synth"
     {
@@ -1522,6 +1653,7 @@ void AudioEngine::noteOff(const juce::String& trackId, int noteId)
                         if (off.midiPitch == midiPitch) { channel = off.midiChannel; break; }
                     slot->pendingMidi.addEvent(juce::MidiMessage::noteOff(channel, midiPitch), 0);
                     clearPitchGlides(slot->pitchGlides, slot->pendingMidi, midiPitch);
+                    clearVst3VolumeFades(slot->volumeFades, slot->pendingMidi, channel, midiPitch);
                     for (auto it = slot->scheduledNoteOffs.begin(); it != slot->scheduledNoteOffs.end(); )
                     {
                         if (it->midiPitch == midiPitch) it = slot->scheduledNoteOffs.erase(it);
@@ -1533,6 +1665,7 @@ void AudioEngine::noteOff(const juce::String& trackId, int noteId)
                     for (int ch = 1; ch <= 16; ++ch)
                         slot->pendingMidi.addEvent(juce::MidiMessage::allNotesOff(ch), 0);
                     clearPitchGlides(slot->pitchGlides, slot->pendingMidi, -1);
+                    resetVst3VolumeFades(slot->volumeFades, slot->pendingMidi);
                     slot->scheduledNoteOffs.clear();
                 }
             }
@@ -1562,6 +1695,7 @@ void AudioEngine::noteOff(const juce::String& trackId, int noteId)
                     if (off.midiPitch == midiPitch) { channel = off.midiChannel; break; }
                 t->pendingMidi.addEvent(juce::MidiMessage::noteOff(channel, midiPitch), 0);
                 clearPitchGlides(t->pitchGlides, t->pendingMidi, midiPitch);
+                clearVst3VolumeFades(t->volumeFades, t->pendingMidi, channel, midiPitch);
                 for (auto it = t->scheduledNoteOffs.begin(); it != t->scheduledNoteOffs.end(); )
                 {
                     if (it->midiPitch == midiPitch)
@@ -1575,6 +1709,7 @@ void AudioEngine::noteOff(const juce::String& trackId, int noteId)
                 for (int ch = 1; ch <= 16; ++ch)
                     t->pendingMidi.addEvent(juce::MidiMessage::allNotesOff(ch), 0);
                 clearPitchGlides(t->pitchGlides, t->pendingMidi, -1);
+                resetVst3VolumeFades(t->volumeFades, t->pendingMidi);
                 t->scheduledNoteOffs.clear();
             }
             break;
@@ -1601,6 +1736,7 @@ void AudioEngine::allNotesOff()
                 t->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(ch), 0);
             }
             clearPitchGlides(t->pitchGlides, t->pendingMidi, -1);
+            resetVst3VolumeFades(t->volumeFades, t->pendingMidi);
             t->scheduledNoteOffs.clear();
         }
 
@@ -1613,6 +1749,7 @@ void AudioEngine::allNotesOff()
                 slot->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(ch), 0);
             }
             clearPitchGlides(slot->pitchGlides, slot->pendingMidi, -1);
+            resetVst3VolumeFades(slot->volumeFades, slot->pendingMidi);
             slot->scheduledNoteOffs.clear();
         }
     }
@@ -1641,6 +1778,7 @@ void AudioEngine::killAllNotesOnTrack(const juce::String& trackId)
                 t->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(ch), 0);
             }
             clearPitchGlides(t->pitchGlides, t->pendingMidi, -1);
+            resetVst3VolumeFades(t->volumeFades, t->pendingMidi);
         }
         t->scheduledNoteOffs.clear();
 
@@ -1653,6 +1791,7 @@ void AudioEngine::killAllNotesOnTrack(const juce::String& trackId)
                 slot->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(ch), 0);
             }
             clearPitchGlides(slot->pitchGlides, slot->pendingMidi, -1);
+            resetVst3VolumeFades(slot->volumeFades, slot->pendingMidi);
             slot->scheduledNoteOffs.clear();
         }
         break;
@@ -1749,6 +1888,7 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
                         int offset = std::clamp(it->sampleCountdown, 0, numSamples - 1);
                         midiForBlock.addEvent(juce::MidiMessage::noteOff(it->midiChannel, it->midiPitch), offset);
                         midiForBlock.addEvent(juce::MidiMessage::pitchWheel(it->midiChannel, 8192), offset);
+                        clearVst3VolumeFades(t->volumeFades, midiForBlock, it->midiChannel, it->midiPitch, offset);
                         it = t->scheduledNoteOffs.erase(it);
                     }
                     else
@@ -1759,6 +1899,7 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
                 }
 
                 renderVst3Glides(t->pitchGlides, midiForBlock, numSamples);
+                renderVst3VolumeFades(t->volumeFades, midiForBlock, numSamples);
             }
             int outCh = t->vst3Instrument->getTotalNumOutputChannels();
             int inCh = t->vst3Instrument->getTotalNumInputChannels();
@@ -1826,6 +1967,7 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
                             int offset = std::clamp(it->sampleCountdown, 0, numSamples - 1);
                             midiForBlock.addEvent(juce::MidiMessage::noteOff(it->midiChannel, it->midiPitch), offset);
                             midiForBlock.addEvent(juce::MidiMessage::pitchWheel(it->midiChannel, 8192), offset);
+                            clearVst3VolumeFades(slot->volumeFades, midiForBlock, it->midiChannel, it->midiPitch, offset);
                             it = slot->scheduledNoteOffs.erase(it);
                         }
                         else
@@ -1836,6 +1978,7 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
                     }
 
                     renderVst3Glides(slot->pitchGlides, midiForBlock, numSamples);
+                    renderVst3VolumeFades(slot->volumeFades, midiForBlock, numSamples);
                 }
 
                 int outCh = slot->plugin->getTotalNumOutputChannels();
@@ -1889,6 +2032,7 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
                                 const int offset = std::clamp(it->sampleCountdown, 0, numSamples - 1);
                                 slotMidi.addEvent(juce::MidiMessage::noteOff(it->midiChannel, it->midiPitch), offset);
                                 slotMidi.addEvent(juce::MidiMessage::pitchWheel(it->midiChannel, 8192), offset);
+                                clearVst3VolumeFades(slot->volumeFades, slotMidi, it->midiChannel, it->midiPitch, offset);
                                 it = slot->scheduledNoteOffs.erase(it);
                             }
                             else
@@ -1899,6 +2043,7 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
                         }
 
                         renderVst3Glides(slot->pitchGlides, slotMidi, numSamples);
+                        renderVst3VolumeFades(slot->volumeFades, slotMidi, numSamples);
                     }
 
                     const int outCh = slot->plugin->getTotalNumOutputChannels();
@@ -2259,6 +2404,7 @@ void AudioEngine::removeTrackVst3Instrument(const juce::String& trackId)
                 std::lock_guard<std::mutex> midiLock(t->midiMutex);
                 t->scheduledNoteOffs.clear();
                 t->pitchGlides.clear();
+                t->volumeFades.clear();
             }
             t->vst3InstrumentEditor = nullptr;
             t->vst3Instrument = nullptr;
@@ -2338,6 +2484,7 @@ void AudioEngine::releaseNoteVst3Instruments(const juce::String& trackId)
             slot->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(1), 0);
             slot->scheduledNoteOffs.clear();
             slot->pitchGlides.clear();
+            slot->volumeFades.clear();
         }
         t->noteVst3Slots.clear();
         break;

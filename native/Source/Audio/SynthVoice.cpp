@@ -239,7 +239,7 @@ void SynthVoice::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
     if (!active || envStage == EnvStage::Off) return;
 
     const float sampleTime = 1.0f / (float)currentSampleRate;
-    const float panAngle = (trackPan + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
+    const float panAngle = (juce::jlimit(-1.0f, 1.0f, trackPan + expression.pan) + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
     const float leftGain = std::cos(panAngle) * trackVol;
     const float rightGain = std::sin(panAngle) * trackVol;
 
@@ -469,7 +469,15 @@ void SynthVoice::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
         }
 
         // 8. Final Sample Output
-        const float finalVal = rawSample * envValue * noteVelocity * tremMultiplier;
+        // Morph glides let both instruments sound and crossfade across the junction.
+        float morphGain = 1.0f;
+        if (expression.morphFadeInSeconds > 0.0001f)
+            morphGain *= juce::jlimit(0.0f, 1.0f, vibratoElapsed / expression.morphFadeInSeconds);
+        if (expression.morphFadeOutSeconds > 0.0001f)
+            morphGain *= juce::jlimit(0.0f, 1.0f, 1.0f - vibratoElapsed / expression.morphFadeOutSeconds);
+
+        const float finalVal = rawSample * envValue * noteVelocity * tremMultiplier
+                               * morphGain * juce::jlimit(0.0f, 1.0f, expression.gain);
         leftOut[i] += finalVal * leftGain;
         rightOut[i] += finalVal * rightGain;
 

@@ -8,7 +8,7 @@ import { getTrackFxInstances, getTrackFxSetting as readTrackFxSetting } from './
 import { getEffectiveTrackLevel } from '../utils/groupAudio'
 import { buildNativeNoteOnCommand } from './nativeNoteCommand'
 import { buildNoteFxChain } from '../utils/noteFxChain'
-import { evaluateGlideCurve } from '../utils/glideCurves'
+import { buildCurveLut, evaluateGlideCurve } from '../utils/glideCurves'
 
 interface TrackRack {
   input: Tone.Gain
@@ -1053,7 +1053,15 @@ export class ChromaticSampler {
     return rev
   }
 
-  noteOn(key: number, pitchMidi: number, velocity: number, durSec: number, extraPitchOffset = 0, time?: number) {
+  noteOn(key: number, pitchMidi: number, velocity: number, durSec: number, extraPitchOffset = 0, time?: number, opts?: {
+    targetPitchMidi?: number
+    glideSeconds?: number
+    glideCurve?: number[]
+    pan?: number
+    gain?: number
+    fadeIn?: number
+    fadeOut?: number
+  }) {
     if (!this.buffer) {
       this.loadSample()
       return
@@ -1063,6 +1071,7 @@ export class ChromaticSampler {
 
     const semis = (pitchMidi - (cfg.rootNote || 60)) + (cfg.tuning || 0) + extraPitchOffset + (cfg.fineTune || 0) / 100
     const rate = Math.max(0.05, Math.min(16.0, Math.pow(2, semis / 12)))
+    const noteGain = Math.max(0, Math.min(1, opts?.gain !== undefined ? opts.gain : 1))
 
     const buf = cfg.reverse ? this.getReversed() : this.buffer
     const duration = buf.duration
@@ -1079,13 +1088,33 @@ export class ChromaticSampler {
     const source = this.ctx.createBufferSource()
     source.buffer = buf
     source.playbackRate.setValueAtTime(rate, now)
+    if (opts?.targetPitchMidi !== undefined && opts.glideSeconds && opts.glideSeconds > 0) {
+      const targetSemis = (opts.targetPitchMidi - (cfg.rootNote || 60)) + (cfg.tuning || 0) + extraPitchOffset + (cfg.fineTune || 0) / 100
+      const targetRate = Math.max(0.05, Math.min(16.0, Math.pow(2, targetSemis / 12)))
+      if (Math.abs(targetRate - rate) > 1e-6) {
+        const curve = opts.glideCurve
+        if (curve && curve.length >= 2) {
+          const steps = Math.max(8, Math.min(120, Math.round(opts.glideSeconds * 60)))
+          for (let i = 1; i <= steps; i++) {
+            const t = i / steps
+            const pos = t * (curve.length - 1)
+            const i0 = Math.floor(pos)
+            const i1 = Math.min(i0 + 1, curve.length - 1)
+            const shape = curve[i0] + (curve[i1] - curve[i0]) * (pos - i0)
+            source.playbackRate.setValueAtTime(rate + (targetRate - rate) * shape, now + opts.glideSeconds * t)
+          }
+        } else {
+          source.playbackRate.linearRampToValueAtTime(targetRate, now + opts.glideSeconds)
+        }
+      }
+    }
     if (cfg.loop) {
       source.loop = true
       source.loopStart = regionStart
       source.loopEnd = regionEnd
     }
 
-    const peak = Math.max(0.0001, Math.min(2.5, velocity * (cfg.volume !== undefined ? cfg.volume : 1)))
+    const peak = Math.max(0.0001, Math.min(2.5, velocity * (cfg.volume !== undefined ? cfg.volume : 1))) * Math.max(0.0001, noteGain)
     const gain = this.ctx.createGain()
     const attack = Math.max(0.001, cfg.attack ?? 0.005)
     const decay = Math.max(0.01, cfg.decay ?? 0.25)
@@ -1105,11 +1134,21 @@ export class ChromaticSampler {
     gain.gain.exponentialRampToValueAtTime(0.0001, releaseAt + release)
 
     let output: AudioNode = gain
-    const panVal = cfg.pan ?? 0
+    const fadeIn = Math.max(0, opts?.fadeIn ?? 0)
+    const fadeOut = Math.max(0, opts?.fadeOut ?? 0)
+    if (fadeIn > 0 || fadeOut > 0) {
+      const fadeGain = this.ctx.createGain()
+      fadeGain.gain.setValueAtTime(fadeIn > 0 ? 0 : 1, now)
+      if (fadeIn > 0) fadeGain.gain.linearRampToValueAtTime(1, now + fadeIn)
+      if (fadeOut > 0) fadeGain.gain.linearRampToValueAtTime(0, now + Math.min(fadeOut, Math.max(0.005, durSec)))
+      gain.connect(fadeGain)
+      output = fadeGain
+    }
+    const panVal = Math.max(-1, Math.min(1, (cfg.pan ?? 0) + (opts?.pan ?? 0)))
     if (panVal !== 0 && (this.ctx as any).createStereoPanner) {
       const panner = (this.ctx as any).createStereoPanner()
-      panner.pan.setValueAtTime(Math.max(-1, Math.min(1, panVal)), now)
-      gain.connect(panner)
+      panner.pan.setValueAtTime(panVal, now)
+      output.connect(panner)
       output = panner
     }
     output.connect(this.rackInput)
@@ -1186,6 +1225,20 @@ export class ChromaticSampler {
   }
 }
 
+export interface VoiceOutputOptions {
+  /** Glide destination in Hz. */
+  targetFrequency?: number
+  glideSeconds?: number
+  glideCurve?: number[]
+  /** Per-note pan trim in -1..1. */
+  pan?: number
+  /** Per-note gain 0..1 (volume automation). */
+  gain?: number
+  /** Morph crossfade lengths in seconds, measured from note start. */
+  fadeIn?: number
+  fadeOut?: number
+}
+
 export class PhysicalModelVoice {
   private ctx: AudioContext
   private rackInput: GainNode
@@ -1195,20 +1248,108 @@ export class PhysicalModelVoice {
     this.rackInput = rackInput
   }
 
-  trigger(frequency: number, duration: number, time: number, velocity: number, params: any) {
-    const model = params.pmModelType || 'string'
-    if (model === 'string') {
-      this.triggerString(frequency, duration, time, velocity, params)
-    } else if (model === 'wind') {
-      this.triggerWind(frequency, duration, time, velocity, params)
-    } else if (model === 'custom') {
-      this.triggerCustom(frequency, duration, time, velocity, params)
+  /** Builds the per-note fade/pan/gain stage in front of the rack input. */
+  private buildOutput(now: number, duration: number, opts?: VoiceOutputOptions): { node: AudioNode; owned: AudioNode[] } {
+    const ctx = this.ctx
+    const owned: AudioNode[] = []
+    let node: AudioNode = this.rackInput
+
+    const gainValue = Math.max(0, Math.min(1, opts?.gain ?? 1))
+    const fadeIn = Math.max(0, opts?.fadeIn ?? 0)
+    const fadeOut = Math.max(0, opts?.fadeOut ?? 0)
+    if (gainValue !== 1 || fadeIn > 0 || fadeOut > 0) {
+      const g = ctx.createGain()
+      g.gain.setValueAtTime(fadeIn > 0 ? 0 : gainValue, now)
+      if (fadeIn > 0) g.gain.linearRampToValueAtTime(gainValue, now + fadeIn)
+      if (fadeOut > 0) g.gain.linearRampToValueAtTime(0, now + Math.min(fadeOut, Math.max(0.005, duration)))
+      g.connect(node)
+      node = g
+      owned.push(g)
+    }
+
+    const pan = Math.max(-1, Math.min(1, opts?.pan ?? 0))
+    if (pan !== 0 && (ctx as any).createStereoPanner) {
+      const panner = (ctx as any).createStereoPanner()
+      panner.pan.setValueAtTime(pan, now)
+      panner.connect(node)
+      node = panner
+      owned.push(panner)
+    }
+    return { node, owned }
+  }
+
+  /**
+   * Schedules a glide on a value that is inversely proportional to frequency (delay length).
+   * `scale` maps 1/f to the actual delay-time range used by each model.
+   */
+  private scheduleDelayGlide(param: AudioParam, startFreq: number, opts: VoiceOutputOptions | undefined, now: number, duration: number, scale = 1) {
+    const target = opts?.targetFrequency
+    const start = Math.max(0.0005, scale / Math.max(1e-6, startFreq))
+    if (!target || target <= 0) {
+      param.setValueAtTime(start, now)
+      return
+    }
+    const end = Math.max(0.0005, Math.min(param.maxValue > 0 ? param.maxValue : 1, scale / target))
+    const glide = opts?.glideSeconds && opts.glideSeconds > 0 ? opts.glideSeconds : duration
+    param.setValueAtTime(start, now)
+    if (Math.abs(end - start) < 1e-9) return
+    const curve = opts?.glideCurve
+    if (curve && curve.length >= 2) {
+      const steps = Math.max(8, Math.min(120, Math.round(glide * 60)))
+      let prev = start
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps
+        const pos = t * (curve.length - 1)
+        const i0 = Math.floor(pos)
+        const i1 = Math.min(i0 + 1, curve.length - 1)
+        const shape = curve[i0] + (curve[i1] - curve[i0]) * (pos - i0)
+        const value = Math.max(0.0005, start * Math.pow(end / start, shape))
+        if (value !== prev) {
+          param.exponentialRampToValueAtTime(value, now + glide * t)
+          prev = value
+        }
+      }
     } else {
-      this.triggerPercussion(frequency, duration, time, velocity, params)
+      param.exponentialRampToValueAtTime(end, now + glide)
     }
   }
 
-  private triggerString(frequency: number, duration: number, time: number, velocity: number, params: any) {
+  /** Schedules a frequency glide on a filter/resonator cutoff. */
+  private scheduleFreqGlide(param: AudioParam, startFreq: number, opts: VoiceOutputOptions | undefined, now: number, duration: number) {
+    const target = opts?.targetFrequency
+    param.setValueAtTime(startFreq, now)
+    if (!target || target <= 0 || startFreq <= 0) return
+    const glide = opts?.glideSeconds && opts.glideSeconds > 0 ? opts.glideSeconds : duration
+    const curve = opts?.glideCurve
+    if (curve && curve.length >= 2) {
+      const steps = Math.max(8, Math.min(120, Math.round(glide * 60)))
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps
+        const pos = t * (curve.length - 1)
+        const i0 = Math.floor(pos)
+        const i1 = Math.min(i0 + 1, curve.length - 1)
+        const shape = curve[i0] + (curve[i1] - curve[i0]) * (pos - i0)
+        param.setValueAtTime(startFreq * Math.pow(target / startFreq, shape), now + glide * t)
+      }
+    } else {
+      param.exponentialRampToValueAtTime(target, now + glide)
+    }
+  }
+
+  trigger(frequency: number, duration: number, time: number, velocity: number, params: any, opts?: VoiceOutputOptions) {
+    const model = params.pmModelType || 'string'
+    if (model === 'string') {
+      this.triggerString(frequency, duration, time, velocity, params, opts)
+    } else if (model === 'wind') {
+      this.triggerWind(frequency, duration, time, velocity, params, opts)
+    } else if (model === 'custom') {
+      this.triggerCustom(frequency, duration, time, velocity, params, opts)
+    } else {
+      this.triggerPercussion(frequency, duration, time, velocity, params, opts)
+    }
+  }
+
+  private triggerString(frequency: number, duration: number, time: number, velocity: number, params: any, opts?: VoiceOutputOptions) {
     const ctx = this.ctx
     const now = time
 
@@ -1242,6 +1383,7 @@ export class PhysicalModelVoice {
     excFilter.Q.setValueAtTime(1.0, now)
 
     delay.delayTime.setValueAtTime(delayTime, now)
+    this.scheduleDelayGlide(delay.delayTime, safeFreq, opts, now, duration)
 
     const fbGain = 0.85 + (decay * 0.14)
     feedback.gain.setValueAtTime(fbGain, now)
@@ -1274,7 +1416,8 @@ export class PhysicalModelVoice {
       bridgeGain.connect(voiceGain)
     }
 
-    voiceGain.connect(this.rackInput)
+    const out = this.buildOutput(now, duration, opts)
+    voiceGain.connect(out.node)
 
     noise.start(now)
     noise.stop(now + pluckLen + 0.1)
@@ -1288,11 +1431,12 @@ export class PhysicalModelVoice {
         stringFilter.disconnect()
         bodyRes.disconnect()
         voiceGain.disconnect()
+        out.owned.forEach(n => n.disconnect())
       } catch (e) { }
     }, (duration + 3.0) * 1000)
   }
 
-  private triggerWind(frequency: number, duration: number, time: number, velocity: number, params: any) {
+  private triggerWind(frequency: number, duration: number, time: number, velocity: number, params: any, opts?: VoiceOutputOptions) {
     const ctx = this.ctx
     const now = time
 
@@ -1328,12 +1472,14 @@ export class PhysicalModelVoice {
     excFilter.frequency.setValueAtTime(2000, now)
 
     delay.delayTime.setValueAtTime(delayTime * (0.8 + jetDelay * 0.4), now)
+    this.scheduleDelayGlide(delay.delayTime, safeFreq, opts, now, duration, 0.8 + jetDelay * 0.4)
 
     feedback.gain.setValueAtTime(0.8 + (1 - damping) * 0.18, now)
     feedback.gain.exponentialRampToValueAtTime(0.01, now + duration + 0.5)
 
     tubeFilter.type = 'bandpass'
     tubeFilter.frequency.setValueAtTime(frequency, now)
+    this.scheduleFreqGlide(tubeFilter.frequency, safeFreq, opts, now, duration)
     tubeFilter.Q.setValueAtTime(5.0 - (damping * 3.5), now)
 
     delay.connect(tubeFilter)
@@ -1347,7 +1493,8 @@ export class PhysicalModelVoice {
     blowGain.connect(excFilter)
     excFilter.connect(delay)
     delay.connect(voiceGain)
-    voiceGain.connect(this.rackInput)
+    const out = this.buildOutput(now, duration, opts)
+    voiceGain.connect(out.node)
 
     noise.start(now)
     noise.stop(now + duration + 0.6)
@@ -1361,11 +1508,12 @@ export class PhysicalModelVoice {
         feedback.disconnect()
         tubeFilter.disconnect()
         voiceGain.disconnect()
+        out.owned.forEach(n => n.disconnect())
       } catch (e) { }
     }, (duration + 2.0) * 1000)
   }
 
-  private triggerCustom(frequency: number, duration: number, time: number, velocity: number, params: any) {
+  private triggerCustom(frequency: number, duration: number, time: number, velocity: number, params: any, opts?: VoiceOutputOptions) {
     const ctx = this.ctx
     const now = time
     const formula = params.pmExciterFormula || 'Math.exp(-t * 10) * (Math.random() * 2 - 1)'
@@ -1400,16 +1548,19 @@ export class PhysicalModelVoice {
     exciterSource.buffer = impulseBuffer
 
     // Karplus-Strong physical modeling body (String-like delay line)
-    const delayTime = 1 / frequency
-    const delay = ctx.createDelay(delayTime * 2)
+    const safeFreq = Math.max(10, Math.min(20000, Number(frequency) || 440))
+    const delayTime = 1 / safeFreq
+    const delay = ctx.createDelay(Math.max(0.1, delayTime * 2))
     const feedback = ctx.createGain()
     const stringFilter = ctx.createBiquadFilter()
     const voiceGain = ctx.createGain()
 
     delay.delayTime.value = delayTime
+    this.scheduleDelayGlide(delay.delayTime, safeFreq, opts, now, duration)
     feedback.gain.value = 0.96 // Adjust for decay
     stringFilter.type = 'lowpass'
     stringFilter.frequency.value = frequency * 4 // Damping
+    this.scheduleFreqGlide(stringFilter.frequency, safeFreq * 4, opts, now, duration)
 
     // Connect exciter to delay loop
     exciterSource.connect(delay)
@@ -1421,7 +1572,8 @@ export class PhysicalModelVoice {
 
     // Output
     delay.connect(voiceGain)
-    voiceGain.connect(this.rackInput)
+    const out = this.buildOutput(now, duration, opts)
+    voiceGain.connect(out.node)
 
     // Envelope
     voiceGain.gain.setValueAtTime(0, now)
@@ -1437,10 +1589,11 @@ export class PhysicalModelVoice {
       feedback.disconnect()
       stringFilter.disconnect()
       voiceGain.disconnect()
+      out.owned.forEach(n => n.disconnect())
     }, (duration + 2) * 1000)
   }
 
-  private triggerPercussion(frequency: number, duration: number, time: number, velocity: number, params: any) {
+  private triggerPercussion(frequency: number, duration: number, time: number, velocity: number, params: any, opts?: VoiceOutputOptions) {
     const ctx = this.ctx
     const now = time
 
@@ -1476,6 +1629,7 @@ export class PhysicalModelVoice {
       const bp = ctx.createBiquadFilter()
       bp.type = 'bandpass'
       bp.frequency.setValueAtTime(f, now)
+      this.scheduleFreqGlide(bp.frequency, f, opts, now, duration)
       bp.Q.setValueAtTime(15 + (resonance * 120), now)
 
       const g = ctx.createGain()
@@ -1491,7 +1645,8 @@ export class PhysicalModelVoice {
       gainNodes.push(g)
     })
 
-    voiceGain.connect(this.rackInput)
+    const out = this.buildOutput(now, duration, opts)
+    voiceGain.connect(out.node)
 
     click.start(now)
     click.stop(now + clickLen + 0.05)
@@ -1503,6 +1658,7 @@ export class PhysicalModelVoice {
         bandpassNodes.forEach(bp => bp.disconnect())
         gainNodes.forEach(g => g.disconnect())
         voiceGain.disconnect()
+        out.owned.forEach(n => n.disconnect())
       } catch (e) { }
     }, (duration + 2.0) * 1000)
   }
@@ -1575,10 +1731,52 @@ export class VocalModelVoice {
     velocity: number, 
     preset: VoicePreset, 
     lyric: string, 
-    endFrequency?: number
+    endFrequency?: number,
+    opts?: VoiceOutputOptions
   ) {
     const ctx = this.ctx
     const now = time
+
+    // Per-note fade / pan / volume stage. Consonant bursts join it so an onset never escapes the fade.
+    const ownedOut: AudioNode[] = []
+    let outNode: AudioNode = this.rackInput
+    {
+      const gainValue = Math.max(0, Math.min(1, opts?.gain ?? 1))
+      const fadeIn = Math.max(0, opts?.fadeIn ?? 0)
+      const fadeOut = Math.max(0, opts?.fadeOut ?? 0)
+      if (gainValue !== 1 || fadeIn > 0 || fadeOut > 0) {
+        const g = ctx.createGain()
+        g.gain.setValueAtTime(fadeIn > 0 ? 0 : gainValue, now)
+        if (fadeIn > 0) g.gain.linearRampToValueAtTime(gainValue, now + fadeIn)
+        if (fadeOut > 0) g.gain.linearRampToValueAtTime(0, now + Math.min(fadeOut, Math.max(0.005, duration)))
+        g.connect(outNode)
+        outNode = g
+        ownedOut.push(g)
+      }
+      const pan = Math.max(-1, Math.min(1, opts?.pan ?? 0))
+      if (pan !== 0 && (ctx as any).createStereoPanner) {
+        const panner = (ctx as any).createStereoPanner()
+        panner.pan.setValueAtTime(pan, now)
+        panner.connect(outNode)
+        outNode = panner
+        ownedOut.push(panner)
+      }
+    }
+
+    const glideSeconds = opts?.glideSeconds && opts.glideSeconds > 0 ? opts.glideSeconds : duration
+    const glideCurveLut = opts?.glideCurve
+    const pitchAt = (t: number): number => {
+      if (!endFrequency || endFrequency <= 0 || frequency <= 0) return frequency
+      const raw = Math.max(0, Math.min(1, t / Math.max(0.001, glideSeconds)))
+      let shape = raw
+      if (glideCurveLut && glideCurveLut.length >= 2) {
+        const pos = raw * (glideCurveLut.length - 1)
+        const i0 = Math.floor(pos)
+        const i1 = Math.min(i0 + 1, glideCurveLut.length - 1)
+        shape = glideCurveLut[i0] + (glideCurveLut[i1] - glideCurveLut[i0]) * (pos - i0)
+      }
+      return frequency * Math.pow(endFrequency / frequency, shape)
+    }
 
     const vtl = preset.vocalTractLength ?? 1.0
     const breath = preset.breathiness ?? 0.1
@@ -1611,7 +1809,7 @@ export class VocalModelVoice {
 
     // 2. Onset consonant noise burst
     const consDur = consonant
-      ? this.fireConsonantBurst(consonant, now, velocity, preset, noiseBuffer)
+      ? this.fireConsonantBurst(consonant, now, velocity, preset, noiseBuffer, outNode)
       : 0
 
     let vowelStartDelay = 0
@@ -1630,8 +1828,21 @@ export class VocalModelVoice {
     const osc = ctx.createOscillator()
     osc.setPeriodicWave(this.createGlottalWave(tension))
     osc.frequency.setValueAtTime(frequency, now + vowelStartDelay)
-    if (endFrequency) {
-      osc.frequency.exponentialRampToValueAtTime(endFrequency, now + duration)
+    if (endFrequency && endFrequency > 0 && frequency > 0 && Math.abs(endFrequency - frequency) > 1e-6) {
+      const oscGlide = Math.max(0.001, Math.min(glideSeconds, Math.max(0.001, duration - vowelStartDelay)))
+      if (glideCurveLut && glideCurveLut.length >= 2) {
+        const steps = Math.max(8, Math.min(120, Math.round(oscGlide * 60)))
+        for (let i = 1; i <= steps; i++) {
+          const t = i / steps
+          const pos = t * (glideCurveLut.length - 1)
+          const i0 = Math.floor(pos)
+          const i1 = Math.min(i0 + 1, glideCurveLut.length - 1)
+          const shape = glideCurveLut[i0] + (glideCurveLut[i1] - glideCurveLut[i0]) * (pos - i0)
+          osc.frequency.setValueAtTime(frequency * Math.pow(endFrequency / frequency, shape), now + vowelStartDelay + oscGlide * t)
+        }
+      } else {
+        osc.frequency.exponentialRampToValueAtTime(endFrequency, now + vowelStartDelay + oscGlide)
+      }
     }
 
     // 5. Vibrato, Jitter, Shimmer LFOs
@@ -1780,11 +1991,7 @@ export class VocalModelVoice {
         const t = s / sr
 
         // Pitch trajectory with vibrato onset delay and jitter
-        let excFreq = frequency
-        if (endFrequency && t > 0) {
-          const progress = t / duration
-          excFreq = frequency * Math.pow(endFrequency / frequency, progress)
-        }
+        let excFreq = pitchAt(t)
         if (vibDepth > 0 && t > vibDelaySec) {
           const depthHz = excFreq * (Math.pow(2, vibDepth / 1200) - 1)
           const vibEnv = Math.min(1.0, (t - vibDelaySec) / 0.15)
@@ -2016,10 +2223,7 @@ export class VocalModelVoice {
 
       for (let s = 0; s < totalSamples; s++) {
         const t = s / sr
-        if (endFrequency && t > 0) {
-          const progress = t / duration
-          excFreq = frequency * Math.pow(endFrequency / frequency, progress)
-        }
+        excFreq = pitchAt(t)
         if (vibDepth > 0 && t > vibDelaySec) {
           const depthHz = excFreq * (Math.pow(2, vibDepth / 1200) - 1)
           const vibEnv = Math.min(1.0, (t - vibDelaySec) / 0.15)
@@ -2306,13 +2510,13 @@ export class VocalModelVoice {
       }
     }
 
-    voiceGain.connect(this.rackInput)
+    voiceGain.connect(outNode)
 
     // 8. Word-final consonant (coda). "give", "love", "half", "all", "your" and "an" used to stop on
     // the bare vowel; it sits under the gate's duck so it is heard without masking the next onset.
     if (parsed.finalConsonant) {
       const codaAt = now + Math.max(vowelStartDelay + 0.03, duration - codaLen)
-      this.fireConsonantBurst(parsed.finalConsonant, codaAt, velocity * 0.9, preset, noiseBuffer)
+      this.fireConsonantBurst(parsed.finalConsonant, codaAt, velocity * 0.9, preset, noiseBuffer, outNode)
     }
 
     if (preset.synthesisMode !== 'waveguide' && preset.synthesisMode !== 'fof') {
@@ -2334,6 +2538,7 @@ export class VocalModelVoice {
         formantFilters.forEach(f => f.disconnect())
         formantGains.forEach(g => g.disconnect())
         voiceGain.disconnect()
+        ownedOut.forEach(n => n.disconnect())
         if (vibratoOsc) {
           vibratoOsc.stop()
           vibratoOsc.disconnect()
@@ -2398,7 +2603,8 @@ export class VocalModelVoice {
     when: number,
     velocity: number,
     preset: VoicePreset,
-    noiseBuffer: AudioBuffer
+    noiseBuffer: AudioBuffer,
+    dest?: AudioNode
   ): number {
     const spec = this.consonantBurstSpec(consonant, preset.consonantLength ?? 1.0)
     if (!spec) return 0
@@ -2415,7 +2621,7 @@ export class VocalModelVoice {
 
     consNoise.connect(consFilter)
     consFilter.connect(consGain)
-    consGain.connect(this.rackInput)
+    consGain.connect(dest || this.rackInput)
     consNoise.start(when)
     consNoise.stop(when + spec.dur)
 
@@ -5166,7 +5372,19 @@ class AudioEngine {
             : (Number.isFinite(Number(pitch)) ? Number(pitch) : Tone.Frequency(pitch).toMidi())
           const durSec = Tone.Time(duration).toSeconds()
           const extraOffset = (noteData?.pitchOffset ?? 0) + (detune ? detune / 100 : 0) + (track?.transpose ?? 0)
-          sampler.noteOn(Math.round(midi * 100), midi, velocity, durSec, extraOffset, playTime)
+          const slideSemis = noteData?.pitchSlide ?? 0
+          const slides = !!slideSemis
+          sampler.noteOn(Math.round(midi * 100), midi, velocity, durSec, extraOffset, playTime, {
+            targetPitchMidi: slides ? midi + slideSemis : undefined,
+            glideSeconds: slides
+              ? (noteData?.pitchSlideTime ? Tone.Time(noteData.pitchSlideTime + 'i').toSeconds() : durSec)
+              : undefined,
+            glideCurve: slides ? buildCurveLut(noteData?.pitchSlideRamp, noteData?.pitchSlideCustomCurve || 't * t') : undefined,
+            pan: noteData?.pan,
+            gain: noteData?.automationGain,
+            fadeIn: noteData?.morphFadeIn ? Tone.Time(noteData.morphFadeIn + 'i').toSeconds() : undefined,
+            fadeOut: noteData?.morphFadeOut ? Tone.Time(noteData.morphFadeOut + 'i').toSeconds() : undefined,
+          })
           return
         } catch (err) {
           console.error('Sampler playNote failed:', err)
@@ -5188,6 +5406,9 @@ class AudioEngine {
               : Tone.Frequency(pitchEnd).toFrequency()
           }
           const durSec = Tone.Time(duration).toSeconds()
+          if (noteData?.pitchSlide) {
+            endFreq = freq * Math.pow(2, noteData.pitchSlide / 12)
+          }
 
           const lyric = noteData?.lyric || 'a'
           const state = useStore.getState()
@@ -5214,7 +5435,16 @@ class AudioEngine {
           }
 
           const voice = new VocalModelVoice(rack.input.input as GainNode)
-          voice.trigger(freq, durSec, playTime, velocity, preset, lyric, endFreq)
+          voice.trigger(freq, durSec, playTime, velocity, preset, lyric, endFreq, {
+            glideSeconds: noteData?.pitchSlide
+              ? (noteData?.pitchSlideTime ? Tone.Time(noteData.pitchSlideTime + 'i').toSeconds() : durSec)
+              : undefined,
+            glideCurve: noteData?.pitchSlide ? buildCurveLut(noteData?.pitchSlideRamp, noteData?.pitchSlideCustomCurve || 't * t') : undefined,
+            pan: noteData?.pan,
+            gain: noteData?.automationGain,
+            fadeIn: noteData?.morphFadeIn ? Tone.Time(noteData.morphFadeIn + 'i').toSeconds() : undefined,
+            fadeOut: noteData?.morphFadeOut ? Tone.Time(noteData.morphFadeOut + 'i').toSeconds() : undefined,
+          })
         } catch (err) {
           console.error("Vocal playNote failed:", err)
         }
@@ -5232,7 +5462,17 @@ class AudioEngine {
           const durSec = Tone.Time(duration).toSeconds()
 
           const voice = new PhysicalModelVoice(rack.input.input as GainNode)
-          voice.trigger(freq, durSec, playTime, velocity, track)
+          voice.trigger(freq, durSec, playTime, velocity, track, {
+            targetFrequency: noteData?.pitchSlide ? freq * Math.pow(2, noteData.pitchSlide / 12) : undefined,
+            glideSeconds: noteData?.pitchSlide
+              ? (noteData?.pitchSlideTime ? Tone.Time(noteData.pitchSlideTime + 'i').toSeconds() : durSec)
+              : undefined,
+            glideCurve: noteData?.pitchSlide ? buildCurveLut(noteData?.pitchSlideRamp, noteData?.pitchSlideCustomCurve || 't * t') : undefined,
+            pan: noteData?.pan,
+            gain: noteData?.automationGain,
+            fadeIn: noteData?.morphFadeIn ? Tone.Time(noteData.morphFadeIn + 'i').toSeconds() : undefined,
+            fadeOut: noteData?.morphFadeOut ? Tone.Time(noteData.morphFadeOut + 'i').toSeconds() : undefined,
+          })
         } catch (err) {
           console.error("Physical playNote failed:", err)
         }
@@ -5243,7 +5483,13 @@ class AudioEngine {
       const mpeNodes: any[] = []
       let ephemeralSynth: Tone.PolySynth | undefined
 
-      const isMPE = noteData && (noteData.vibratoDepth || noteData.tremoloDepth || noteData.filterStart)
+      const hasNoteOut = !!noteData && (
+        noteData.pan !== undefined ||
+        noteData.automationGain !== undefined ||
+        noteData.morphFadeIn !== undefined ||
+        noteData.morphFadeOut !== undefined
+      )
+      const isMPE = noteData && (noteData.vibratoDepth || noteData.tremoloDepth || noteData.filterStart || hasNoteOut)
 
       if (isMPE) {
         const preset = instrumentOverride ? (instrumentOverride as SynthPreset) : (track?.synthPreset || 'piano')
@@ -5278,6 +5524,19 @@ class AudioEngine {
             const sweepTime = noteData.filterSweepTime ? Tone.Time(noteData.filterSweepTime + 'i').toSeconds() : durSec
             filter.frequency.setValueAtTime(noteData.filterStart, playTime)
             filter.frequency.rampTo(noteData.filterEnd, sweepTime, playTime)
+          }
+        }
+        if (hasNoteOut) {
+          const outGain = new Tone.Gain(1)
+          const baseGain = noteData.automationGain !== undefined ? Math.max(0, Math.min(1, noteData.automationGain)) : 1
+          const fadeIn = noteData.morphFadeIn ? Tone.Time(noteData.morphFadeIn + 'i').toSeconds() : 0
+          const fadeOut = noteData.morphFadeOut ? Tone.Time(noteData.morphFadeOut + 'i').toSeconds() : 0
+          outGain.gain.setValueAtTime(fadeIn > 0 ? 0 : baseGain, playTime)
+          if (fadeIn > 0) outGain.gain.linearRampToValueAtTime(baseGain, playTime + fadeIn)
+          if (fadeOut > 0) outGain.gain.linearRampToValueAtTime(0, playTime + fadeOut)
+          mpeNodes.push(outGain)
+          if (noteData.pan) {
+            mpeNodes.push(new Tone.Panner(Math.max(-1, Math.min(1, noteData.pan))))
           }
         }
 
@@ -5401,10 +5660,14 @@ class AudioEngine {
 
             if (glideStyle === 'smooth') {
               try {
-                const preset = instrumentOverride ? (instrumentOverride as SynthPreset) : (track?.synthPreset || 'piano')
-                const ephem = track ? this.createSynthForTrack(track, instrumentOverride as SynthPreset) : this.createSynthForPreset(preset as SynthPreset)
-                const rack = this.getRack(trackId)
-                ephem.connect(rack.input)
+                const ownsEphem = !ephemeralSynth
+                let ephem = ephemeralSynth
+                if (!ephem) {
+                  const preset = instrumentOverride ? (instrumentOverride as SynthPreset) : (track?.synthPreset || 'piano')
+                  ephem = track ? this.createSynthForTrack(track, instrumentOverride as SynthPreset) : this.createSynthForPreset(preset as SynthPreset)
+                  const rack = this.getRack(trackId)
+                  ephem.connect(rack.input)
+                }
 
                 ephem.triggerAttack(finalPitch, playTime, velocity)
 
@@ -5429,11 +5692,13 @@ class AudioEngine {
 
                 ephem.triggerRelease(finalPitch, playTime + durSec)
 
-                Tone.Transport.scheduleOnce(() => {
-                  try {
-                    ephem.dispose()
-                  } catch (e) { }
-                }, playTime + durSec + 4)
+                if (ownsEphem) {
+                  Tone.Transport.scheduleOnce(() => {
+                    try {
+                      ephem!.dispose()
+                    } catch (e) { }
+                  }, playTime + durSec + 4)
+                }
               } catch (err) {
                 console.error("Smooth glide playNote failed:", err)
               }

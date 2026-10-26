@@ -1,0 +1,76 @@
+diff --git a/modules/juce_gui_extra/native/juce_WebBrowserComponent_windows.cpp b/modules/juce_gui_extra/native/juce_WebBrowserComponent_windows.cpp
+index 9caca30..dca4c99 100644
+--- a/modules/juce_gui_extra/native/juce_WebBrowserComponent_windows.cpp
++++ b/modules/juce_gui_extra/native/juce_WebBrowserComponent_windows.cpp
+@@ -847,6 +847,7 @@ private:
+                     args->get_Request (request.resetAndGetPointerAddress());
+ 
+                     auto uriString = getUriStringFromArgs (request.get());
++                    Logger::writeToLog("[WebView2 WebResourceRequested] URI: " + uriString);
+ 
+                     if (! urlRequest.url.isEmpty() && uriString == urlRequest.url
+                         || (uriString.endsWith ("/") && uriString.upToLastOccurrenceOf ("/", false, false) == urlRequest.url))
+@@ -890,24 +891,30 @@ private:
+                                                                     (UINT) responseData->data.size()),
+                                                  IncrementRef::no };
+ 
+-                            StringArray headers { "Content-Type: " + responseData->mimeType };
+-
+-                            if (const auto allowedOrigin = owner.impl->options.getAllowedOrigin())
+-                                headers.add ("Access-Control-Allow-Origin: " + *allowedOrigin);
++                            StringArray headers { "Content-Type: " + responseData->mimeType,
++                                                  "Access-Control-Allow-Origin: *",
++                                                  "Access-Control-Allow-Methods: GET, POST, OPTIONS",
++                                                  "Access-Control-Allow-Headers: *" };
+ 
+                             ComSmartPtr<ICoreWebView2WebResourceResponse> response;
+ 
+-                            if (webViewHandle.environment->CreateWebResourceResponse (stream,
+-                                                                                      200,
+-                                                                                      L"OK",
+-                                                                                      headers.joinIntoString ("\n").toUTF16(),
+-                                                                                      response.resetAndGetPointerAddress())
+-                                    != S_OK)
++                            const auto headerString = headers.joinIntoString ("\r\n") + "\r\n";
++                            auto hr = webViewHandle.environment->CreateWebResourceResponse (stream,
++                                                                                            200,
++                                                                                            L"OK",
++                                                                                            headerString.toUTF16(),
++                                                                                            response.resetAndGetPointerAddress());
++                            if (hr != S_OK)
+                             {
++                                Logger::writeToLog("[CreateWebResourceResponse FAILED]: hr = " + String::toHexString ((int) hr));
+                                 return E_FAIL;
+                             }
+ 
+-                            args->put_Response (response);
++                            auto putHr = args->put_Response (response);
++                            if (putHr != S_OK)
++                                Logger::writeToLog("[args->put_Response FAILED]: hr = " + String::toHexString ((int) putHr));
++                            else
++                                Logger::writeToLog("[Response Sent Successfully for]: " + resourceRequestUri);
+                         }
+                     }
+ 
+@@ -918,7 +925,10 @@ private:
+                                                  [this] (ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT
+                                                  {
+                                                      if (const auto str = callMethodWithLpwstrResult (args, &ICoreWebView2WebMessageReceivedEventArgs::TryGetWebMessageAsString))
++                                                     {
++                                                         Logger::writeToLog("[JS Message]: " + *str);
+                                                          owner.impl->handleNativeEvent (JSON::fromString (*str));
++                                                     }
+ 
+                                                      return S_OK;
+                                                  }).Get(), &webMessageReceivedToken);
+@@ -1019,9 +1029,7 @@ private:
+ 
+         if (settings != nullptr)
+         {
+-           #if ! JUCE_DEBUG
+-            settings->put_AreDevToolsEnabled (false);
+-           #endif
++            settings->put_AreDevToolsEnabled (true);
+ 
+             settings->put_IsStatusBarEnabled (! preferences.getWinWebView2BackendOptions().getIsStatusBarDisabled());
+             settings->put_IsBuiltInErrorPageEnabled (! preferences.getWinWebView2BackendOptions().getIsBuiltInErrorPageDisabled());

@@ -165,7 +165,8 @@ void SampleEngine::setConfig(const Config& newConfig, const juce::String& base64
     }).detach();
 }
 
-void SampleEngine::noteOn(int noteId, float pitchMidi, float velocity, float durationSeconds, float pitchOffsetSemitones, int fxChainId)
+void SampleEngine::noteOn(int noteId, float pitchMidi, float velocity, float durationSeconds, float pitchOffsetSemitones, int fxChainId,
+                          const musegrid::NoteExpression& expression, float targetPitchMidi, float slideTimeSeconds)
 {
     if (!readyFlag.load(std::memory_order_acquire)) return;
     auto* buf = mainBuffer.load(std::memory_order_acquire);
@@ -194,6 +195,14 @@ void SampleEngine::noteOn(int noteId, float pitchMidi, float velocity, float dur
     double rate = std::pow(2.0, (double)totalSemis / 12.0);
     rate = juce::jlimit(0.05, 16.0, rate);
 
+    const bool hasTarget = targetPitchMidi >= 0.0f && std::abs(targetPitchMidi - pitchMidi) > 0.0005f;
+    double targetRate = rate;
+    if (hasTarget)
+    {
+        const float targetSemis = (targetPitchMidi - (float)config.rootNote) + config.tuning + pitchOffsetSemitones + (config.fineTune / 100.0f);
+        targetRate = juce::jlimit(0.05, 16.0, std::pow(2.0, (double)targetSemis / 12.0));
+    }
+
     const double dur = (double)buf->getNumSamples();
     double s = juce::jlimit(0.0, 0.98, (double)config.startOffset) * dur;
     double e = juce::jlimit(0.01, 1.0, (double)config.endOffset) * dur;
@@ -203,6 +212,19 @@ void SampleEngine::noteOn(int noteId, float pitchMidi, float velocity, float dur
     v->noteId = noteId;
     v->fxChainId = fxChainId;
     v->rate = rate;
+    v->startRate = rate;
+    v->targetRate = targetRate;
+    v->sliding = hasTarget;
+    v->glideSeconds = slideTimeSeconds > 0.0f ? slideTimeSeconds : durationSeconds;
+    v->glideElapsed = 0.0f;
+    v->glideCurveSize = juce::jlimit(0, musegrid::NoteExpression::kCurvePoints, expression.slideCurveSize);
+    for (int i = 0; i < v->glideCurveSize; ++i) v->glideCurve[(size_t)i] = expression.slideCurve[(size_t)i];
+    v->steppedGlide = expression.steppedGlide;
+    v->elapsedSeconds = 0.0f;
+    v->fadeInSeconds = juce::jmax(0.0f, expression.morphFadeInSeconds);
+    v->fadeOutSeconds = juce::jmax(0.0f, expression.morphFadeOutSeconds);
+    v->gain = juce::jlimit(0.0f, 1.0f, expression.gain);
+    v->pan = juce::jlimit(-1.0f, 1.0f, expression.pan);
     v->startIdx = s;
     v->endIdx = e;
     v->velocity = juce::jlimit(0.0f, 2.0f, velocity);
@@ -237,6 +259,18 @@ void SampleEngine::allNotesOff()
     for (auto& v : voices) v.active = false;
 }
 
+static float sampleNoteCurve(const std::array<float, musegrid::NoteExpression::kCurvePoints>& curve, int count, float t)
+{
+    if (count < 2) return juce::jlimit(0.0f, 1.0f, t);
+    const int points = juce::jmin(count, musegrid::NoteExpression::kCurvePoints);
+    const float pos = juce::jlimit(0.0f, 1.0f, t) * (float)(points - 1);
+    const int i0 = (int)pos;
+    const int i1 = juce::jmin(i0 + 1, points - 1);
+    const float frac = pos - (float)i0;
+    const float value = curve[(size_t)i0] + (curve[(size_t)i1] - curve[(size_t)i0]) * frac;
+    return juce::jlimit(0.0f, 1.0f, value);
+}
+
 void SampleEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, int fxChainId)
 {
     if (!readyFlag.load(std::memory_order_acquire)) return;
@@ -249,12 +283,13 @@ void SampleEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, 
     if (sr <= 0.0) return;
     const double sampleTime = 1.0 / sr;
 
-    const float panL = std::cos((config.pan + 1.0f) * juce::MathConstants<float>::pi * 0.25f);
-    const float panR = std::sin((config.pan + 1.0f) * juce::MathConstants<float>::pi * 0.25f);
-
     for (auto& v : voices)
     {
         if (!v.active || v.fxChainId != fxChainId) continue;
+
+        const float panAngle = (juce::jlimit(-1.0f, 1.0f, v.cfg.pan + v.pan) + 1.0f) * juce::MathConstants<float>::pi * 0.25f;
+        const float panL = std::cos(panAngle);
+        const float panR = std::sin(panAngle);
 
         const bool isRevVoice = v.usingReverse && rev != nullptr;
         const juce::AudioBuffer<float>* vb = isRevVoice ? rev : buf;
@@ -269,6 +304,26 @@ void SampleEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, 
 
         for (int i = 0; i < numSamples; ++i)
         {
+            v.elapsedSeconds += (float)sampleTime;
+            if (v.sliding)
+            {
+                v.glideElapsed += (float)sampleTime;
+                const float glideDur = juce::jmax(0.001f, v.glideSeconds);
+                const float gt = juce::jlimit(0.0f, 1.0f, v.glideElapsed / glideDur);
+                const float shape = sampleNoteCurve(v.glideCurve, v.glideCurveSize, gt);
+                double r = v.startRate * std::pow(v.targetRate / v.startRate, (double)shape);
+                if (v.steppedGlide)
+                    r = std::pow(2.0, std::round(std::log2(r) * 12.0) / 12.0);
+                v.rate = juce::jlimit(0.05, 16.0, r);
+                if (gt >= 1.0f) v.sliding = false;
+            }
+
+            float morphGain = 1.0f;
+            if (v.fadeInSeconds > 0.0001f)
+                morphGain *= juce::jlimit(0.0f, 1.0f, v.elapsedSeconds / v.fadeInSeconds);
+            if (v.fadeOutSeconds > 0.0001f)
+                morphGain *= juce::jlimit(0.0f, 1.0f, 1.0f - v.elapsedSeconds / v.fadeOutSeconds);
+
             // Envelope
             float env = v.envValue;
             switch (v.stage)
@@ -331,7 +386,7 @@ void SampleEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, 
             const float sl = srcL[i0] + (srcL[i1] - srcL[i0]) * frac;
             const float sr_ = srcR[i0] + (srcR[i1] - srcR[i0]) * frac;
 
-            const float gain = env * v.velocity * v.cfg.volume;
+            const float gain = env * v.velocity * v.cfg.volume * v.gain * morphGain;
             leftOut[i]  += sl * gain * panL;
             rightOut[i] += sr_ * gain * panR;
 

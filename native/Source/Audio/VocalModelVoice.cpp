@@ -1,5 +1,22 @@
 #include "VocalModelVoice.h"
 
+namespace
+{
+    float sampleSlideCurve(const std::array<float, musegrid::NoteExpression::kCurvePoints>& curve,
+                           int count, float t)
+    {
+        if (count < 2) return juce::jlimit(0.0f, 1.0f, t);
+
+        const int points = juce::jmin(count, musegrid::NoteExpression::kCurvePoints);
+        const float pos = juce::jlimit(0.0f, 1.0f, t) * (float)(points - 1);
+        const int i0 = (int)pos;
+        const int i1 = juce::jmin(i0 + 1, points - 1);
+        const float frac = pos - (float)i0;
+        const float value = curve[(size_t)i0] + (curve[(size_t)i1] - curve[(size_t)i0]) * frac;
+        return juce::jlimit(0.0f, 1.0f, value);
+    }
+}
+
 VocalModelVoice::VocalModelVoice()
 {
 }
@@ -17,6 +34,10 @@ void VocalModelVoice::reset()
     phase = 0.0;
     vibPhase = 0.0;
     remainingSeconds = 0.0f;
+    expression = {};
+    isSliding = false;
+    slideElapsed = 0.0f;
+    elapsedSeconds = 0.0f;
     for (int i = 0; i < NUM_FORMANTS; ++i)
     {
         formants[i].y1 = 0.0f;
@@ -92,13 +113,36 @@ void VocalModelVoice::triggerVocal(int noteId,
                                   float breathiness,
                                   float glottalTension,
                                   float vibratoDepth,
-                                  float vibratoRate)
+                                  float vibratoRate,
+                                  const musegrid::NoteExpression& expr,
+                                  float targetPitchMidi,
+                                  float slideTimeSeconds)
 {
     currentNoteId = noteId;
     basePitch = pitchMidi;
     noteVelocity = juce::jlimit(0.0f, 1.0f, velocity);
     active = true;
     remainingSeconds = durationSeconds > 0.0f ? durationSeconds : 1.0f;
+
+    expression = expr;
+    elapsedSeconds = 0.0f;
+
+    // Pitch glide: the source phrase glides to the next note's pitch over the slide time,
+    // shaped by the same curve LUT the synth voice uses.
+    if (targetPitchMidi >= 0.0f && std::abs(targetPitchMidi - pitchMidi) > 0.001f)
+    {
+        targetPitch = targetPitchMidi;
+        slideDuration = slideTimeSeconds > 0.0f ? slideTimeSeconds : remainingSeconds;
+        slideElapsed = 0.0f;
+        isSliding = true;
+    }
+    else
+    {
+        targetPitch = pitchMidi;
+        slideDuration = 0.0f;
+        slideElapsed = 0.0f;
+        isSliding = false;
+    }
 
     tractScale = juce::jlimit(0.6f, 1.6f, tractLength);
     breathLevel = juce::jlimit(0.0f, 1.0f, breathiness);
@@ -143,7 +187,7 @@ void VocalModelVoice::renderBlock(float* leftOut, float* rightOut, int numSample
     if (!active) return;
 
     const float sampleTime = 1.0f / (float)currentSampleRate;
-    const float panAngle = (trackPan + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
+    const float panAngle = (juce::jlimit(-1.0f, 1.0f, trackPan + expression.pan) + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
     const float leftGain = std::cos(panAngle) * trackVol;
     const float rightGain = std::sin(panAngle) * trackVol;
 
@@ -154,6 +198,21 @@ void VocalModelVoice::renderBlock(float* leftOut, float* rightOut, int numSample
         {
             active = false;
             break;
+        }
+
+        elapsedSeconds += sampleTime;
+
+        // Glide toward the destination pitch
+        if (isSliding && slideDuration > 0.0f)
+        {
+            slideElapsed += sampleTime;
+            const float t = juce::jlimit(0.0f, 1.0f, slideElapsed / slideDuration);
+            const float shape = sampleSlideCurve(expression.slideCurve, expression.slideCurveSize, t);
+            float pitch = basePitch + (targetPitch - basePitch) * shape;
+            if (expression.steppedGlide)
+                pitch = std::round(pitch);
+            basePitch = pitch;
+            if (t >= 1.0f) isSliding = false;
         }
 
         // Vibrato
@@ -193,7 +252,13 @@ void VocalModelVoice::renderBlock(float* leftOut, float* rightOut, int numSample
             formants[f].processBiquad(glottal, vocalOut, currentSampleRate);
         }
 
-        const float finalVal = vocalOut * noteVelocity * 0.8f;
+        float morphGain = 1.0f;
+        if (expression.morphFadeInSeconds > 0.0001f)
+            morphGain *= juce::jlimit(0.0f, 1.0f, elapsedSeconds / expression.morphFadeInSeconds);
+        if (expression.morphFadeOutSeconds > 0.0001f)
+            morphGain *= juce::jlimit(0.0f, 1.0f, 1.0f - elapsedSeconds / expression.morphFadeOutSeconds);
+
+        const float finalVal = vocalOut * noteVelocity * 0.8f * morphGain * juce::jlimit(0.0f, 1.0f, expression.gain);
         leftOut[i] += finalVal * leftGain;
         rightOut[i] += finalVal * rightGain;
     }

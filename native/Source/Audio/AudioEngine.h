@@ -43,12 +43,28 @@ struct PitchGlide
     int midiPitch = 60;
     int bendRangeSemitones = 2;
     float semitoneDelta = 0.0f;
+    /** Static offset before the glide, used for microtonal notes (fractional MIDI pitch). */
+    float baseSemitones = 0.0f;
     float totalSamples = 1.0f;
     float elapsedSamples = 0.0f;
     int lastBend = 8192;
     bool stepped = false;
     std::array<float, musegrid::NoteExpression::kCurvePoints> curve {};
     int curveSize = 0;
+};
+
+/** A CC7 volume ramp for a VST3 note, used by morph glides (both instruments sound and crossfade). */
+struct Vst3VolumeFade
+{
+    int channel = 1;
+    int midiPitch = 60;
+    float startValue = 1.0f;
+    float endValue = 1.0f;
+    /** Unity of this note, i.e. its per-note volume gain (0..1). A fade-in lands here. */
+    float level = 1.0f;
+    float totalSamples = 1.0f;
+    float elapsedSamples = 0.0f;
+    int lastValue = -1;
 };
 
 struct TrackState
@@ -105,6 +121,7 @@ struct TrackState
     };
     std::vector<ScheduledNoteOff> scheduledNoteOffs;
     std::vector<PitchGlide> pitchGlides;
+    std::vector<Vst3VolumeFade> volumeFades;
     int nextGlideChannel = 2;
 
     // Extra VST3 instrument instances used by per-note instrument overrides.
@@ -118,6 +135,7 @@ struct TrackState
         std::mutex midiMutex;
         std::vector<ScheduledNoteOff> scheduledNoteOffs;
         std::vector<PitchGlide> pitchGlides;
+        std::vector<Vst3VolumeFade> volumeFades;
         int nextGlideChannel = 2;
     };
     std::vector<std::unique_ptr<NoteVst3Slot>> noteVst3Slots;

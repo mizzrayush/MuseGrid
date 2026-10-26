@@ -738,6 +738,7 @@ export const RightPane: React.FC = () => {
   const commonPitchSlideRamp = getCommonStringMPE('pitchSlideRamp', 'linear')
   const commonPitchSlideCustomCurve = getCommonStringMPE('pitchSlideCustomCurve', 't * t')
   const commonGlideStyle = getCommonStringMPE('glideStyle', 'default')
+  const commonGlideVoice = getCommonStringMPE('glideVoice', 'source')
   const commonVibratoDelay = getCommonMPE('vibratoDelay', 0)
   const commonVibratoFade = getCommonMPE('vibratoFade', 0)
   const commonVibratoWave = getCommonStringMPE('vibratoWave', 'sine')
@@ -1827,8 +1828,8 @@ export const RightPane: React.FC = () => {
                     <SliderRow
                       label="Slide Target"
                       value={commonPitchSlide === 'mixed' ? 0 : commonPitchSlide}
-                      min={-48}
-                      max={48}
+                      min={-96}
+                      max={96}
                       step={1}
                       color="#00e6ff"
                       suffix="st"
@@ -1838,7 +1839,7 @@ export const RightPane: React.FC = () => {
                       label="Slide Time"
                       value={commonPitchSlideTime === 'mixed' ? 48 : commonPitchSlideTime}
                       min={0}
-                      max={3840}
+                      max={7680}
                       step={1}
                       color="#00e6ff"
                       suffix=" ticks"
@@ -1936,14 +1937,14 @@ export const RightPane: React.FC = () => {
                 <SliderRow
                   label="Slide (Semitones)"
                   value={commonPitchSlide === 'mixed' ? 0 : commonPitchSlide}
-                  min={-48} max={48} step={1}
+                  min={-96} max={96} step={1}
                   color="#00e6ff" suffix="st"
                   onChange={val => handleMPEChange('pitchSlide', val === 0 ? undefined : val)}
                 />
                 <SliderRow
                   label="Slide Duration"
                   value={commonPitchSlideTime === 'mixed' ? 48 : commonPitchSlideTime}
-                  min={0} max={3840} step={1}
+                  min={0} max={7680} step={1}
                   color="#00e6ff" suffix=" ticks"
                   onChange={val => handleMPEChange('pitchSlideTime', val)}
                 />
@@ -1959,6 +1960,20 @@ export const RightPane: React.FC = () => {
                   onChange={val => {
                     if (val === 'mixed') return
                     handleMPEChange('glideStyle', val === 'default' ? undefined : val)
+                  }}
+                />
+                <SelectRow
+                  label="Glide Voice"
+                  value={commonGlideVoice}
+                  options={[
+                    ...(commonGlideVoice === 'mixed' ? [{ value: 'mixed', label: 'Mixed' }] : []),
+                    { value: 'source', label: 'Source instrument' },
+                    { value: 'destination', label: 'Next note instrument' },
+                    { value: 'morph', label: 'Morph (both crossfade)' }
+                  ]}
+                  onChange={val => {
+                    if (val === 'mixed') return
+                    handleMPEChange('glideVoice', val === 'source' ? undefined : val)
                   }}
                 />
                 {effectiveSmooth && (
@@ -2086,7 +2101,7 @@ export const RightPane: React.FC = () => {
                 <SliderRow
                   label="Sweep Duration"
                   value={commonFilterSweepTime === 'mixed' ? 48 : commonFilterSweepTime}
-                  min={0} max={3840} step={1}
+                  min={0} max={7680} step={1}
                   color="#4dabf7" suffix=" ticks"
                   onChange={val => handleMPEChange('filterSweepTime', val)}
                 />

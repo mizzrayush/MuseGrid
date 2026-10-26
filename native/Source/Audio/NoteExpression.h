@@ -32,5 +32,13 @@ namespace musegrid
         // 0 = the track FX rack applies. Non-zero renders this voice through its own
         // registered per-note chain instead, so track FX are bypassed for this note.
         int fxChainId = 0;
+
+        // Morph glide: both instruments sound; this voice fades in/out across the junction.
+        float morphFadeInSeconds = 0.0f;
+        float morphFadeOutSeconds = 0.0f;
+
+        // Per-note pan trim (-1..1, added to the track pan) and volume automation gain (0..1).
+        float pan = 0.0f;
+        float gain = 1.0f;
     };
 }

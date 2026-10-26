@@ -1,7 +1,9 @@
 #pragma once
 #include <juce_core/juce_core.h>
 #include <vector>
+#include <array>
 #include <cmath>
+#include "NoteExpression.h"
 
 class VocalModelVoice
 {
@@ -31,7 +33,10 @@ public:
                       float breathiness = 0.1f,
                       float glottalTension = 0.85f,
                       float vibratoDepth = 30.0f,
-                      float vibratoRate = 5.5f);
+                      float vibratoRate = 5.5f,
+                      const musegrid::NoteExpression& expression = {},
+                      float targetPitchMidi = -1.0f,
+                      float slideTimeSeconds = 0.0f);
 
     void triggerNoteOff();
     void stopImmediately();
@@ -50,6 +55,14 @@ private:
     float basePitch = 60.0f;
     float noteVelocity = 1.0f;
     float remainingSeconds = 0.0f;
+
+    // Pitch glide, per-note output and morph fades
+    musegrid::NoteExpression expression;
+    float targetPitch = 60.0f;
+    float slideDuration = 0.0f;
+    float slideElapsed = 0.0f;
+    bool isSliding = false;
+    float elapsedSeconds = 0.0f;
 
     // Parameters
     float tractScale = 1.0f;

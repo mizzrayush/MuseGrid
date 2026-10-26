@@ -88,7 +88,7 @@ static inline int normalizeDrumPad(int pad)
     return ((pad % 16) + 16) % 16;
 }
 
-void DrumEngine::triggerHit(int drumPad, float velocity, float pitchOffsetSemitones, float customDecaySeconds, float slideSemitones, float slideTime, float punchOctaves, float resonanceHz, const juce::String& kitOverride, int fxChainId)
+void DrumEngine::triggerHit(int drumPad, float velocity, float pitchOffsetSemitones, float customDecaySeconds, float slideSemitones, float slideTime, float punchOctaves, float resonanceHz, const juce::String& kitOverride, int fxChainId, const musegrid::NoteExpression& expression)
 {
     const KitType kit = kitOverride.isNotEmpty() ? parseKitName(kitOverride) : currentKit;
     // Find free or oldest voice
@@ -125,6 +125,10 @@ void DrumEngine::triggerHit(int drumPad, float velocity, float pitchOffsetSemito
     v.slideSemitones = slideSemitones;
     v.slideTimeSeconds = slideTime > 0.001f ? slideTime : 0.12f;
     v.filterCutoffHz = resonanceHz > 50.0f ? resonanceHz : 4000.0f;
+    v.pan = juce::jlimit(-1.0f, 1.0f, expression.pan);
+    v.gain = juce::jlimit(0.0f, 1.0f, expression.gain);
+    v.fadeInSeconds = juce::jmax(0.0f, expression.morphFadeInSeconds);
+    v.fadeOutSeconds = juce::jmax(0.0f, expression.morphFadeOutSeconds);
 
     const float pitchMultiplier = std::pow(2.0f, pitchOffsetSemitones / 12.0f);
 
@@ -266,13 +270,14 @@ void DrumEngine::triggerHit(int drumPad, float velocity, float pitchOffsetSemito
 void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, float trackPan, float trackVol, int fxChainId)
 {
     const float sampleTime = 1.0f / (float)currentSampleRate;
-    const float panAngle = (trackPan + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
-    const float leftGain = std::cos(panAngle) * trackVol;
-    const float rightGain = std::sin(panAngle) * trackVol;
 
     for (auto& v : voices)
     {
         if (!v.active || v.fxChainId != fxChainId) continue;
+
+        const float panAngle = (juce::jlimit(-1.0f, 1.0f, trackPan + v.pan) + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
+        const float leftGain = std::cos(panAngle) * trackVol;
+        const float rightGain = std::sin(panAngle) * trackVol;
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -420,7 +425,13 @@ void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
                 }
             }
 
-            const float finalVal = sample * v.velocity;
+            float morphGain = 1.0f;
+            if (v.fadeInSeconds > 0.0001f)
+                morphGain *= juce::jlimit(0.0f, 1.0f, t / v.fadeInSeconds);
+            if (v.fadeOutSeconds > 0.0001f)
+                morphGain *= juce::jlimit(0.0f, 1.0f, 1.0f - t / v.fadeOutSeconds);
+
+            const float finalVal = sample * v.velocity * v.gain * morphGain;
             leftOut[i] += finalVal * leftGain;
             rightOut[i] += finalVal * rightGain;
         }

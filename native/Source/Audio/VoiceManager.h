@@ -42,7 +42,10 @@ public:
                         float durationSeconds,
                         float damping = 0.5f,
                         float pluckPos = 0.5f,
-                        int fxChainId = 0);
+                        int fxChainId = 0,
+                        const musegrid::NoteExpression& expression = {},
+                        float targetPitchMidi = -1.0f,
+                        float slideTimeSeconds = 0.0f);
 
     void noteOnVocal(const juce::String& trackId,
                      int noteId,
@@ -53,7 +56,10 @@ public:
                      float tractLength = 1.0f,
                      float breathiness = 0.1f,
                      float tension = 0.85f,
-                     int fxChainId = 0);
+                     int fxChainId = 0,
+                     const musegrid::NoteExpression& expression = {},
+                     float targetPitchMidi = -1.0f,
+                     float slideTimeSeconds = 0.0f);
 
     void noteOff(const juce::String& trackId, int noteId);
     void allNotesOff();

@@ -39,6 +39,13 @@ export interface NativeNoteOnCommand {
   slideSemitones: number
   punchOctaves: number
   resonanceHz: number
+  /** Morph crossfade lengths in seconds, measured from note start. */
+  morphFadeIn?: number
+  morphFadeOut?: number
+  /** Per-note pan trim (-1..1) added to the track pan. */
+  pan?: number
+  /** Per-note volume from the volume automation lane (0..1). */
+  gain?: number
 }
 
 const waveformIndex = (wave?: string) => wave === 'triangle' ? 1 : wave === 'square' ? 2 : 0
@@ -144,6 +151,10 @@ export function buildNativeNoteOnCommand(src: NoteCommandSource): NativeNoteOnCo
     drumDecay: noteData?.decay ?? -1,
     slideSemitones: noteData?.pitchSlide ?? 0,
     punchOctaves: noteData?.octaves ?? -1,
-    resonanceHz: noteData?.resonance ?? -1
+    resonanceHz: noteData?.resonance ?? -1,
+    morphFadeIn: noteData?.morphFadeIn ? Tone.Time(noteData.morphFadeIn + 'i').toSeconds() : undefined,
+    morphFadeOut: noteData?.morphFadeOut ? Tone.Time(noteData.morphFadeOut + 'i').toSeconds() : undefined,
+    pan: noteData?.pan !== undefined ? Math.max(-1, Math.min(1, noteData.pan)) : undefined,
+    gain: noteData?.automationGain !== undefined ? Math.max(0, Math.min(1, noteData.automationGain)) : 1
   }
 }

@@ -2,6 +2,8 @@ import * as Tone from 'tone'
 import type { AppState, CustomFxConfig, Note, Track, TrackGroup } from '../engine/store'
 import { getAutomationValueAtTick } from './automation'
 import { getEffectiveTrackLevel } from './groupAudio'
+import { buildGlideIntoMap, resolveGlidePlayback } from './midiEditing'
+import { buildCurveLut, evaluateGlideCurve } from './glideCurves'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET, type SynthPreset, type DrumKit } from './instruments'
 import { CustomScriptProcessorNode, DPreverbNode, audioEngine, VocalModelVoice, PhysicalModelVoice } from '../engine/AudioEngine'
 import { getActiveDPreverbInstances, getTrackFxInstances, getTrackFxSetting as readTrackFxSetting, type BuiltInFxType } from '../engine/fxDefaults'
@@ -500,29 +502,73 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
     // Cache for offline synth preset overrides
     const overrideSynthsCached: Record<string, Tone.PolySynth> = {}
 
+    // Destination / morph glide transforms are shared by live playback and every export
+    // path, so the Tone bounce triggers the same voices, pitches and crossfades.
+    const glideIntoMap = buildGlideIntoMap(state.notes)
+    const automationTarget = state.automationTargets?.[track.id] ?? 'velocity'
+
+    const applyTrackSynthParams = (s: Tone.PolySynth) => {
+      if (track.synthAttack !== undefined) s.set({ envelope: { attack: track.synthAttack } })
+      if (track.synthDecay !== undefined) s.set({ envelope: { decay: track.synthDecay } })
+      if (track.synthSustain !== undefined) s.set({ envelope: { sustain: track.synthSustain } })
+      if (track.synthRelease !== undefined) s.set({ envelope: { release: track.synthRelease } })
+      if (track.synthOscillator !== undefined) s.set({ oscillator: { type: track.synthOscillator } })
+      if (track.synthDetune !== undefined) s.set({ detune: track.synthDetune })
+      if (track.synthPortamento !== undefined) s.set({ portamento: track.synthPortamento })
+    }
+
     const sortedNotes = [...notes].sort((a, b) => a.time - b.time)
     sortedNotes.forEach(note => {
-      const relativeTime = note.time - startOffset
-      if (relativeTime + note.duration < 0) return // Before range
-      if (options.endTick !== undefined && note.time >= options.endTick) return // After range
+      const playback = resolveGlidePlayback(note, glideIntoMap.get(note.id))
+      const playNoteData = playback.note
+      const noteTime = playback.startTick
+      const noteLength = playback.durationTicks
+
+      const relativeTime = noteTime - startOffset
+      if (relativeTime + noteLength < 0) return // Before range
+      if (options.endTick !== undefined && noteTime >= options.endTick) return // After range
 
       // Use note-specific TPS for timing and duration if defined
       const noteBpm = note.bpm ?? trackBpm
       const noteTicksPerSecond = (noteBpm / 60) * PPQ
 
       const start = Math.max(0, relativeTime / noteTicksPerSecond)
-      const duration = Math.max(0.01, note.duration / noteTicksPerSecond)
-      const rawVel = getAutomationValueAtTick(state.automationCurves[track.id], note.time + note.duration / 2, note.velocity) / 127
-      const velocity = typeof rawVel === 'number' && isFinite(rawVel) ? Math.max(0, Math.min(1, rawVel)) : 0.8
+      const duration = Math.max(0.01, noteLength / noteTicksPerSecond)
+
+      // The automation lane drives velocity, per-note volume or per-note pan.
+      const laneValue = getAutomationValueAtTick(state.automationCurves[track.id], note.time + note.duration / 2, note.velocity)
+      let velocity = note.velocity / 127
+      let autoGain = 1
+      let notePan = 0
+      if (automationTarget === 'volume') autoGain = Math.max(0, Math.min(1, laneValue / 127))
+      else if (automationTarget === 'pan') notePan = Math.max(-1, Math.min(1, (laneValue / 127) * 2 - 1))
+      else velocity = laneValue / 127
+      velocity = typeof velocity === 'number' && isFinite(velocity) ? Math.max(0, Math.min(1, velocity)) : 0.8
+
+      const fadeInSec = playNoteData.morphFadeIn ? playNoteData.morphFadeIn / noteTicksPerSecond : 0
+      const fadeOutSec = playNoteData.morphFadeOut ? playNoteData.morphFadeOut / noteTicksPerSecond : 0
+      const slideSemis = playNoteData.pitchSlide ?? 0
+      // A plain pitchEnd (no explicit slide) still ramps across the note, matching live playback.
+      const glideSemis = slideSemis
+        || (playNoteData.pitchEnd !== undefined ? playNoteData.pitchEnd - playback.pitch : 0)
+      const glideSeconds = playNoteData.pitchSlideTime
+        ? playNoteData.pitchSlideTime / noteTicksPerSecond
+        : duration
+      const glideCurveLut = slideSemis
+        ? buildCurveLut(playNoteData.pitchSlideRamp, playNoteData.pitchSlideCustomCurve || 't * t')
+        : undefined
+      const hasExpressionOut = fadeInSec > 0 || fadeOutSec > 0 || autoGain !== 1 || notePan !== 0
 
       const isVocal = note.instrumentOverride === 'vocal' || (track.synthPreset === 'vocal' && !note.instrumentOverride)
       if (isVocal) {
         try {
           const rawCtx = Tone.getContext().rawContext
           const voice = new VocalModelVoice(trackInput.input as GainNode, rawCtx)
-          const baseFreq = Tone.Frequency(note.pitch + totalTranspose, 'midi').toFrequency()
+          const baseFreq = Tone.Frequency(playback.pitch + totalTranspose, 'midi').toFrequency()
           const freq = note.detune ? baseFreq * Math.pow(2, note.detune / 1200) : baseFreq
-          const endFreq = note.pitchEnd !== undefined ? Tone.Frequency(note.pitchEnd + totalTranspose, 'midi').toFrequency() : undefined
+          const endFreq = glideSemis
+            ? freq * Math.pow(2, glideSemis / 12)
+            : (note.pitchEnd !== undefined ? Tone.Frequency(note.pitchEnd + totalTranspose, 'midi').toFrequency() : undefined)
           const lyric = note.lyric || 'a'
           const voicePresetId = note.voicePresetId || 'soprano'
           const preset = state.voicePresets?.find(p => p.id === voicePresetId) || state.voicePresets?.[0] || {
@@ -542,7 +588,14 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
             consonantLength: 1.0,
             articulationSpeed: 1.0
           }
-          voice.trigger(freq, duration, start, velocity, preset, lyric, endFreq)
+          voice.trigger(freq, duration, start, velocity, preset, lyric, endFreq, {
+            glideSeconds: glideSemis ? glideSeconds : undefined,
+            glideCurve: glideCurveLut,
+            pan: notePan,
+            gain: autoGain,
+            fadeIn: fadeInSec || undefined,
+            fadeOut: fadeOutSec || undefined
+          })
         } catch (e) {
           console.error("Offline vocal render error:", e)
         }
@@ -554,29 +607,106 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
         try {
           const rawCtx = Tone.getContext().rawContext
           const voice = new PhysicalModelVoice(trackInput.input as GainNode, rawCtx)
-          const baseFreq = Tone.Frequency(note.pitch + totalTranspose, 'midi').toFrequency()
+          const baseFreq = Tone.Frequency(playback.pitch + totalTranspose, 'midi').toFrequency()
           const freq = note.detune ? baseFreq * Math.pow(2, note.detune / 1200) : baseFreq
-          voice.trigger(freq, duration, start, velocity, track)
+          voice.trigger(freq, duration, start, velocity, track, {
+            targetFrequency: glideSemis ? freq * Math.pow(2, glideSemis / 12) : undefined,
+            glideSeconds: glideSemis ? glideSeconds : undefined,
+            glideCurve: glideCurveLut,
+            pan: notePan,
+            gain: autoGain,
+            fadeIn: fadeInSec || undefined,
+            fadeOut: fadeOutSec || undefined
+          })
         } catch (e) {
           console.error("Offline physical render error:", e)
         }
         return
       }
 
-      let noteSynth = synth
       // VST3 overrides are hosted by JUCE only; the Tone bounce keeps the track synth.
-      if (note.instrumentOverride && !note.instrumentOverride.startsWith('vst3:')) {
-        const synthPreset = note.instrumentOverride as SynthPreset
-        if (!overrideSynthsCached[synthPreset]) {
-          overrideSynthsCached[synthPreset] = createSynthForPreset(synthPreset).connect(trackInput)
+      const overridePreset = note.instrumentOverride && !note.instrumentOverride.startsWith('vst3:')
+        ? note.instrumentOverride as SynthPreset
+        : undefined
+
+      // A glide, morph fade or per-note pan/gain needs its own voice: the shared poly
+      // synth's output cannot be ramped or panned for a single note.
+      if (glideSemis || hasExpressionOut) {
+        let ephem: Tone.PolySynth
+        if (!overridePreset && track.synthPreset === 'custom' && track.customMuxins) {
+          ephem = createSynthFromMuzins(track.customMuxins)
+        } else {
+          ephem = createSynthForPreset((overridePreset ?? track.synthPreset ?? DEFAULT_SYNTH_PRESET) as SynthPreset)
+          if (!overridePreset) applyTrackSynthParams(ephem)
         }
-        noteSynth = overrideSynthsCached[synthPreset]
+
+        let out: Tone.ToneAudioNode = ephem
+        if (hasExpressionOut) {
+          const g = new Tone.Gain(1)
+          g.gain.setValueAtTime(fadeInSec > 0 ? 0 : autoGain, start)
+          if (fadeInSec > 0) g.gain.linearRampToValueAtTime(autoGain, start + fadeInSec)
+          if (fadeOutSec > 0) g.gain.linearRampToValueAtTime(0, start + Math.min(fadeOutSec, Math.max(0.005, duration)))
+          out.chain(g)
+          out = g
+          if (notePan !== 0) {
+            const p = new Tone.Panner(notePan)
+            out.chain(p)
+            out = p
+          }
+        }
+        out.connect(trackInput)
+
+        const raw = playback.pitch + totalTranspose
+        const isMicro = Math.abs(raw % 1) > 0.0001
+        let voicePitch: any = isMicro
+          ? Tone.Frequency(raw, 'midi').toFrequency()
+          : Tone.Frequency(Math.round(raw), 'midi').toNote()
+        if (typeof voicePitch === 'number' && voicePitch > 0 && voicePitch < 35) {
+          while (voicePitch < 35) voicePitch *= 2
+        }
+
+        if (glideSemis) {
+          try {
+            ephem.triggerAttack(voicePitch, start, velocity)
+            const cents = glideSemis * 100
+            const detuneParam: any = (ephem as any).detune
+            if (detuneParam?.setValueAtTime) {
+              detuneParam.setValueAtTime(0, start)
+              const rampType = playNoteData.pitchSlideRamp || 'linear'
+              const customEquation = playNoteData.pitchSlideCustomCurve || 't * t'
+              if (rampType === 'linear') {
+                detuneParam.linearRampToValueAtTime(cents, start + glideSeconds)
+              } else {
+                const stepCount = Math.max(10, Math.min(200, Math.round(glideSeconds * 100)))
+                const stepTime = glideSeconds / stepCount
+                for (let i = 1; i <= stepCount; i++) {
+                  const t = i / stepCount
+                  detuneParam.setValueAtTime(evaluateGlideCurve(t, rampType, customEquation) * cents, start + i * stepTime)
+                }
+              }
+            }
+            ephem.triggerRelease(voicePitch, start + duration)
+          } catch (e) {
+            console.error("Offline synth glide render error:", e)
+          }
+        } else {
+          ephem.triggerAttackRelease(voicePitch, duration, start, velocity)
+        }
+        return
       }
 
-      const isMicrotonal = (note.pitch % 1 !== 0) || (track?.edoDivision !== undefined && track.edoDivision !== 12)
+      let noteSynth = synth
+      if (overridePreset) {
+        if (!overrideSynthsCached[overridePreset]) {
+          overrideSynthsCached[overridePreset] = createSynthForPreset(overridePreset).connect(trackInput)
+        }
+        noteSynth = overrideSynthsCached[overridePreset]
+      }
+
+      const isMicrotonal = (playback.pitch % 1 !== 0) || (track?.edoDivision !== undefined && track.edoDivision !== 12)
       let noteFreq: any = isMicrotonal
-        ? Tone.Frequency(note.pitch + totalTranspose, 'midi').toFrequency()
-        : Tone.Frequency(note.pitch + totalTranspose, 'midi').toNote()
+        ? Tone.Frequency(playback.pitch + totalTranspose, 'midi').toFrequency()
+        : Tone.Frequency(playback.pitch + totalTranspose, 'midi').toNote()
       if (typeof noteFreq === 'number' && noteFreq > 0 && noteFreq < 35) {
         while (noteFreq < 35) noteFreq *= 2
       }

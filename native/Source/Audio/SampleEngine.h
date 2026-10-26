@@ -3,7 +3,9 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <atomic>
 #include <vector>
+#include <array>
 #include "EnvelopeCurve.h"
+#include "NoteExpression.h"
 
 // Single-sample chromatic sampler (Simpler / Quick Sampler style):
 // one root audio file repitched across the keyboard via playbackRate = 2^((midi - root) / 12).
@@ -38,7 +40,8 @@ public:
     // or a "data:audio/...;base64,..." URI / raw base64 of a WAV file (re-decodes buffer).
     void setConfig(const Config& newConfig, const juce::String& base64Data);
 
-    void noteOn(int noteId, float pitchMidi, float velocity, float durationSeconds, float pitchOffsetSemitones, int fxChainId = 0);
+    void noteOn(int noteId, float pitchMidi, float velocity, float durationSeconds, float pitchOffsetSemitones, int fxChainId = 0,
+                const musegrid::NoteExpression& expression = {}, float targetPitchMidi = -1.0f, float slideTimeSeconds = 0.0f);
     void noteOff(int noteId);
     void allNotesOff();
 
@@ -69,6 +72,23 @@ private:
         float decayAmount = 0.4f;
         float releaseStartLevel = 1.0f;
         Config cfg;
+
+        // Pitch glide (playback-rate ramp) with the shared curve LUT.
+        double startRate = 1.0;
+        double targetRate = 1.0;
+        bool sliding = false;
+        float glideSeconds = 0.0f;
+        float glideElapsed = 0.0f;
+        std::array<float, musegrid::NoteExpression::kCurvePoints> glideCurve {};
+        int glideCurveSize = 0;
+        bool steppedGlide = false;
+
+        // Per-note output stage: morph crossfade, volume automation and pan trim.
+        float elapsedSeconds = 0.0f;
+        float fadeInSeconds = 0.0f;
+        float fadeOutSeconds = 0.0f;
+        float gain = 1.0f;
+        float pan = 0.0f;
     };
 
     static juce::AudioBuffer<float>* decodeToBuffer(const juce::MemoryBlock& bytes);

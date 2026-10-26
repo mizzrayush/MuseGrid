@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_core/juce_core.h>
 #include <array>
+#include <cmath>
 
 namespace musegrid
 {
@@ -45,4 +46,34 @@ namespace musegrid
         float pan = 0.0f;
         float gain = 1.0f;
     };
+
+    /**
+     * Normalised LUT sampler shared by every voice: linear interpolation inside a curve the
+     * frontend baked from the same shape maths the canvas preview draws. Fewer than two points
+     * means the lane or ramp was flat, so the plain ramp position is returned.
+     */
+    inline float sampleCurveLut(const std::array<float, NoteExpression::kCurvePoints>& curve,
+                                int count, float t)
+    {
+        if (count < 2) return juce::jlimit(0.0f, 1.0f, t);
+
+        const int points = juce::jmin(count, NoteExpression::kCurvePoints);
+        const float pos = juce::jlimit(0.0f, 1.0f, t) * (float)(points - 1);
+        const int i0 = (int)pos;
+        const int i1 = juce::jmin(i0 + 1, points - 1);
+        const float frac = pos - (float)i0;
+        const float value = curve[(size_t)i0] + (curve[(size_t)i1] - curve[(size_t)i0]) * frac;
+        return juce::jlimit(0.0f, 1.0f, value);
+    }
+
+    /** LFO shape for the wave ids the frontend sends: 0 sine, 1 triangle, 2 square. */
+    inline float lfoWaveform(int wave, double phase)
+    {
+        switch (wave)
+        {
+            case 1:  return (float)(2.0 / juce::MathConstants<double>::pi * std::asin(std::sin(phase)));
+            case 2:  return std::sin(phase) >= 0.0 ? 1.0f : -1.0f;
+            default: return (float)std::sin(phase);
+        }
+    }
 }

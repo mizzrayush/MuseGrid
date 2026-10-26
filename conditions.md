@@ -2289,11 +2289,12 @@ native engine was not rebuilt.
 1. **Drum steps still get no vibrato/tremolo/filter in the Tone path** — and deliberately so,
    because the live drum voice at [AudioEngine.ts:6014](src/engine/AudioEngine.ts#L6014) carries only
    pan, gain, fades, octaves, resonance and decay. A modulation lane on a drum track stays silent in
-   the browser engine and in live preview alike; the native engine applies it. Adding modulation only
-   to the offline drum path would make export disagree with preview, which is the opposite of parity.
+   the browser engine and in live preview alike. ~~the native engine applies it~~ — **that clause was
+   false and is corrected in §23: no engine applies modulation to a drum hit.**
    Drum pitch offset, pitch slide and velocity lanes do work in both, via the lane sample and
-   `applyExpressionLaneToNote` at [audioRender.ts:844](src/utils/audioRender.ts#L844)-856 feeding
-   `laneNote.pitchOffset`/`laneNote.detune` at :873.
+   `applyExpressionLaneToNote` at [audioRender.ts:864](src/utils/audioRender.ts#L864)-876 feeding
+   `laneNote.pitchOffset`/`laneNote.detune` at :893. `expr:glideAmount` was *not* honoured by the
+   exporter until §23.
 2. **Vibrato depth above 100 still clamps to full scale** in both engines (`min(1, depth/100)`), so a
    300-lane-value vibrato is not three times a 100-value one; the clamp is Tone's own depth ceiling.
 3. **The native bounce is still the default export.** `canUseNativeBounce()` is true in the packaged
@@ -2329,3 +2330,303 @@ declared at [automation.ts:128](src/utils/automation.ts#L128), is still read by
 
 A scratch copy of the HEAD renderer was used for the A/B and deleted afterwards; `git status` showed
 only `audioRender.ts`, `automation.ts`, `conditions.md` and the pre-existing `JUCE` submodule.
+
+## 23. DRUM PATH RECTIFICATION — 2026-10-26
+
+Four defects from the §22 review, each re-verified against source before editing. No C++ changed: the
+native side already reads every field this pass writes.
+
+### 23.1 the defects, as verified
+
+| # | defect | evidence | status |
+|---|---|---|---|
+| D1 | `expr:glideAmount` was dropped by the exporter | [audioRender.ts:901](src/utils/audioRender.ts#L901) passed `note.pitchSlide`/`note.pitchSlideTime` while :893 already read `laneNote` for pitch offset, so the lane was sampled, applied to the note copy, then ignored | fixed |
+| D2 | the drum lane picker offered a target no engine reads | [GridCanvas.tsx:351](src/renderer/GridCanvas.tsx#L351) listed `filterCutoff` for drums; `DrumEngine.cpp:127` sets a hit's cutoff from pad resonance and takes nothing filter-related from `NoteExpression`, and the Tone drum voice has no filter node at all | removed from the list |
+| D3 | pad tone was ignored by three of four paths | `Track` carries `drumDecays`/`drumOctaves`/`drumResonances` ([store.ts:806](src/engine/store.ts#L806)/831/832) and live Tone applies all three ([AudioEngine.ts:866](src/engine/AudioEngine.ts#L866)-868); the exporter read decay only, and the native payload builder read only per-note fields that grid notes never carry, so JUCE live *and* JUCE bounce ran on kit defaults | fixed in both |
+| D4 | §22.3 asserted native applies drum modulation | it does not; the clause is struck there | corrected |
+
+### 23.2 changes
+
+- [audioRender.ts:901](src/utils/audioRender.ts#L901) — the slide arguments now come from `laneNote`.
+- [audioRender.ts:186](src/utils/audioRender.ts#L186)-192 — `padOctave`/`padResonance` read off the
+  track and spread into the nine construction sites where live applies them (kick, both hats, three
+  toms, crash/ride, cowbell, both congas, claves, the `>= 16` fallback and the custom-Muxin
+  membrane/metal branches), plus two more components in the synth pool's `cacheKey` so a pooled voice
+  is never reused under a different pad setting. Untuned pads spread nothing.
+- [nativeNoteCommand.ts:158](src/engine/nativeNoteCommand.ts#L158)-161 — `drumDecay`, `punchOctaves`
+  and `resonanceHz` fall back to the track's pad record before `-1` ("use the kit default"), keeping a
+  per-note value ahead of it. This builder is shared by live playback and the bounce, so one edit
+  covers both.
+- [GridCanvas.tsx:349](src/renderer/GridCanvas.tsx#L349)-352 — the drum list is `['detune', 'glideAmount']`
+  and the comment now says why. A project that already saved `expr:filterCutoff` on a drum track keeps
+  that lane inert, exactly as it was; the select simply falls back to its placeholder.
+
+### 23.3 verification
+
+| check | number |
+|---|---|
+| `npx tsc --noEmit` | 0 |
+| dev-server transform of the 3 edited files (parse gate) | HTTP 200 each |
+| plain pad-less drum pattern, working vs HEAD renderer | maxAbsDiff 4.17e-7 |
+| same module rendered twice (noise floor) | 3.73e-7 working / 3.58e-7 HEAD, so the line above is inside it |
+| kick alone, and hat alone, working vs HEAD | 0 exactly, and 8.34e-16 |
+| synth note with vibrato + filter sweep vs HEAD | 0 exactly — no collateral change |
+| pads tuned (octaves 9 kick, resonance 11000 hat) vs HEAD | 1.2565 — the records now reach the export |
+| `expr:glideAmount` drawn points vs HEAD | 1.1965; formula lane `ticks / 1.5` 1.1965 — both lane sources now land |
+| `expr:detune` lane vs HEAD | 0 — it already worked, untouched |
+| non-finite samples across all buffers | 0 |
+| native payload assertions in-page | kick `{0.85, 9, -1}`, hat `{-1, -1, 11000}`, snare all `-1`, per-note wins `{0.2, 3, 900}`, no track → `-1` |
+| eslint on the edited files | 0 errors in `audioRender.ts` and `nativeNoteCommand.ts`; GridCanvas's 5 errors are the pre-existing react-compiler rules at :111, :291, :299, :584, :3254 — none in the edited range |
+| build + deploy | `npx vite build` only (setup build not run); bundle `index-CkJksJiS.js` carries `punchOctaves:c?.octaves??u?.drumOctaves?.[f]??-1`; copied to `bin/dist` at 11:12 |
+
+### 23.4 audible consequence
+
+A pad tuned in the Drum Designer used to change sound only in the Tone preview (plus decay in a
+browser-engine bounce). All four paths now honour it, so a saved project with pad records will sound
+different in the packaged app — pitch punch on kick/toms/congas/claves and tone on hats/cymbals.
+That is the intended parity, and it has not been auditioned by ear.
+
+The same slider is not the same control in both engines: JUCE applies punch octaves to pads
+0, 5, 6, 7, 12, 13 only (`DrumEngine.cpp:264-266`), while Tone's `octaves` on a `MetalSynth` is noise
+bandwidth, and JUCE maps the pad resonance slider onto the hit's filter cutoff
+(`DrumEngine.cpp:127`) where Tone has no such link. Pre-existing approximation, now reachable from
+grid playback as well as from the designer.
+
+### 23.5 found during this pass, deliberately not fixed
+
+| finding | evidence | why left |
+|---|---|---|
+| `drumPitches`, `drumDetunes`, `drumSlides`, `drumSlideTimes` are written and persisted but read by neither engine | [store.ts:833](src/engine/store.ts#L833)-836; set at DrumDesignerModal.tsx:587, :596, :605, :614 with no `audioEngine` call; repo-wide grep finds no engine reader | they reach sound only through the designer's own audition, which passes them per note at DrumDesignerModal.tsx:328-345, so grid playback ignores them. Honouring them changes the pitch and slide of every existing drum pattern, so it needs a decision, not a silent patch |
+| pad decay curves never reach the Tone exporter | live honours them via `audioEngine.setPadCurve` ([AudioEngine.ts:5172](src/engine/AudioEngine.ts#L5172)) and the native bridge (`AudioEngine.cpp:561`/`:570`); `audioRender.ts` has no `drumPadCurves` read | a browser-engine bounce keeps an exponential tail; wiring it means a per-note amplitude LUT in the Tone drum voice |
+| the designer falls back to its own `DEFAULT_OCTAVES`/`DEFAULT_RESONANCES` when a pad has no record | DrumDesignerModal.tsx:324-326 | audition can still differ from playback for an untuned pad |
+
+### 23.6 accounting
+
+3 files, **+35 insertions, −12 deletions** (`nativeNoteCommand.ts` +5/−3, `GridCanvas.tsx` +3/−2,
+`audioRender.ts` +27/−7). Every deleted line is re-emitted as a modified successor except one token:
+
+- `nativeNoteCommand.ts` — the three `?? -1` payload lines, re-issued with the pad-record fallback in
+  front of the same default; the per-note read is unchanged and still wins.
+- `GridCanvas.tsx` — the one-line comment (rewritten as two) and the drum target array, re-issued as
+  `['detune', 'glideAmount']`. `'filterCutoff'` is the only genuinely removed behaviour in this pass,
+  and it was a menu entry no engine consumed.
+- `audioRender.ts` — `cacheKey` (re-issued with two more components), three `envelope: {...}` object
+  literals and the `octaves: 1.5` / `octaves: 0.5` values (re-issued with a trailing comma so the pad
+  spread follows them), and the `triggerDrum(...)` call line (re-issued with `laneNote` slide
+  arguments). No branch, guard, kit default or argument was dropped; the spread sits after each literal
+  it can override, so an untuned pad produces the identical config object.
+- The HEAD scratch copy used for the A/B was deleted; `git status` after this pass shows only the
+  three source files above plus the pre-existing `JUCE` submodule, which stays unstaged.
+
+## 24. MPE ON DRUMS — HOLD, PAD WOBBLE, TONE SWEEP IN ALL FOUR PATHS — 2026-10-26
+
+The ask was, in order: (1) a longer note actually lengthens the hit, (2) tone wobble on the
+metal/filtered pads, (3) pitch vibrato on the pitched pads — "similarly like synth". Amplitude
+tremolo, Glide Style and Glide Voice stayed synth-only: tremolo is not a pad expression and the JUCE
+drum voice ignores it too. All three levers now run through the same resolver in live preview and in
+the bounce, native and Tone.
+
+### 24.1 what was wired
+
+| lever | native | Tone (both paths) | driven by |
+|---|---|---|---|
+| hold to note length | [DrumEngine.cpp:271](native/Source/Audio/DrumEngine.cpp#L271)-272, extend-only — a hit rings at least as long as the note, never shorter | `padDecaySetting` ([AudioEngine.ts:780](src/engine/AudioEngine.ts#L780)) / `holdDecay` ([audioRender.ts:245](src/utils/audioRender.ts#L245)) | `duration` |
+| pitch vibrato, in cents | `DrumEngine.cpp:321`-333 (delay gate, then fade, phase only advances inside the gate) | rig routes `depth → voice.detune` | `vibratoDepth`/`Rate`/`Delay`/`Fade`/`Wave` |
+| cutoff wobble | `DrumEngine.cpp:349` (`cutoffHz *= vibRatio`), routed at `:275` | rig inserts a `Tone.Filter` and drives `filter.frequency` in Hz | same fields, pad decides |
+| one-shot tone sweep | `DrumEngine.cpp:341`-348, curve from `expression.filterCurve` | stepped `setValueAtTime` ladder, or `rampTo` when no curve | `filterStart`/`filterEnd`/`filterSweepTime`/`filterSweepRamp`/`laneFilterCurve` |
+| pad records (decay, octaves, resonance, pitch, detune, slide) | `DrumEngine.cpp:127` + the per-pad values the §23 payload fix delivers | spread into every voice-construction site, per-note value wins | `drumDecays` … `drumSlideTimes` |
+
+- New shared module [src/utils/drumModulation.ts](src/utils/drumModulation.ts) (170 lines):
+  `resolveDrumHitModulation` (:43) turns a note into units the engines speak (ms → s, ticks → s at the
+  project's ticks-per-second) and returns `undefined` when the note asked for nothing, so an
+  untouched hit keeps its exact graph; `attachDrumHitModulation` (:92) wires the LFO/sweep for one hit
+  and returns a `dispose`.
+- Live calls it at [AudioEngine.ts:6115](src/engine/AudioEngine.ts#L6115) and
+  [AudioEngine.ts:883](src/engine/AudioEngine.ts#L883); the bounce at
+  [audioRender.ts:989](src/utils/audioRender.ts#L989) and :245/:307 — one resolver, two paths, so they
+  cannot drift.
+- Bridge payload [nativeNoteCommand.ts:146](src/engine/nativeNoteCommand.ts#L146)-159 (ms → s at :149,
+  ticks → s at :156, lane curve else ramp preset at :154-159); C++ reads it at
+  [AudioEngine.cpp:1419](native/Source/Audio/AudioEngine.cpp#L1419)-1425 and hands it to both
+  `triggerHit` sites (:1519 live, :1672 bounce).
+- Curve sampling and LFO shapes moved out of `SynthVoice.cpp` into `musegrid::sampleCurveLut` /
+  `musegrid::lfoWaveform` ([NoteExpression.h:55](native/Source/Audio/NoteExpression.h#L55) and :70) so
+  the drum voice and the synth voice read the identical equations.
+- UI: the drum note inspector card [RightPane.tsx:2237](src/ui/RightPane.tsx#L2237)+ (PAD WOBBLE
+  (VIBRATO) :2242, TONE SWEEP (WAH) :2289) and the drum lane list
+  [GridCanvas.tsx:351](src/renderer/GridCanvas.tsx#L351)-353 (`filterCutoff`, `vibratoDepth`,
+  `vibratoRate`, `detune`, `glideAmount`).
+
+### 24.2 the pad decides the lever — defect found while verifying, now fixed
+
+The rig first picked its lever from the Tone class (`!!voice.detune`). A `MetalSynth` hat does have a
+`detune`, so a hat wobbled in *pitch* in both Tone paths while the JUCE voice wobbles its *band* —
+exactly the design item (2) above, arriving backwards in the bounce. Native routes by pad
+(`padRidesCutoff` = 2, 3, 4, 8, 9, 11, [DrumEngine.h:128](native/Source/Audio/DrumEngine.h#L128)) and
+native was not touched.
+
+- [drumModulation.ts:17](src/utils/drumModulation.ts#L17) `CUTOFF_VIBRATO_PADS = [2, 3, 4, 8, 9, 11]`,
+  with `padRidesCutoffVibrato` (:19) folding out-of-range pads the way `normalizeDrumPad` does
+  (`((pad % 16) + 16) % 16`); the resolver carries the verdict as `vibratoRidesCutoff` (:71) and the
+  rig reads `hasPitch = !!voice?.detune && !mod.vibratoRidesCutoff` (:100).
+- Snare and rimshot stay tonal, as native documents ("their body oscillator is the audible note").
+- Second defect in the same family, also fixed: the bounce's metal branches called
+  `triggerAttackRelease(duration, time)` — the NoiseSynth shape — so `duration` landed on
+  `frequency`. `safeMetalTrigger` ([audioRender.ts:302](src/utils/audioRender.ts#L302)) now passes
+  `(frequency, duration, time, velocity)`, matching live
+  ([AudioEngine.ts:1140](src/engine/AudioEngine.ts#L1140)-1148). In the A/B below, a 1.25 s hat note
+  leaves HEAD with a peak of exactly 0 and the working copy at 2.667.
+
+### 24.3 verification — native
+
+`TestOfflineRender.exe` exit 0, `ALL CHECKS PASSED (0 failures)`, 39 PASS lines: 23 under
+`== OfflineRenderer ==` (24-bit and 16-bit headers, duration, file size, peak within 1% of −1 dBFS,
+auto-fade to silence, mute override, graph alive after the bounce, metronome grid) and 16 under
+`== Drum expression ==`: hat and kick bit-identical on short notes, note length never truncates the
+crash's own decay, a 0.05 s note still rings the crash out, an unheld closed hat is silent past its
+decay while a 1 s note holds it on, the pad decay slider still sets length, wobble changes a tonal
+pad and moves pitch not level, delay keeps the wobble off the attack and it arrives after the delay,
+the same wobble rides the cutoff on a filtered pad, a tone sweep moves the filter across the hit, the
+lane's curve shape is followed not only its ends, per-note slide and per-note gain automation.
+Digests `hat-brief=4C309245 hat-held=46EA0721 kick-wobble=47A77FA5 hat-sweep=B6894399
+hat-lane=53B77B45`; tail peak `gain-half=0.043262` of `held=0.086523`.
+No native source is newer than `native/build/MuseGrid_artefacts/Release/MuseGrid.exe` (12:14), and
+`bin/MuseGrid.exe` is that same 7,953,408-byte binary, so the shipped app carries these results.
+
+### 24.4 verification — Tone bounce, A/B against the HEAD exporter
+
+Same state, rendered by the working copy and by a HEAD copy of `audioRender.ts`; `maxAbsDiff` over
+both channels, tail measured 0.30–0.60 s. Control: working-vs-working 4.768e-07, HEAD-vs-HEAD
+7.684e-16.
+
+| case | maxAbsDiff | peak working / HEAD | tail working / HEAD | zero-cross working / HEAD |
+|---|---|---|---|---|
+| kick, no records, no expression | 0 exactly | 0.55146444 / 0.55146444 | 0.000119653 / 0.000119653 | — |
+| synth note with vibrato + sweep (guard) | 0 exactly | 0.5881173 / 0.5881173 | 0.073719046 / 0.073719046 | — |
+| metal set pads 2,3,8,9,10 | 4.719 | 4.71898794 / 1.18655205 | 0.495279613 / 0.023620446 | 24589 / 37595 |
+| hold: pad 0 at 1536 ticks | 0.3991 | 0.69453359 / 0.55146444 | 0.143625563 / 0.006944226 | — |
+| vibrato on kick (40 ct, 6 Hz, 100 ms fade) | 0.3427 | 0.67691076 / 0.55146444 | 0.100997787 / 0.006944226 | 75 / 75 |
+| tone sweep 9000→800 Hz on hat | 2.667 | 2.66728997 / 0 | 0.20683817 / 0 | 18278 / 0 |
+| wobble routed to cutoff on hat | 0.712 | 0.71199393 / 0 | 0.077338175 / 0 | 14228 / 0 |
+| pad records on track | 1.693 | 1.69283175 / 0.58222353 | 0.216939859 / 0.000253046 | — |
+| per-note `decay`/`octaves`/`resonance` | 1.079 | 0.56174874 / 0.55146444 | 0.000198288 / 0.000119653 | — |
+| full kit pads 0–15, no expression | 4.64 | 4.63996601 / 1.0519743 | 0.498819419 / 0.038973077 | — |
+| custom kit (membrane + noise + metal) | 5.445 | 5.44519091 / 2.24334407 | 0.490417223 / 0.025771453 | 19095 / 4433 |
+| pitch offset +5 with −7 slide, sigmoid | 0.2431 | 0.64275599 / 0.54898602 | 0.046102974 / 0.007039731 | 75 / 83 |
+
+Non-finite samples across every buffer of every pair: 0. The two exactly-zero rows are the guard: a
+note that asks for nothing, and a synth note, both leave the bounce byte-identical.
+
+### 24.5 verification — Tone live, which lever is actually wired
+
+`eng.playNote` driven per pad with `vibratoDepth 200, rate 8`; the rig's only depth node is a
+`Tone.Gain`, so its connection names the lever by object identity (the voice's own `detune`, or the
+`frequency` of the filter it inserted). Earlier entries in each row are the private voice's internal
+wiring, recorded while it was being constructed.
+
+| pad | Tone voice | lever wired | native lever | |
+|---|---|---|---|---|
+| 2 hat, 3 open hat, 8 crash, 9 ride | MetalSynth | `cutoff` | cutoff | match |
+| 4 clap, 11 tambourine | NoiseSynth | `cutoff` | cutoff | match |
+| 0 kick, 5 low tom, 13 hi conga | MembraneSynth | `detune` | pitch | match |
+| 10 cowbell | MetalSynth | `detune` | pitch | match |
+| 1 snare, 15 rimshot | NoiseSynth | `cutoff` | pitch (body oscillator) | documented fallback, 24.9 |
+| 2 hat, untouched | MetalSynth | no lever, 0 filters | — | nothing inserted |
+
+Same run also re-proved the live plumbing: every metal hit carries 4 arguments with a real frequency
+(hat `a0=400`, crash `300`, cowbell `800`), the noise snare keeps its 3-argument shape; hold moves a
+kick's envelope decay 0.42 → 1.0 between `32n` and `2n`; pad records reach the voice (32.703196 Hz →
+44.673882 Hz with `drumPitches {0:5}` + `drumDetunes {0:40}`, decay 0.42 → 1.2) and a per-note
+`decay: 0.2` still beats the record; a modulated hit gets its own voice (`v9r17b`) while the plain
+hits around it keep sharing `vbul92`; `pitchOffset: 12` on a custom-kit hat doubles the trigger
+frequency (400 → 800); and scheduling with depth 1200 + 20000→20 Hz sweep, with garbage types, and
+with a 7,680,000 ms delay threw nothing.
+
+### 24.6 verification — the shared module on its own
+
+Resolver 19/19 (ms→s for delay 2000 → 2 s, rate default 5, invalid wave → sine, sweep length from
+ticks, lane curve taken verbatim and truncated to 33 rather than replaced by the ramp preset, depth
+5000 ct uncapped, `undefined` for an untouched note). Routing 6/6 (`nativeSetAgrees`,
+`foldsLikeNative` for 18/36/32/−14, exactly six of sixteen pads, the flag set on the pad and not on
+the request). Delay semantics on a bit-reproducible membrane voice: 0.00–0.14 s window identical to
+plain (exact **0**), 0.06143 after the fade, and the same note with delay 0 differing by 1.685 in the
+first window — delay means "later", not "gradually from the attack". Pad routing, one voice that has
+a `detune`, identical modulation, only the pad changing: tonal vs cutoff 2.705 against a
+self-control floor of 4.47e-07; two tonal pads 4.172e-07; a sweep-only hit pad-blind at 2.235e-07.
+`dispose()` never threw. Noise renders are not comparable this way (`Tone.Noise` starts at a random
+offset: plain-vs-plain 1.775), which is why the noise pads are proven by 24.4 and 24.5 instead.
+
+### 24.7 gates, build, deploy
+
+| check | result |
+|---|---|
+| `npx tsc --noEmit` | exit 0 |
+| dev-server transform of `drumModulation.ts`, `AudioEngine.ts`, `audioRender.ts` | HTTP 200 each |
+| `npx eslint` on the four edited TS engine files | 0 errors, 338 warnings (the repo's standing `no-explicit-any` / unused-catch noise; 3 of them in the new module) |
+| `npx vite build` (setup build deliberately not run) | `dist/assets/index-BdNqkbzS.js` 5,398.86 kB, gzip 1,265.31 kB |
+| deploy | `cp -r dist/. bin/dist/`; `bin/dist/index.html` now references `index-BdNqkbzS.js`, no nested `bin/dist/dist`, `bin/MuseGrid.exe` untouched and not running |
+| deployed bundle greps | `PAD WOBBLE (VIBRATO)` 1, `TONE SWEEP (WAH)` 1, `vibratoRidesCutoff` 2, `[2,3,4,8,9,11]` 1, `attachDrumHitModulation` 4, `resolveDrumHitModulation` 3, `pitchSlideCustomCurve` 21 |
+| UI (probe-driven, RightPane and GridCanvas unchanged since) | drum note shows PAD WOBBLE, TONE SWEEP, Slide Shape + custom-equation box, DRUM PITCH TUNING; writes land as `vibratoDepth 317`, `vibratoRate 23.5`, `vibratoDelay 640`, `vibratoFade 410`, `vibratoWave 'triangle'`, `filterStart 12320`, `filterEnd 320`, `filterSweepTime 144`, `filterSweepRamp 'exponential'`; depth→0 clears the field; drum lane select offers exactly the five targets, no tremolo; synth note still shows Tremolo / Glide Style / Glide Voice and no drum cards |
+
+### 24.8 audible consequence
+
+Long notes now hold pads open instead of being clipped at the kit decay, hats and cymbals wobble in
+tone rather than pitch, a swept note opens and closes on its own, and the Drum Designer's pad records
+reach grid playback in both engines. In a browser-engine bounce, metal pads that were silent or
+near-silent because of the argument-shape defect (§24.2) now sound — a saved project exported before
+this pass can differ from the same export after it, independently of any expression being drawn.
+Native live preview and native export have *not* been auditioned by ear; `bin/MuseGrid.exe` is not
+drivable from here.
+
+### 24.9 known divergences, left as-is
+
+| finding | why left |
+|---|---|
+| snare/rimshot: native wobbles the body oscillator's pitch, Tone's voice for those pads is a `NoiseSynth` with no `detune`, so the wobble falls back to the band | the control still does something audible; making it pitch-identical means giving the Tone snare a second oscillator like native's |
+| sample-mode pads take no expression in any path, and the Tone bounce does not render sample mode at all | pre-existing (§22.3); expression would have to modulate sample playback rate or a per-sample filter |
+| drum mix rows (`syntheticPitch >= 1000`) exist only in live Tone | native has no mix-row concept; the resolver is called with each row's own pad, so what does play is routed correctly |
+| stepped `glideStyle` and `drumPadCurves` amplitude shaping remain native-only | wiring the curve ladder into a Tone drum voice is a separate change; §23.5 already logs the pad-curve half |
+| noise-only custom rows take pad pitch statically through `playbackRate`, so a continuous slide is a sequence of rate steps in Tone but a glide in native | `Noise` has no interpolated pitch parameter |
+| **synth** vibrato delay still fades from the attack in JS ([AudioEngine.ts:5846](src/engine/AudioEngine.ts#L5846), [audioRender.ts:561](src/utils/audioRender.ts#L561)) while drums now match native's gate | out of this feature's scope; recorded so the next pass does not read the drum fix as a synth fix |
+| GM pitches 35–81 map to pads in `normalizeDrumPad` but only reach native; the fold in `padRidesCutoffVibrato` matches native's non-GM branch | grid notes never carry GM pitches (import folds them at LeftPane.tsx:3479-3490), so the difference is limited to external MIDI live input |
+
+### 24.10 accounting
+
+11 tracked code files **+776 / −158**, plus the new `src/utils/drumModulation.ts` (170 lines). Every
+one of the 158 deletions was read against its `+` counterpart:
+
+- `AudioEngine.cpp` −2: the two `triggerHit` call lines, re-issued with `drumModulation` appended
+  (:1519, :1672); the 10-line `HitModulation` build at :1419-1425 is pure addition.
+- `DrumEngine.h` −1: the `triggerHit` declaration, re-issued with `const HitModulation& modulation =
+  {}` — a default argument, so every existing caller compiles unchanged.
+- `DrumEngine.cpp` −16: the signature; the pitch lines, re-issued with `* vibRatio` appended (and the
+  metal cluster, which previously ignored pad slide, now multiplies by `slideMultiplier` as every
+  other pad does); and three duplicated `filterAlpha` pairs hoisted into one sweepable `cutoffAlpha`
+  at :350 — each `v.filterState += ...` line survived.
+- `SynthVoice.cpp` −15: the curve sampler and LFO waveform, moved **verbatim** into
+  `musegrid::sampleCurveLut` / `musegrid::lfoWaveform` (NoteExpression.h +31, including
+  `#include <cmath>`), with thin forwarders left at the old call sites. Behaviour unchanged: the synth
+  tests in 24.3 still pass.
+- `nativeNoteCommand.ts` −9: slide folding and the pad-record fallbacks — `drumDecay`,
+  `punchOctaves`, `resonanceHz` became `note ?? track record ?? -1`, and `totalPitchOffset` keeps all
+  four original terms while adding pad pitch and detune.
+- `AudioEngine.ts` −55: reworded comments; `cloneInstrument(original, destination?)` now connects only
+  `if (destination)`; the 9-line custom-decay block moved verbatim into `padDecaySetting`; the
+  15-line membrane `applySlide` generalised (punch 0.05 / 0.02 kept, metal 0.005, stepped curve);
+  disposal `+4` → `+ holdTail + 4`; metal/hat cases moved from `(duration, t)` to
+  `(f, duration, t, velocity)` — the fix, not a loss.
+- `audioRender.ts` −58: `triggerDrum`'s signature reshaped with the new parameters appended after the
+  old ones; `decay: customDecay` → `holdDecay = Math.max(customDecay, duration)` at every site;
+  `cacheKey` extended with pad octave and resonance; `if (perNoteOutput)` → `if (privateVoice)` with
+  the rig attached; `safeMetalTrigger` with the correct argument order; `octaves: 1.5` / `0.5`
+  retained under the new spread; custom-kit `cymFreq` extended with a 400 Hz default; the inline
+  10-tick/192-only slide block replaced by `applySlide`, which honours the project's ticks-per-second;
+  and the one-line call site expanded to 19.
+- `GridCanvas.tsx` −2: the lane comment and the drum target array, both re-issued.
+- `OfflineRenderTest.cpp` +120 / `RightPane.tsx` +143 / `NoteExpression.h` +31 (apart from the include)
+  add no deletions.
+- `conditions.md`'s −4 in this diff is the §22.3 clause struck in §23, already accounted there.
+- Scratch: the HEAD copy `src/utils/__abOld.ts` and every `_ab*`/`_rig*`/`_live*`/`_ui*`/`_route*`
+  harness file are deleted after this section; `JUCE` (the local WebView2 patch) stays unstaged, and
+  the commit is local only — nothing was pushed.
+

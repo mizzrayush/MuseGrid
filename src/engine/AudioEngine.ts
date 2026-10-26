@@ -10,6 +10,7 @@ import { buildNativeNoteOnCommand } from './nativeNoteCommand'
 import { buildNoteFxChain } from '../utils/noteFxChain'
 import { buildCurveLut, evaluateGlideCurve } from '../utils/glideCurves'
 import { createTrackChannel, setTrackChannelPan } from '../utils/toneChannel'
+import { attachDrumHitModulation, resolveDrumHitModulation, type DrumHitModulation, type DrumModulationRig } from '../utils/drumModulation'
 
 interface TrackRack {
   input: Tone.Gain
@@ -418,6 +419,10 @@ class DrumMachine {
   drumDecays?: Record<number, number>
   drumOctaves?: Record<number, number>
   drumResonances?: Record<number, number>
+  drumPitches?: Record<number, number>
+  drumDetunes?: Record<number, number>
+  drumSlides?: Record<number, number>
+  drumSlideTimes?: Record<number, number>
   customSynths: Map<number, any> = new Map()
   lastDestination?: any
   padModes: Record<number, 'synth' | 'sample'> = {}
@@ -704,16 +709,17 @@ class DrumMachine {
   }
 
   /**
-   * Copies one pad instrument for a per-hit output chain. Drum pad instruments are
-   * monophonic, so a note that needs its own pan/gain ride gets a private voice
-   * instead of sharing the track-level chain.
+   * Copies one pad instrument for a per-hit chain. Drum pad instruments are monophonic, so a note
+   * that needs its own pan, gain or voice shape gets a private copy instead of sharing the
+   * track-level chain. The destination is optional: a hit that carries modulation is wired through
+   * that rig instead of straight to the output.
    */
-  private cloneInstrument(original: any, destination: any): any {
+  private cloneInstrument(original: any, destination?: any): any {
     let voice: any
     if (original instanceof Tone.NoiseSynth) voice = new Tone.NoiseSynth(original.get())
     else if (original instanceof Tone.MetalSynth) voice = new Tone.MetalSynth(original.get())
     else voice = new Tone.MembraneSynth(original.get())
-    voice.connect(destination)
+    if (destination) voice.connect(destination)
     return voice
   }
 
@@ -770,6 +776,19 @@ class DrumMachine {
     this.customSynths.forEach(synth => synth.connect(destination))
   }
 
+  /** The pad's own ring length: a per-note override, then the designer's slider, then the kit default. */
+  private padDecaySetting(index: number, padCustom?: { decay?: number }): number {
+    let defaultDecay = getDecayDefaultByPitch(index)
+    if (this.kit === 'custom' && this.customMuxins?.config) {
+      const pieceKey = index <= 15 ? (PITCH_TO_PIECE[index] || '') : index.toString()
+      const cfg = this.customMuxins.config[pieceKey]
+      if (cfg?.envelope?.decay !== undefined) {
+        defaultDecay = cfg.envelope.decay
+      }
+    }
+    return padCustom?.decay ?? this.drumDecays?.[index] ?? defaultDecay
+  }
+
   triggerAttackRelease(
     pitch: string | number,
     duration: string,
@@ -787,10 +806,22 @@ class DrumMachine {
       resonance?: number
       decay?: number
     },
-    outputOpts?: DrumOutputOptions
+    outputOpts?: DrumOutputOptions,
+    modulation?: DrumHitModulation
   ) {
     const index = typeof pitch === 'number' ? pitch : Tone.Frequency(pitch).toMidi()
     const t = time as Tone.Unit.Time
+
+    // The Drum Designer tunes and slides pads on the track, and those records used to be read by
+    // nothing here. They are the hit's fallback now, the same way the native noteOn command takes
+    // them, and a note carrying its own value still decides the pitch it plays at.
+    pitchOffset += (this.drumPitches?.[index] ?? 0) + (this.drumDetunes?.[index] ?? 0) / 100
+    if (!slideOpts && (this.drumSlides?.[index] ?? 0) !== 0) {
+      slideOpts = {
+        targetPitchOffset: this.drumSlides![index],
+        slideTime: this.drumSlideTimes?.[index] ?? 120
+      }
+    }
 
     // Check if pad is configured in Sample mode with an active AudioBuffer
     const sample = this.padSamples?.[index]
@@ -802,13 +833,15 @@ class DrumMachine {
       return
     }
 
-    // Per-hit pan, volume automation or morph fades need their own output node, which
-    // also means a private copy of the pad voice: the shared instrument is connected
-    // straight to the track input and is monophonic.
-    if (outputOpts && drumNeedsOutput(outputOpts)) {
+    // Per-hit pan, volume automation or morph fades need their own output node, and a wobbling or
+    // sweeping hit needs its own voice: the shared instrument is one monophonic instance connected
+    // straight to the track input, so shaping it would reshape every other note on the pad.
+    const needsOutputRide = !!outputOpts && drumNeedsOutput(outputOpts)
+    if (needsOutputRide || modulation) {
       const startSec = time !== undefined ? Tone.Time(time).toSeconds() : Tone.now()
       const durSec = Tone.Time(duration).toSeconds()
-      const chain = this.buildOutputChain(outputOpts, startSec)
+      const chain = needsOutputRide ? this.buildOutputChain(outputOpts!, startSec) : undefined
+      const rigTarget: any = chain ? chain.input : (this.lastDestination || Tone.getDestination())
       const shadow = Object.create(DrumMachine.prototype) as DrumMachine
       shadow.kit = this.kit
       shadow.customMuxins = this.customMuxins
@@ -819,73 +852,94 @@ class DrumMachine {
       shadow.padModes = this.padModes
       shadow.padSamples = this.padSamples
       shadow.padAudioBuffers = this.padAudioBuffers
-      shadow.lastDestination = chain.input
+      shadow.lastDestination = rigTarget
+      // The pad tuning and slide records stay on the outer machine: they are already folded into
+      // the values handed down, and copying them would apply them twice.
 
       let voice: any
       if (this.kit === 'tabla') {
         if (index === 0 || index === 1 || index === 4) {
-          voice = shadow.kick = this.cloneInstrument(this.kick, chain.input)
+          voice = shadow.kick = this.cloneInstrument(this.kick)
         } else if (index === 2) {
-          voice = shadow.hihatClosed = this.cloneInstrument(this.hihatClosed, chain.input)
+          voice = shadow.hihatClosed = this.cloneInstrument(this.hihatClosed)
         } else if (index === 3) {
-          voice = shadow.hihatOpen = this.cloneInstrument(this.hihatOpen, chain.input)
+          voice = shadow.hihatOpen = this.cloneInstrument(this.hihatOpen)
         }
       } else {
         const field = DRUM_PAD_FIELD[index]
         if (field) {
-          voice = this.cloneInstrument((this as any)[field], chain.input)
+          voice = this.cloneInstrument((this as any)[field])
           ;(shadow as any)[field] = voice
         }
       }
       if (!voice) {
         voice = this.createCustomSynth(index)
-        voice.connect(chain.input)
         shadow.customSynths.set(index, voice)
+      }
+
+      // The wobble has to outlast the pad's own decay when that is what sets the hit's length.
+      let rig: DrumModulationRig | undefined
+      if (modulation) {
+        rig = attachDrumHitModulation(
+          voice, modulation, startSec, Math.max(this.padDecaySetting(index, padCustom), durSec), rigTarget
+        )
+      } else {
+        voice.connect(rigTarget)
       }
 
       shadow.triggerAttackRelease(pitch, duration, time, velocity, pitchOffset, slideOpts, padCustom)
 
       if (!(Tone.getContext() as any).isOffline) {
-        const delayMs = Math.max(0, (startSec + durSec + 4 - Tone.now()) * 1000)
+        const holdTail = Math.max(0, rig ? (modulation?.vibratoDelaySeconds ?? 0) : 0)
+        const delayMs = Math.max(0, (startSec + durSec + holdTail + 4 - Tone.now()) * 1000)
         window.setTimeout(() => {
-          try { voice.dispose() } catch (_) {}
-          chain.dispose()
+          try { voice.dispose() } catch (_) { }
+          try { rig?.dispose() } catch (_) { }
+          chain?.dispose()
         }, delayMs)
       }
       return
     }
 
-    let defaultDecay = getDecayDefaultByPitch(index)
-    if (this.kit === 'custom' && this.customMuxins?.config) {
-      const pieceKey = index <= 15 ? (PITCH_TO_PIECE[index] || '') : index.toString()
-      const cfg = this.customMuxins.config[pieceKey]
-      if (cfg?.envelope?.decay !== undefined) {
-        defaultDecay = cfg.envelope.decay
-      }
-    }
-    const customDecay = padCustom?.decay ?? this.drumDecays?.[index] ?? defaultDecay
+    const customDecay = Math.max(this.padDecaySetting(index, padCustom), Tone.Time(duration).toSeconds())
     const customOctaves = padCustom?.octaves ?? this.drumOctaves?.[index]
     const customResonance = padCustom?.resonance ?? this.drumResonances?.[index]
 
     const tunedFreq = (baseNote: string, semitones: number) =>
       Tone.Frequency(baseNote).toFrequency() * Math.pow(2, semitones / 12)
 
-    const applySlide = (synth: Tone.MembraneSynth, startF: number) => {
-      if (slideOpts?.targetPitchOffset !== undefined && slideOpts.targetPitchOffset !== 0) {
-        const endF = startF * Math.pow(2, slideOpts.targetPitchOffset / 12)
-        const punchOffset = this.kit === 'eightOhEight' ? 0.05 : 0.02
-        const now = time !== undefined ? time : Tone.now()
-        const startTime = now + punchOffset
-        const durSec = Tone.Time(duration).toSeconds()
-        const slideDur = slideOpts.slideTime
-          ? Math.min(durSec, Tone.Time(slideOpts.slideTime + 'i').toSeconds())
-          : Math.max(0.04, durSec - punchOffset)
-        try {
-          synth.frequency.setValueAtTime(startF, startTime)
-          synth.frequency.rampTo(endF, slideDur, startTime)
-        } catch (e) {
-          // ignore slide scheduling errors
+    // A slide moves the pitch the pad actually has. A membrane pad keeps its punch delay, a metal
+    // pad glides its whole cluster, and a noise-only pad has no pitch parameter, so it is skipped
+    // here and takes its tuning from the playback rate in its own case instead.
+    const applySlide = (synth: any, startF: number) => {
+      const semitones = slideOpts?.targetPitchOffset
+      const param = synth?.frequency
+      if (!semitones || !param || typeof param.setValueAtTime !== 'function') return
+      const isMembrane = synth instanceof Tone.MembraneSynth
+      const punchOffset = isMembrane ? (this.kit === 'eightOhEight' ? 0.05 : 0.02) : 0.005
+      const now = time !== undefined ? time : Tone.now()
+      const startTime = now + punchOffset
+      const durSec = Tone.Time(duration).toSeconds()
+      const slideDur = slideOpts!.slideTime
+        ? Math.min(durSec, Tone.Time(slideOpts!.slideTime + 'i').toSeconds())
+        : Math.max(0.04, durSec - punchOffset)
+      const endF = startF * Math.pow(2, semitones / 12)
+      try {
+        param.setValueAtTime(startF, startTime)
+        const ramp = slideOpts!.ramp
+        if (!ramp || ramp === 'linear') {
+          param.rampTo(endF, slideDur, startTime)
+        } else {
+          // A shaped glide is stepped, the same way a synth glide is, so the equation chosen for the
+          // note reaches the pad instead of collapsing into a straight ramp.
+          const steps = Math.max(10, Math.min(200, Math.round(slideDur * 100)))
+          for (let i = 1; i <= steps; i++) {
+            const y = evaluateGlideCurve(i / steps, ramp, slideOpts!.customCurve || 't * t')
+            param.setValueAtTime(startF * Math.pow(2, (semitones * y) / 12), startTime + (i / steps) * slideDur)
+          }
         }
+      } catch (e) {
+        // ignore slide scheduling errors
       }
     }
 
@@ -906,18 +960,26 @@ class DrumMachine {
           this.kick.triggerAttackRelease(f, duration, t, velocity * 0.9)
           break
         }
-        case 2:
+        case 2: {
+          const f = 400 * Math.pow(2, pitchOffset / 12)
           this.hihatClosed.envelope.decay = customDecay
           if (customResonance !== undefined) this.hihatClosed.resonance = customResonance
+          if (customOctaves !== undefined) this.hihatClosed.octaves = customOctaves
           this.hihatClosed.volume.value = Tone.gainToDb(velocity * 0.9) + 8
-          this.hihatClosed.triggerAttackRelease(duration, t)
+          this.hihatClosed.triggerAttackRelease(f, duration, t, velocity)
+          applySlide(this.hihatClosed, f)
           break
-        case 3:
+        }
+        case 3: {
+          const f = 400 * Math.pow(2, pitchOffset / 12)
           this.hihatOpen.envelope.decay = customDecay
           if (customResonance !== undefined) this.hihatOpen.resonance = customResonance
+          if (customOctaves !== undefined) this.hihatOpen.octaves = customOctaves
           this.hihatOpen.volume.value = Tone.gainToDb(velocity * 0.95) + 7
-          this.hihatOpen.triggerAttackRelease(duration, t)
+          this.hihatOpen.triggerAttackRelease(f, duration, t, velocity)
+          applySlide(this.hihatOpen, f)
           break
+        }
         case 4: {
           const f = tunedFreq('A3', pitchOffset)
           this.kick.envelope.decay = customDecay
@@ -953,6 +1015,7 @@ class DrumMachine {
         if (customOctaves !== undefined) this.hihatClosed.octaves = customOctaves
         this.hihatClosed.volume.value = Tone.gainToDb(velocity) + 8
         this.hihatClosed.triggerAttackRelease(f, duration, t, velocity)
+        applySlide(this.hihatClosed, f)
         break
       }
       case 3: {
@@ -962,6 +1025,7 @@ class DrumMachine {
         if (customOctaves !== undefined) this.hihatOpen.octaves = customOctaves
         this.hihatOpen.volume.value = Tone.gainToDb(velocity) + 7
         this.hihatOpen.triggerAttackRelease(f, duration, t, velocity)
+        applySlide(this.hihatOpen, f)
         break
       }
       case 4:
@@ -1002,6 +1066,7 @@ class DrumMachine {
         if (customOctaves !== undefined) this.crash.octaves = customOctaves
         this.crash.volume.value = Tone.gainToDb(velocity) + 6
         this.crash.triggerAttackRelease(f, duration, t, velocity)
+        applySlide(this.crash, f)
         break
       }
       case 9: {
@@ -1011,6 +1076,7 @@ class DrumMachine {
         if (customOctaves !== undefined) this.ride.octaves = customOctaves
         this.ride.volume.value = Tone.gainToDb(velocity) + 6
         this.ride.triggerAttackRelease(f, duration, t, velocity)
+        applySlide(this.ride, f)
         break
       }
       case 10: {
@@ -1020,6 +1086,7 @@ class DrumMachine {
         if (customOctaves !== undefined) this.cowbell.octaves = customOctaves
         this.cowbell.volume.value = Tone.gainToDb(velocity) + 4
         this.cowbell.triggerAttackRelease(f, duration, t, velocity)
+        applySlide(this.cowbell, f)
         break
       }
       case 11:
@@ -1050,6 +1117,7 @@ class DrumMachine {
         this.claves.envelope.decay = customDecay
         if (customOctaves !== undefined) this.claves.octaves = customOctaves
         this.claves.triggerAttackRelease(f, duration, t, velocity)
+        applySlide(this.claves, f)
         break
       }
       case 15:
@@ -1070,12 +1138,14 @@ class DrumMachine {
               synth.triggerAttackRelease(f, duration, t, velocity)
               applySlide(synth, f)
             } else if (synth instanceof Tone.MetalSynth) {
+              // MetalSynth inherits Instrument's (note, duration, time, velocity) order. Calling it
+              // with the NoiseSynth shape made the note length the pitch and the trigger fire now().
+              const f = 400 * Math.pow(2, pitchOffset / 12)
               synth.volume.value = Tone.gainToDb(velocity) + 4
               if (customResonance !== undefined) synth.resonance = customResonance
-              try {
-                synth.frequency.setValueAtTime(400 * Math.pow(2, pitchOffset / 12), t || Tone.now())
-              } catch (e) {}
-              synth.triggerAttackRelease(duration, t)
+              if (customOctaves !== undefined) synth.octaves = customOctaves
+              synth.triggerAttackRelease(f, duration, t, velocity)
+              applySlide(synth, f)
             } else {
               synth.triggerAttackRelease(duration, t, velocity)
             }
@@ -4171,6 +4241,10 @@ class AudioEngine {
     const drum = this.drums.get(track.id)
     if (drum) {
       drum.drumDecays = track.drumDecays
+      drum.drumPitches = track.drumPitches
+      drum.drumDetunes = track.drumDetunes
+      drum.drumSlides = track.drumSlides
+      drum.drumSlideTimes = track.drumSlideTimes
       drum.customMuxins = track.customMuxins
       if (track.drumKickOctaves !== undefined) drum.kick.octaves = track.drumKickOctaves
       if (track.drumKickPitchDecay !== undefined) drum.kick.pitchDecay = track.drumKickPitchDecay
@@ -4437,6 +4511,10 @@ class AudioEngine {
           drum.drumDecays = track.drumDecays
           drum.drumOctaves = track.drumOctaves
           drum.drumResonances = track.drumResonances
+          drum.drumPitches = track.drumPitches
+          drum.drumDetunes = track.drumDetunes
+          drum.drumSlides = track.drumSlides
+          drum.drumSlideTimes = track.drumSlideTimes
           drum.customMuxins = track.customMuxins
           if (track.drumPadModes) drum.padModes = { ...track.drumPadModes }
           if (track.drumPadSamples) {
@@ -4451,6 +4529,10 @@ class AudioEngine {
       drum.drumDecays = track.drumDecays
       drum.drumOctaves = track.drumOctaves
       drum.drumResonances = track.drumResonances
+      drum.drumPitches = track.drumPitches
+      drum.drumDetunes = track.drumDetunes
+      drum.drumSlides = track.drumSlides
+      drum.drumSlideTimes = track.drumSlideTimes
       if (track.drumPadModes) drum.padModes = { ...track.drumPadModes }
       if (track.drumPadSamples) {
         drum.padSamples = { ...track.drumPadSamples }
@@ -5985,6 +6067,15 @@ class AudioEngine {
         drum = trackOverrides.get(drumKit)
         if (!drum) {
           drum = new DrumMachine(drumKit)
+          // The Drum Designer tunes pads on the track, and the JUCE command reads those records
+          // whatever kit the note is overridden to, so the override machine has to carry them too.
+          drum.drumDecays = track?.drumDecays
+          drum.drumOctaves = track?.drumOctaves
+          drum.drumResonances = track?.drumResonances
+          drum.drumPitches = track?.drumPitches
+          drum.drumDetunes = track?.drumDetunes
+          drum.drumSlides = track?.drumSlides
+          drum.drumSlideTimes = track?.drumSlideTimes
           const rack = this.getRack(trackId)
           drum.connect(rack.input)
           trackOverrides.set(drumKit, drum)
@@ -6018,13 +6109,23 @@ class AudioEngine {
           fadeOut: noteData?.morphFadeOut ? Tone.Time(noteData.morphFadeOut + 'i').toSeconds() : undefined
         }
 
+        // A pad's wobble, tone sweep and held length are the same three levers the JUCE voice gets,
+        // resolved by the shared helper so the live preview and the WAV bounce cannot drift apart.
+        const hitDurSec = Tone.Time(duration).toSeconds()
+        const drumModulation = (pad: number) => resolveDrumHitModulation(noteData, {
+          pad,
+          durationSeconds: hitDurSec,
+          tickToSeconds: ticks => Tone.Time(ticks + 'i').toSeconds(),
+          centreCutoffHz: track?.drumResonances?.[pad]
+        })
+
         if (typeof pitch === 'number' && pitch >= 1000) {
           const mixRow = state.customDrumRows?.find(r => r.syntheticPitch === pitch)
           if (mixRow) {
             const velA = velocity * (1 - mixRow.proportion)
             const velB = velocity * mixRow.proportion
-            if (velA > 0.01) drum.triggerAttackRelease(mixRow.drumA, duration, time, velA, totalPitchOffset, slideOpts, undefined, drumOutput)
-            if (velB > 0.01) drum.triggerAttackRelease(mixRow.drumB, duration, time, velB, totalPitchOffset, slideOpts, undefined, drumOutput)
+            if (velA > 0.01) drum.triggerAttackRelease(mixRow.drumA, duration, time, velA, totalPitchOffset, slideOpts, undefined, drumOutput, drumModulation(mixRow.drumA))
+            if (velB > 0.01) drum.triggerAttackRelease(mixRow.drumB, duration, time, velB, totalPitchOffset, slideOpts, undefined, drumOutput, drumModulation(mixRow.drumB))
             return
           }
         }
@@ -6032,7 +6133,7 @@ class AudioEngine {
           octaves: noteData?.octaves,
           resonance: noteData?.resonance,
           decay: noteData?.decay
-        }, drumOutput)
+        }, drumOutput, drumModulation(typeof pitch === 'number' ? pitch : Tone.Frequency(pitch).toMidi()))
       }
     }
   }

@@ -5,6 +5,7 @@ import { parseAutomationTarget } from '../engine/store'
 import { getEffectiveTrackLevel } from './groupAudio'
 import { buildGlideIntoMap, resolveGlidePlayback } from './midiEditing'
 import { buildCurveLut, evaluateGlideCurve } from './glideCurves'
+import { attachDrumHitModulation, resolveDrumHitModulation, type DrumHitModulation } from './drumModulation'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET, type SynthPreset, type DrumKit } from './instruments'
 import { CustomScriptProcessorNode, DPreverbNode, audioEngine, VocalModelVoice, PhysicalModelVoice, type DrumOutputOptions } from '../engine/AudioEngine'
 import { getActiveDPreverbInstances, getTrackFxInstances, getTrackFxSetting as readTrackFxSetting, type BuiltInFxType } from '../engine/fxDefaults'
@@ -127,6 +128,18 @@ function getDecayDefaultByPitch(pitch: number): number {
   return defaults[pitch] ?? 0.40
 }
 
+interface DrumSlideOptions {
+  targetPitchOffset: number
+  slideTime?: number
+  ramp?: 'linear' | 'exponential' | 'logarithmic' | 'sigmoid' | 'custom'
+  customCurve?: string
+}
+
+/**
+ * One drum hit in the offline bounce. The arguments carry exactly what the live engine hands to
+ * DrumMachine.triggerAttackRelease - tuning offset, slide, pad tone, output trim and expression -
+ * so an exported WAV cannot drift from the transport.
+ */
 function triggerDrum(
   pitch: number,
   duration: number,
@@ -137,15 +150,32 @@ function triggerDrum(
   drumKitOverride: DrumKit | undefined,
   cache: Record<string, any>,
   pitchOffset = 0,
-  pitchSlide?: number,
-  pitchSlideTime?: number,
-  output?: DrumOutputOptions
+  slide?: DrumSlideOptions,
+  padCustom?: {
+    octaves?: number
+    resonance?: number
+    decay?: number
+  },
+  output?: DrumOutputOptions,
+  ticksPerSecond = 192,
+  mod?: DrumHitModulation
 ): void {
   const kit = drumKitOverride ?? track.drumKit ?? DEFAULT_DRUM_KIT
   const tight = kit === 'tight'
   const electro = kit === 'electro'
   const eightOhEight = kit === 'eightOhEight'
   const tabla = kit === 'tabla'
+
+  // The Drum Designer tunes and slides pads on the track. Both the live engine and the JUCE
+  // voice fold those records into every hit, so the bounce reads them here too; a note that
+  // carries its own value still decides the pitch it plays at.
+  pitchOffset += (track.drumPitches?.[pitch] ?? 0) + (track.drumDetunes?.[pitch] ?? 0) / 100
+  if ((!slide || !slide.targetPitchOffset) && (track.drumSlides?.[pitch] ?? 0) !== 0) {
+    slide = {
+      targetPitchOffset: track.drumSlides![pitch],
+      slideTime: track.drumSlideTimes?.[pitch] ?? 120
+    }
+  }
 
   // Per-note volume automation, pan and morph fades get a private output chain, so the
   // exported drum hit is trimmed the same way the JUCE drum engine trims it.
@@ -156,6 +186,9 @@ function triggerDrum(
     (output.fadeOut ?? 0) > 0
   )
   let dest: Tone.ToneAudioNode = input
+  // A wobbling or sweeping hit needs a voice of its own: an LFO attached to a pooled pad instance
+  // would modulate every later hit that reuses it, exactly like the shared live voice would.
+  const privateVoice = perNoteOutput || !!mod
   if (perNoteOutput && output) {
     const g = new Tone.Gain(1)
     const target = Math.max(0, Math.min(2, output.gain ?? 1))
@@ -183,12 +216,21 @@ function triggerDrum(
       defaultDecay = cfg.envelope.decay
     }
   }
-  const customDecay = track.drumDecays?.[pitch] ?? defaultDecay
+  const customDecay = padCustom?.decay ?? track.drumDecays?.[pitch] ?? defaultDecay
+  // A longer note lengthens the hit: the decay floor is the note length, which is the same
+  // extend-only rule the live engine and the JUCE voice apply. Short notes keep the pad's decay.
+  const holdDecay = Math.max(customDecay, duration)
+  // The Drum Designer stores pad tone per pad, and the live engine applies all three records.
+  // Spreading only when a pad has a record keeps every untuned pad byte-identical.
+  const padOctave = padCustom?.octaves ?? track.drumOctaves?.[pitch]
+  const padResonance = padCustom?.resonance ?? track.drumResonances?.[pitch]
+  const padOctaveSet = padOctave !== undefined ? { octaves: padOctave } : {}
+  const padResonanceSet = padResonance !== undefined ? { resonance: padResonance } : {}
 
   const isCustomKit = kit === 'custom'
   const isCustomPitch = pitch >= 16
 
-  const cacheKey = `${kit}_${pitch}_${customDecay}`
+  const cacheKey = `${kit}_${pitch}_${holdDecay}_${padOctave ?? -1}_${padResonance ?? -1}`
 
   // Pool-based synth allocator. Tone.js requires strictly increasing event times
   // on each synth instance (oscillator.start, volume.setValueAtTime, etc).
@@ -198,9 +240,10 @@ function triggerDrum(
   // in typical cases) while guaranteeing zero crashes.
   const EPSILON = 0.002
   const getPooledSynth = <T extends any>(createFn: () => T): T => {
-    if (perNoteOutput) {
+    if (privateVoice) {
       const s = createFn()
-        ; (s as any).connect(dest)
+      if (mod) attachDrumHitModulation(s as any, mod, time, holdDecay, dest)
+      else (s as any).connect(dest)
       return s
     }
     if (!cache[cacheKey]) cache[cacheKey] = []
@@ -217,15 +260,55 @@ function triggerDrum(
     return entry.synth
   }
 
-  // Wrapper to safely schedule MetalSynth events (volume + trigger).
-  const safeMetalTrigger = (createFn: () => any, volDb: number) => {
+  const tunedFreq = (baseNote: string, semitones: number) =>
+    Tone.Frequency(baseNote).toFrequency() * Math.pow(2, semitones / 12)
+
+  // A slide moves the pitch the pad actually has. A membrane pad keeps its punch delay, a metal pad
+  // glides its whole cluster, and a noise-only pad has no pitch parameter, so it is skipped here
+  // and takes its tuning from the playback rate in its own case instead - the live engine's rule.
+  const applySlide = (synth: any, startF: number) => {
+    const semitones = slide?.targetPitchOffset
+    const param = synth?.frequency
+    if (!semitones || !param || typeof param.setValueAtTime !== 'function') return
+    const isMembrane = synth instanceof Tone.MembraneSynth
+    const punchOffset = isMembrane ? (eightOhEight ? 0.05 : 0.02) : 0.005
+    const startTime = time + punchOffset
+    // A pad slide is stored in ticks. Dividing by the note's own ticks-per-second keeps the length
+    // right at any BPM, which the fixed 192-ticks assumption this replaced did not.
+    const slideDur = slide!.slideTime
+      ? Math.min(duration, slide!.slideTime / ticksPerSecond)
+      : Math.max(0.04, duration - punchOffset)
+    const endF = startF * Math.pow(2, semitones / 12)
+    try {
+      param.setValueAtTime(startF, startTime)
+      const ramp = slide!.ramp
+      if (!ramp || ramp === 'linear') {
+        param.rampTo(endF, slideDur, startTime)
+      } else {
+        // A shaped glide is stepped, the same way a synth glide is, so the equation chosen for the
+        // note reaches the pad instead of collapsing into a straight ramp.
+        const steps = Math.max(10, Math.min(200, Math.round(slideDur * 100)))
+        for (let i = 1; i <= steps; i++) {
+          const y = evaluateGlideCurve(i / steps, ramp, slide!.customCurve || 't * t')
+          param.setValueAtTime(startF * Math.pow(2, (semitones * y) / 12), startTime + (i / steps) * slideDur)
+        }
+      }
+    } catch (_err) { }
+  }
+
+  // Wrapper to safely schedule MetalSynth events (volume + trigger). MetalSynth inherits
+  // Instrument's (note, duration, time, velocity) order, so the pad pitch comes first; the
+  // NoiseSynth shape this used to call it with made the note length the pitch and fired at t=0.
+  const safeMetalTrigger = (createFn: () => any, volDb: number, freq: number) => {
     const safeVol = typeof volDb === 'number' && isFinite(volDb) ? volDb : 0
     const safeTime = typeof time === 'number' && isFinite(time) ? time : 0
     try {
       const synth = createFn()
-        ; (synth as any).connect(dest)
+      if (mod) attachDrumHitModulation(synth, mod, safeTime, holdDecay, dest)
+      else (synth as any).connect(dest)
       synth.volume.setValueAtTime(safeVol, safeTime)
-      synth.triggerAttackRelease(duration, safeTime)
+      synth.triggerAttackRelease(freq, duration, safeTime, velocity)
+      applySlide(synth, freq)
     } catch (_err) {
       // Suppress
     }
@@ -243,28 +326,34 @@ function triggerDrum(
       if (isMembrane) {
         const synth = getPooledSynth(() => {
           const s = new Tone.MembraneSynth(pieceConfig)
-          s.envelope.decay = customDecay
+          s.envelope.decay = holdDecay
+          if (padOctave !== undefined) s.octaves = padOctave
           return s
         })
         const pitchVal = pieceKey === 'kick' ? 'C2' : pieceKey === 'claves' ? 'C4' : (pieceKey === 'tomLow' ? 'G1' : pieceKey === 'tomMid' ? 'C2' : pieceKey === 'tomHigh' ? 'E2' : (pieceKey === 'congaLow' ? 'E2' : (pieceKey === 'congaHigh' ? 'G2' : 'C2')))
-        synth.triggerAttackRelease(pitchVal, duration, time, velocity)
+        const f = tunedFreq(pitchVal, pitchOffset)
+        synth.triggerAttackRelease(f, duration, time, velocity)
+        applySlide(synth, f)
       } else if (isNoise) {
         const synth = getPooledSynth(() => {
           const s = new Tone.NoiseSynth(pieceConfig)
-          s.envelope.decay = customDecay
+          s.envelope.decay = holdDecay
           return s
         })
+        // A NoiseSynth has no pitch parameter; the rate of its noise is the only tuning lever, and
+        // it has to be set on every hit because a pooled instance keeps the previous one's rate.
+        try { (synth.noise as any).playbackRate = Math.pow(2, pitchOffset / 12) } catch (_) { }
         synth.triggerAttackRelease(duration, time, velocity)
       } else {
+        const cymFreq = (pieceKey === 'cowbell' ? 800 : pieceKey === 'crash' ? 300 : pieceKey === 'ride' ? 400 : 400)
+          * Math.pow(2, pitchOffset / 12)
         safeMetalTrigger(() => {
           const s = new Tone.MetalSynth(pieceConfig)
-          s.envelope.decay = customDecay
-          const cymFreq = pieceKey === 'cowbell' ? 800 : pieceKey === 'crash' ? 300 : pieceKey === 'ride' ? 400 : undefined
-          if (cymFreq !== undefined) {
-            s.frequency.value = cymFreq
-          }
+          s.envelope.decay = holdDecay
+          if (padResonance !== undefined) s.resonance = padResonance
+          if (padOctave !== undefined) s.octaves = padOctave
           return s
-        }, Tone.gainToDb(velocity) + (pieceKey === 'hihatClosed' ? 8 : pieceKey === 'hihatOpen' ? 7 : 6))
+        }, Tone.gainToDb(velocity) + (pieceKey === 'hihatClosed' ? 8 : pieceKey === 'hihatOpen' ? 7 : 6), cymFreq)
       }
       return
     }
@@ -277,15 +366,15 @@ function triggerDrum(
         octaves: 3,
         pitchDecay: 0.05,
         oscillator: { type: 'sine' },
-        envelope: { attack: 0.001, decay: customDecay, sustain: 0, release: 0.1 }
+        envelope: { attack: 0.001, decay: holdDecay, sustain: 0, release: 0.1 },
+        ...padOctaveSet
       })
     })
-    synth.triggerAttackRelease('C2', duration, time, velocity)
+    const f = tunedFreq('C2', pitchOffset)
+    synth.triggerAttackRelease(f, duration, time, velocity)
+    applySlide(synth, f)
     return
   }
-
-  const tunedFreq = (baseNote: string, semitones: number) =>
-    Tone.Frequency(baseNote).toFrequency() * Math.pow(2, semitones / 12)
 
   switch (pitch) {
     case 0: { // Kick
@@ -293,31 +382,24 @@ function triggerDrum(
         return new Tone.MembraneSynth({
           octaves: track.drumKickOctaves ?? (eightOhEight ? 7 : electro ? 5 : tabla ? 2 : 3),
           pitchDecay: track.drumKickPitchDecay ?? (tight ? 0.025 : eightOhEight ? 0.09 : tabla ? 0.018 : 0.05),
-          envelope: { attack: 0.001, decay: customDecay, release: 0.08 },
+          envelope: { attack: 0.001, decay: holdDecay, release: 0.08 },
+          ...padOctaveSet
         })
       })
       const baseNote = kit === 'tabla' ? 'G2' : (eightOhEight ? 'A0' : 'C1')
       const targetFreq = tunedFreq(baseNote, pitchOffset)
       synth.triggerAttackRelease(targetFreq, duration, time, velocity)
-      if (pitchSlide !== undefined && pitchSlide !== 0) {
-        const endFreq = targetFreq * Math.pow(2, pitchSlide / 12)
-        const punchOffset = eightOhEight ? 0.05 : 0.02
-        const startTime = time + punchOffset
-        const slideDur = pitchSlideTime ? Math.min(duration, pitchSlideTime / 192) : Math.max(0.04, duration - punchOffset)
-        try {
-          synth.frequency.setValueAtTime(targetFreq, startTime)
-          synth.frequency.rampTo(endFreq, slideDur, startTime)
-        } catch (e) { }
-      }
+      applySlide(synth, targetFreq)
       break
     }
     case 1: { // Snare
       const synth = getPooledSynth(() => {
         return new Tone.NoiseSynth({
           noise: { type: track.drumSnareTone !== undefined ? (track.drumSnareTone > 0.5 ? 'white' : 'brown') : (electro || eightOhEight ? 'brown' : 'white') },
-          envelope: { attack: 0.004, decay: customDecay, sustain: 0 },
+          envelope: { attack: 0.004, decay: holdDecay, sustain: 0 },
         })
       })
+      try { (synth.noise as any).playbackRate = Math.pow(2, pitchOffset / 12) } catch (_) { }
       synth.triggerAttackRelease(duration, time, velocity)
       break
     }
@@ -327,23 +409,26 @@ function triggerDrum(
         return new Tone.MetalSynth({
           envelope: {
             attack: 0.001,
-            decay: customDecay,
+            decay: holdDecay,
             release: pitch === 3 ? 0.1 : 0.01,
           },
           harmonicity: track.drumHihatTone ?? (electro || eightOhEight ? 7.2 : 5.1),
           modulationIndex: electro || eightOhEight ? 46 : 32,
           resonance: track.drumHihatResonance ?? (electro || eightOhEight ? 5200 : 4000),
+          ...padResonanceSet,
+          ...padOctaveSet
         })
-      }, Tone.gainToDb(velocity) + (pitch === 3 ? 7 : 8))
+      }, Tone.gainToDb(velocity) + (pitch === 3 ? 7 : 8), 400 * Math.pow(2, pitchOffset / 12))
       break
     }
     case 4: { // Clap
       const synth = getPooledSynth(() => {
         return new Tone.NoiseSynth({
           noise: { type: track.drumClapTone !== undefined ? (track.drumClapTone > 0.5 ? 'white' : 'pink') : (electro || eightOhEight ? 'white' : 'pink') },
-          envelope: { attack: 0.005, decay: customDecay, sustain: 0 },
+          envelope: { attack: 0.005, decay: holdDecay, sustain: 0 },
         })
       })
+      try { (synth.noise as any).playbackRate = Math.pow(2, pitchOffset / 12) } catch (_) { }
       synth.triggerAttackRelease(duration, time, velocity)
       break
     }
@@ -354,50 +439,56 @@ function triggerDrum(
         return new Tone.MembraneSynth({
           octaves: eightOhEight ? 6 : 4,
           pitchDecay: 0.05,
-          envelope: { attack: 0.01, decay: customDecay, sustain: 0, release: 0.1 },
+          envelope: { attack: 0.01, decay: holdDecay, sustain: 0, release: 0.1 },
+          ...padOctaveSet
         })
       })
       const tomFreq = pitch === 5 ? 'G1' : (pitch === 6 ? 'C2' : 'E2')
-      synth.triggerAttackRelease(tunedFreq(tomFreq, pitchOffset), duration, time, velocity)
+      const f = tunedFreq(tomFreq, pitchOffset)
+      synth.triggerAttackRelease(f, duration, time, velocity)
+      applySlide(synth, f)
       break
     }
     case 8: // Crash
     case 9: { // Ride
+      const cymFreq = (pitch === 8 ? 300 : 400) * Math.pow(2, pitchOffset / 12)
       safeMetalTrigger(() => {
         const s = new Tone.MetalSynth({
-          envelope: { attack: 0.001, decay: customDecay, release: 0.5 },
+          envelope: { attack: 0.001, decay: holdDecay, release: 0.5 },
           harmonicity: track.drumCymbalTone ?? 5.1,
           modulationIndex: 32,
           resonance: track.drumCymbalResonance ?? 4000,
-          octaves: 1.5
+          octaves: 1.5,
+          ...padResonanceSet,
+          ...padOctaveSet
         })
-        const cymFreq = (pitch === 8 ? 300 : 400) * Math.pow(2, pitchOffset / 12)
-        s.frequency.value = cymFreq
         return s
-      }, Tone.gainToDb(velocity) + 6)
+      }, Tone.gainToDb(velocity) + 6, cymFreq)
       break
     }
     case 10: { // Cowbell
       safeMetalTrigger(() => {
         const s = new Tone.MetalSynth({
-          envelope: { attack: 0.001, decay: customDecay, release: 0.1 },
+          envelope: { attack: 0.001, decay: holdDecay, release: 0.1 },
           harmonicity: track.drumCowbellTone ?? (eightOhEight ? 0.5 : 0.2),
           modulationIndex: 10,
           resonance: 800,
-          octaves: 0.5
+          octaves: 0.5,
+          ...padResonanceSet,
+          ...padOctaveSet
         })
-        s.frequency.value = 800 * Math.pow(2, pitchOffset / 12)
         return s
-      }, Tone.gainToDb(velocity) + 4)
+      }, Tone.gainToDb(velocity) + 4, 800 * Math.pow(2, pitchOffset / 12))
       break
     }
     case 11: { // Tambourine
       const synth = getPooledSynth(() => {
         return new Tone.NoiseSynth({
           noise: { type: track.drumTambourineTone !== undefined ? (track.drumTambourineTone > 0.5 ? 'white' : 'pink') : 'white' },
-          envelope: { attack: 0.005, decay: customDecay, sustain: 0 }
+          envelope: { attack: 0.005, decay: holdDecay, sustain: 0 }
         })
       })
+      try { (synth.noise as any).playbackRate = Math.pow(2, pitchOffset / 12) } catch (_) { }
       synth.triggerAttackRelease(duration, time, velocity)
       break
     }
@@ -407,11 +498,14 @@ function triggerDrum(
         return new Tone.MembraneSynth({
           pitchDecay: 0.01,
           octaves: track.drumCongaPitch ?? 2,
-          envelope: { attack: 0.005, decay: customDecay, sustain: 0, release: 0.1 }
+          envelope: { attack: 0.005, decay: holdDecay, sustain: 0, release: 0.1 },
+          ...padOctaveSet
         })
       })
       const congaNote = pitch === 12 ? 'E2' : 'G2'
-      synth.triggerAttackRelease(tunedFreq(congaNote, pitchOffset), duration, time, velocity)
+      const f = tunedFreq(congaNote, pitchOffset)
+      synth.triggerAttackRelease(f, duration, time, velocity)
+      applySlide(synth, f)
       break
     }
     case 14: { // Claves
@@ -419,19 +513,23 @@ function triggerDrum(
         return new Tone.MembraneSynth({
           pitchDecay: 0.01,
           octaves: track.drumClavesPitch ?? 1,
-          envelope: { attack: 0.001, decay: customDecay, sustain: 0, release: 0.1 }
+          envelope: { attack: 0.001, decay: holdDecay, sustain: 0, release: 0.1 },
+          ...padOctaveSet
         })
       })
-      synth.triggerAttackRelease(tunedFreq('C4', pitchOffset), duration, time, velocity)
+      const f = tunedFreq('C4', pitchOffset)
+      synth.triggerAttackRelease(f, duration, time, velocity)
+      applySlide(synth, f)
       break
     }
     case 15: { // Rimshot
       const synth = getPooledSynth(() => {
         return new Tone.NoiseSynth({
           noise: { type: track.drumRimshotTone !== undefined ? (track.drumRimshotTone > 0.5 ? 'brown' : 'white') : 'brown' },
-          envelope: { attack: 0.001, decay: customDecay, sustain: 0 }
+          envelope: { attack: 0.001, decay: holdDecay, sustain: 0 }
         })
       })
+      try { (synth.noise as any).playbackRate = Math.pow(2, pitchOffset / 12) } catch (_) { }
       synth.triggerAttackRelease(duration, time, velocity)
       break
     }
@@ -878,7 +976,26 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
       fadeIn: fadeInTicks > 0 ? fadeInTicks / noteTicksPerSecond : undefined,
       fadeOut: fadeOutTicks > 0 ? fadeOutTicks / noteTicksPerSecond : undefined
     }
-    triggerDrum(note.pitch, duration, start, velocity, trackInput, track, note.instrumentOverride as DrumKit, drumSynthsCache, drumOffset, note.pitchSlide, note.pitchSlideTime, drumOutput)
+    const drumSlide: DrumSlideOptions | undefined = laneNote.pitchSlide
+      ? {
+        targetPitchOffset: laneNote.pitchSlide,
+        slideTime: laneNote.pitchSlideTime,
+        ramp: laneNote.pitchSlideRamp,
+        customCurve: laneNote.pitchSlideCustomCurve
+      }
+      : undefined
+    // The same resolver the live preview uses, so a wobbling or sweeping pad leaves the bounce with
+    // the expression it had on the transport - and the sweep length comes from this note's own BPM.
+    const drumMod = resolveDrumHitModulation(laneNote, {
+      pad: note.pitch,
+      durationSeconds: duration,
+      tickToSeconds: ticks => ticks / noteTicksPerSecond,
+      centreCutoffHz: track.drumResonances?.[note.pitch]
+    })
+    triggerDrum(note.pitch, duration, start, velocity, trackInput, track, note.instrumentOverride as DrumKit,
+      drumSynthsCache, drumOffset, drumSlide,
+      { octaves: laneNote.octaves, resonance: laneNote.resonance, decay: laneNote.decay },
+      drumOutput, noteTicksPerSecond, drumMod)
   })
 }
 

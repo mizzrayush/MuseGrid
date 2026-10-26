@@ -142,6 +142,68 @@ namespace
                 peak = std::max(peak, (double)std::abs(buffer.getReadPointer(ch)[i]));
         return peak;
     }
+
+    // --- drum expression ------------------------------------------------------
+    // A hit is triggered through OfflineRenderer::dispatchNoteOn, the parser the live bridge and
+    // the offline bounce share, so these checks cover the JSON wiring and the DSP in one go.
+    juce::AudioBuffer<float> renderHit(const juce::String& eventJson, double seconds = 2.5)
+    {
+        AudioEngine engine;
+        engine.prepareForRate(44100.0, 128);
+        OfflineRenderer::dispatchNoteOn(engine, juce::JSON::parse(eventJson));
+
+        const int total = (int)(seconds * 44100.0);
+        juce::AudioBuffer<float> buffer(2, total);
+        buffer.clear();
+        for (int offset = 0; offset < total; offset += 512)
+        {
+            const int n = juce::jmin(512, total - offset);
+            float* const ptrs[2] = { buffer.getWritePointer(0, offset), buffer.getWritePointer(1, offset) };
+            engine.renderBlock(ptrs, 2, n);
+        }
+        return buffer;
+    }
+
+    juce::String drumEvent(double midiPitch, double durationSeconds, const juce::String& expression = {})
+    {
+        return "{\"type\":\"noteOn\",\"trackId\":\"drums\",\"instrument\":\"drum\",\"pitch\":"
+             + juce::String((int)midiPitch) + ",\"velocity\":0.9,\"duration\":" + juce::String(durationSeconds)
+             + (expression.isEmpty() ? juce::String() : "," + expression) + "}";
+    }
+
+    double peakInBuffer(const juce::AudioBuffer<float>& buffer, double fromSeconds, double toSeconds)
+    {
+        const int start = juce::jlimit(0, buffer.getNumSamples(), (int)(fromSeconds * 44100.0));
+        const int end = juce::jlimit(start, buffer.getNumSamples(), (int)(toSeconds * 44100.0));
+        double peak = 0.0;
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            for (int i = start; i < end; ++i)
+                peak = std::max(peak, (double)std::abs(buffer.getReadPointer(ch)[i]));
+        return peak;
+    }
+
+    /** FNV-1a over the raw sample bits: equal digests mean the two renders are bit-identical. */
+    juce::uint32 digest(const juce::AudioBuffer<float>& buffer, double upToSeconds = -1.0)
+    {
+        const int limit = upToSeconds < 0.0
+            ? buffer.getNumSamples()
+            : juce::jlimit(0, buffer.getNumSamples(), (int)(upToSeconds * 44100.0));
+        juce::uint32 hash = 2166136261u;
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        {
+            const auto* data = buffer.getReadPointer(ch);
+            for (int i = 0; i < limit; ++i)
+            {
+                const auto* bytes = reinterpret_cast<const juce::uint8*>(&data[i]);
+                for (size_t b = 0; b < sizeof(float); ++b)
+                {
+                    hash ^= bytes[b];
+                    hash *= 16777619u;
+                }
+            }
+        }
+        return hash;
+    }
 }
 
 int main()
@@ -231,6 +293,64 @@ int main()
     check(offsetResult.success, "range starting mid-measure renders");
     check(offsetDownbeatPeak > offsetFirstPeak * 2.5,
           "click stays on the project beat grid instead of restarting at the range start");
+
+    // --- drum expression --------------------------------------------------------
+    std::printf("\n== Drum expression ==\n");
+    {
+        const auto hatBrief   = renderHit(drumEvent(42, 0.05));
+        const auto hatNoLen   = renderHit(drumEvent(42, 0.0));
+        const auto hatHeld    = renderHit(drumEvent(42, 1.0));
+        const auto crashBrief = renderHit(drumEvent(49, 0.05));
+        const auto crashNoLen = renderHit(drumEvent(49, 0.0));
+        const auto kickBrief  = renderHit(drumEvent(36, 0.05));
+        const auto kickNoLen  = renderHit(drumEvent(36, 0.0));
+        const auto kickHeld   = renderHit(drumEvent(36, 0.6));
+        const auto kickWob    = renderHit(drumEvent(36, 0.6, "\"vibratoDepth\":600,\"vibratoRate\":6"));
+        const auto kickLong   = renderHit(drumEvent(36, 1.5));
+        const auto kickGap    = renderHit(drumEvent(36, 1.5, "\"vibratoDepth\":600,\"vibratoRate\":6,\"vibratoDelay\":0.9"));
+        const auto hatWob     = renderHit(drumEvent(42, 1.0, "\"vibratoDepth\":600,\"vibratoRate\":6"));
+        const auto hatSweep   = renderHit(drumEvent(42, 1.0, "\"filterStart\":400,\"filterEnd\":14000"));
+
+        // A lane-driven cutoff arrives as start/end plus the lane's own normalised shape, so the
+        // shape has to be read as well as the two ends.
+        juce::String laneShape = "\"filterStart\":400,\"filterEnd\":14000,\"filterCurve\":[";
+        for (int i = 0; i < musegrid::NoteExpression::kCurvePoints; ++i)
+        {
+            const double wobble = 0.5 * (1.0 - std::cos(2.0 * juce::MathConstants<double>::pi * (double)i / 32.0));
+            laneShape += juce::String(wobble, 6) + (i + 1 == musegrid::NoteExpression::kCurvePoints ? "]" : ",");
+        }
+        const auto hatLane  = renderHit(drumEvent(42, 1.0, laneShape));
+        const auto hatDecay = renderHit(drumEvent(42, 0.05, "\"drumDecay\":0.9"));
+        const auto kickSlide = renderHit(drumEvent(36, 0.6, "\"slideSemitones\":-12"));
+        const auto hatQuiet = renderHit(drumEvent(42, 1.0, "\"gain\":0.5"));
+
+        check(digest(hatBrief) == digest(hatNoLen), "a note shorter than the kit decay leaves a hat bit-identical");
+        check(digest(kickBrief) == digest(kickNoLen), "a note shorter than the kit decay leaves a kick bit-identical");
+        check(digest(crashBrief) == digest(crashNoLen), "note length never truncates the crash's own decay");
+        check(peakInBuffer(crashNoLen, 0.8, 1.2) > 1.0e-4, "a 0.05 s note still rings the crash out");
+        check(peakInBuffer(hatBrief, 0.30, 0.60) < 1.0e-5, "an unheld closed hat is silent past its decay");
+        check(peakInBuffer(hatHeld, 0.30, 0.60) > 1.0e-3, "a 1 s note holds the closed hat on");
+        check(peakInBuffer(hatDecay, 0.30, 0.60) > 1.0e-3, "the pad decay slider still sets the hit length");
+        check(digest(kickWob) != digest(kickHeld), "pitch wobble changes a tonal pad");
+        check(std::abs(peakInBuffer(kickWob, 0.0, 0.6) - peakInBuffer(kickHeld, 0.0, 0.6)) < 0.02,
+              "wobble moves pitch, not level");
+        check(digest(kickGap, 0.85) == digest(kickLong, 0.85), "vibrato delay keeps the wobble off the attack");
+        check(digest(kickGap, 1.45) != digest(kickLong, 1.45), "and the wobble arrives once the delay has passed");
+        check(digest(hatWob) != digest(hatHeld), "the same wobble rides the cutoff on a filtered pad");
+        check(digest(hatSweep) != digest(hatHeld), "a tone sweep moves the filter across the hit");
+        check(digest(hatLane) != digest(hatSweep), "the lane's curve shape is followed, not only its ends");
+        check(digest(kickSlide) != digest(kickHeld), "per-note slide still bends the hit");
+        // Measured in the tail, well under the master limiter's ceiling: the attack transient of a
+        // held hat is loud enough for the limiter to make the chain non-linear.
+        const double quietTail = peakInBuffer(hatQuiet, 0.30, 0.60);
+        const double heldTail = peakInBuffer(hatHeld, 0.30, 0.60);
+        check(std::abs(quietTail / heldTail - 0.5) < 0.01, "per-note gain automation still scales the hit");
+
+        std::printf("  digests  hat-brief=%08X hat-held=%08X kick-wobble=%08X hat-sweep=%08X hat-lane=%08X\n",
+                    (unsigned)digest(hatBrief), (unsigned)digest(hatHeld), (unsigned)digest(kickWob),
+                    (unsigned)digest(hatSweep), (unsigned)digest(hatLane));
+        std::printf("  tail peak  gain-half=%.6f of held=%.6f\n", quietTail, heldTail);
+    }
 
     wav24.deleteFile();
     wav16.deleteFile();

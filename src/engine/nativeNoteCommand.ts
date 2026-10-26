@@ -87,23 +87,35 @@ export function buildNativeNoteOnCommand(src: NoteCommandSource): NativeNoteOnCo
     }
   }
 
+  // The Drum Designer tunes pads on the track instead of per note, and four of those records were
+  // read by nothing. Resolving them as the note's fallback is what makes the panel agree with
+  // playback; a note that carries its own value still wins.
+  const isDrumVoice = effectiveInstrument === 'drum'
+  const padPitchOffset = isDrumVoice ? (track?.drumPitches?.[startMidi] ?? 0) : 0
+  const padDetuneCents = isDrumVoice ? (track?.drumDetunes?.[startMidi] ?? 0) : 0
+  const padSlideSemitones = isDrumVoice ? (track?.drumSlides?.[startMidi] ?? 0) : 0
+
   let endMidi: number | undefined = undefined
   let slideTime = 0
   if (pitchEnd !== undefined) {
     endMidi = typeof pitchEnd === 'number' ? pitchEnd : Tone.Frequency(pitchEnd).toMidi()
   }
-  if (noteData?.pitchSlide) {
-    endMidi = startMidi + noteData.pitchSlide
+  const slideSemitones = noteData?.pitchSlide ?? padSlideSemitones
+  if (slideSemitones) {
+    endMidi = startMidi + slideSemitones
+    // A pad's own slide length is stored in ticks, and the designer defaults it to 120.
+    const slideTicks = noteData?.pitchSlide ? noteData.pitchSlideTime : (track?.drumSlideTimes?.[startMidi] ?? 120)
     // 0 ticks means "glide across the whole note"; the JUCE voice applies that fallback.
-    slideTime = noteData.pitchSlideTime ? Tone.Time(noteData.pitchSlideTime + 'i').toSeconds() : 0
+    slideTime = slideTicks ? Tone.Time(slideTicks + 'i').toSeconds() : 0
   }
 
   const durSec = typeof duration === 'number' ? duration : Tone.Time(duration).toSeconds()
   const trackGlideStyle = useStore.getState().glideStyle
-  const hasSlide = !!noteData?.pitchSlide
+  const hasSlide = !!slideSemitones
   const hasFilterSweep = noteData?.filterStart !== undefined
 
-  const totalPitchOffset = (noteData?.pitchOffset ?? 0) + (detune ? detune / 100 : 0) + (track?.transpose ?? 0) + (src.extraPitchOffset ?? 0)
+  const totalPitchOffset = (noteData?.pitchOffset ?? 0) + padPitchOffset + (detune ? detune / 100 : 0)
+    + (padDetuneCents / 100) + (track?.transpose ?? 0) + (src.extraPitchOffset ?? 0)
 
   const rawOverride = noteData?.instrumentOverride
   let overrideKind: 'preset' | 'kit' | 'vst3' | undefined
@@ -153,10 +165,12 @@ export function buildNativeNoteOnCommand(src: NoteCommandSource): NativeNoteOnCo
     fxChainEffects: fxChain?.effects,
     lyric: noteData?.lyric || 'a',
     pitchOffset: totalPitchOffset,
-    drumDecay: noteData?.decay ?? -1,
-    slideSemitones: noteData?.pitchSlide ?? 0,
-    punchOctaves: noteData?.octaves ?? -1,
-    resonanceHz: noteData?.resonance ?? -1,
+    // JUCE reads -1 as "use the kit default". The designer tunes pads on the track, not notes,
+    // so the pad records have to be the fallback or native ignores what the panel shows.
+    drumDecay: noteData?.decay ?? track?.drumDecays?.[startMidi] ?? -1,
+    slideSemitones: slideSemitones ?? 0,
+    punchOctaves: noteData?.octaves ?? track?.drumOctaves?.[startMidi] ?? -1,
+    resonanceHz: noteData?.resonance ?? track?.drumResonances?.[startMidi] ?? -1,
     morphFadeIn: noteData?.morphFadeIn ? Tone.Time(noteData.morphFadeIn + 'i').toSeconds() : undefined,
     morphFadeOut: noteData?.morphFadeOut ? Tone.Time(noteData.morphFadeOut + 'i').toSeconds() : undefined,
     pan: noteData?.pan !== undefined ? Math.max(-1, Math.min(1, noteData.pan)) : undefined,

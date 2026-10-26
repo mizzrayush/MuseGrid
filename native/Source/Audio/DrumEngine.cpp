@@ -88,7 +88,7 @@ static inline int normalizeDrumPad(int pad)
     return ((pad % 16) + 16) % 16;
 }
 
-void DrumEngine::triggerHit(int drumPad, float velocity, float pitchOffsetSemitones, float customDecaySeconds, float slideSemitones, float slideTime, float punchOctaves, float resonanceHz, const juce::String& kitOverride, int fxChainId, const musegrid::NoteExpression& expression)
+void DrumEngine::triggerHit(int drumPad, float velocity, float pitchOffsetSemitones, float customDecaySeconds, float slideSemitones, float slideTime, float punchOctaves, float resonanceHz, const juce::String& kitOverride, int fxChainId, const musegrid::NoteExpression& expression, const HitModulation& modulation)
 {
     const KitType kit = kitOverride.isNotEmpty() ? parseKitName(kitOverride) : currentKit;
     // Find free or oldest voice
@@ -265,6 +265,26 @@ void DrumEngine::triggerHit(int drumPad, float velocity, float pitchOffsetSemito
     {
         v.startFreq = v.endFreq * std::pow(2.0f, punchOctaves);
     }
+
+    // Extend-only: a hit rings at least as long as the note that triggered it, never shorter, so
+    // drawing a long note holds the pad out instead of cutting it at the kit's own decay.
+    if (modulation.holdSeconds > v.durationSeconds)
+        v.durationSeconds = modulation.holdSeconds;
+
+    v.expression = expression;
+    v.ridesCutoff = padRidesCutoff(v.drumPad);
+    v.vibratoDepthCents = juce::jmax(0.0f, modulation.vibratoDepthCents);
+    v.vibratoRateHz = modulation.vibratoRateHz > 0.0f ? modulation.vibratoRateHz : 5.0f;
+    v.vibratoPhase = 0.0;
+    v.vibratoElapsed = 0.0f;
+
+    // A tone sweep without its own length spans the whole hit, which is how a cutoff automation
+    // lane arrives: the lane already baked the shape into expression.filterCurve.
+    v.hasToneSweep = modulation.filterStartHz > 0.0f && modulation.filterEndHz > 0.0f;
+    v.sweepStartHz = modulation.filterStartHz;
+    v.sweepEndHz = modulation.filterEndHz;
+    v.sweepSeconds = modulation.filterSweepSeconds > 0.001f ? modulation.filterSweepSeconds : v.durationSeconds;
+    v.sweepElapsed = 0.0f;
 }
 
 void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, float trackPan, float trackVol, int fxChainId)
@@ -294,6 +314,42 @@ void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
             const float slideMultiplier = (v.slideSemitones != 0.0f && v.slideTimeSeconds > 0.001f)
                 ? std::pow(2.0f, (v.slideSemitones * juce::jlimit(0.0f, 1.0f, t / v.slideTimeSeconds)) / 12.0f)
                 : 1.0f;
+
+            // One LFO per hit. Depth is cents like every other voice, so the same ratio lands on
+            // the oscillator pitch or on the filter cutoff, whichever carries this pad's tone.
+            v.vibratoElapsed += sampleTime;
+            float vibSemitones = 0.0f;
+            if (v.vibratoDepthCents > 0.001f && v.vibratoElapsed >= v.expression.vibratoDelaySeconds)
+            {
+                float depth = v.vibratoDepthCents;
+                if (v.expression.vibratoFadeSeconds > 0.0001f)
+                    depth *= juce::jlimit(0.0f, 1.0f, (v.vibratoElapsed - v.expression.vibratoDelaySeconds)
+                                                                     / v.expression.vibratoFadeSeconds);
+                if (depth > 0.001f)
+                {
+                    v.vibratoPhase += 2.0 * juce::MathConstants<double>::pi * (double)v.vibratoRateHz * sampleTime;
+                    if (v.vibratoPhase > 2.0 * juce::MathConstants<double>::pi)
+                        v.vibratoPhase -= 2.0 * juce::MathConstants<double>::pi;
+                    vibSemitones = (depth / 100.0f) * musegrid::lfoWaveform(v.expression.vibratoWave, v.vibratoPhase);
+                }
+            }
+            const float vibRatio = vibSemitones != 0.0f ? std::pow(2.0f, vibSemitones / 12.0f) : 1.0f;
+
+            // Only the filtered pads read this; everywhere else the cutoff stays where the
+            // resonance control left it.
+            float cutoffHz = v.filterCutoffHz;
+            if (v.hasToneSweep)
+            {
+                v.sweepElapsed += sampleTime;
+                const float shape = musegrid::sampleCurveLut(v.expression.filterCurve, v.expression.filterCurveSize,
+                                                             juce::jlimit(0.0f, 1.0f, v.sweepElapsed / v.sweepSeconds));
+                cutoffHz = v.sweepStartHz + (v.sweepEndHz - v.sweepStartHz) * shape;
+            }
+            if (v.ridesCutoff && vibRatio != 1.0f)
+                cutoffHz *= vibRatio;
+            const float cutoffAlpha = juce::jlimit(0.02f, 0.95f,
+                (float)(2.0 * juce::MathConstants<double>::pi * (double)cutoffHz * sampleTime));
+
             float sample = 0.0f;
 
             switch (v.drumPad)
@@ -301,7 +357,7 @@ void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
                 case 0: // Kick Drum
                 {
                     const float pitchEnv = std::exp(-t / v.pitchDecay);
-                    const float freq = (v.endFreq + (v.startFreq - v.endFreq) * pitchEnv) * slideMultiplier;
+                    const float freq = (v.endFreq + (v.startFreq - v.endFreq) * pitchEnv) * slideMultiplier * vibRatio;
                     v.phase += 2.0 * juce::MathConstants<double>::pi * freq * sampleTime;
                     sample = (float)std::sin(v.phase) * padAmp;
                     // Add subtle click transient
@@ -311,7 +367,7 @@ void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
 
                 case 1: // Snare Drum
                 {
-                    const float bodyPitch = (v.endFreq + (v.startFreq - v.endFreq) * std::exp(-t / v.pitchDecay)) * slideMultiplier;
+                    const float bodyPitch = (v.endFreq + (v.startFreq - v.endFreq) * std::exp(-t / v.pitchDecay)) * slideMultiplier * vibRatio;
                     v.phase += 2.0 * juce::MathConstants<double>::pi * bodyPitch * sampleTime;
                     const float body = (float)std::sin(v.phase) * padAmp * 0.6f;
                     const float noise = nextNoise(v.noiseSeed) * padAmp * 0.7f;
@@ -328,7 +384,7 @@ void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
                     float metalSum = 0.0f;
                     for (int k = 0; k < 6; ++k)
                     {
-                        const float baseF = v.startFreq;
+                        const float baseF = v.startFreq * slideMultiplier;
                         v.metalPhases[k] += 2.0 * juce::MathConstants<double>::pi * (baseF * metalRatios[k]) * sampleTime;
                         if (v.metalPhases[k] >= 2.0 * juce::MathConstants<double>::pi)
                             v.metalPhases[k] -= 2.0 * juce::MathConstants<double>::pi;
@@ -336,8 +392,7 @@ void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
                     }
                     const float noise = nextNoise(v.noiseSeed) * 0.4f;
                     const float combined = metalSum + noise;
-                    const float filterAlpha = juce::jlimit(0.02f, 0.95f, (float)(2.0 * juce::MathConstants<double>::pi * (double)v.filterCutoffHz * sampleTime));
-                    v.filterState += filterAlpha * (combined - v.filterState);
+                    v.filterState += cutoffAlpha * (combined - v.filterState);
                     sample = (combined - v.filterState) * padAmp * 0.85f;
                     break;
                 }
@@ -352,8 +407,7 @@ void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
                     else clapEnv = std::exp(-(t - 0.036f) / 0.06f);
 
                     const float noise = nextNoise(v.noiseSeed);
-                    const float filterAlpha = juce::jlimit(0.02f, 0.95f, (float)(2.0 * juce::MathConstants<double>::pi * (double)v.filterCutoffHz * sampleTime));
-                    v.filterState += filterAlpha * (noise - v.filterState);
+                    v.filterState += cutoffAlpha * (noise - v.filterState);
                     sample = v.filterState * clapEnv * padAmp * 0.8f;
                     break;
                 }
@@ -362,7 +416,7 @@ void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
                 case 6:
                 case 7:
                 {
-                    const float freq = (v.endFreq + (v.startFreq - v.endFreq) * std::exp(-t / v.pitchDecay)) * slideMultiplier;
+                    const float freq = (v.endFreq + (v.startFreq - v.endFreq) * std::exp(-t / v.pitchDecay)) * slideMultiplier * vibRatio;
                     v.phase += 2.0 * juce::MathConstants<double>::pi * freq * sampleTime;
                     sample = (float)std::sin(v.phase) * padAmp * 0.8f;
                     break;
@@ -371,8 +425,8 @@ void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
                 case 10: // Cowbell
                 {
                     // Dual pulse waves with dynamically transposed and slid frequencies
-                    v.phase += 2.0 * juce::MathConstants<double>::pi * (double)(v.startFreq * slideMultiplier) * sampleTime;
-                    v.phase2 += 2.0 * juce::MathConstants<double>::pi * (double)(v.endFreq * slideMultiplier) * sampleTime;
+                    v.phase += 2.0 * juce::MathConstants<double>::pi * (double)(v.startFreq * slideMultiplier * vibRatio) * sampleTime;
+                    v.phase2 += 2.0 * juce::MathConstants<double>::pi * (double)(v.endFreq * slideMultiplier * vibRatio) * sampleTime;
                     const float sq1 = std::sin(v.phase) > 0.0 ? 1.0f : -1.0f;
                     const float sq2 = std::sin(v.phase2) > 0.0 ? 1.0f : -1.0f;
                     sample = (sq1 + sq2) * 0.4f * padAmp;
@@ -382,8 +436,7 @@ void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
                 case 11: // Tambourine
                 {
                     const float noise = nextNoise(v.noiseSeed);
-                    const float filterAlpha = juce::jlimit(0.02f, 0.95f, (float)(2.0 * juce::MathConstants<double>::pi * (double)v.filterCutoffHz * sampleTime));
-                    v.filterState += filterAlpha * (noise - v.filterState);
+                    v.filterState += cutoffAlpha * (noise - v.filterState);
                     sample = v.filterState * padAmp * 0.6f;
                     break;
                 }
@@ -391,7 +444,7 @@ void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
                 case 12: // Lo-Conga
                 case 13: // Hi-Conga
                 {
-                    const float freq = (v.endFreq + (v.startFreq - v.endFreq) * std::exp(-t / v.pitchDecay)) * slideMultiplier;
+                    const float freq = (v.endFreq + (v.startFreq - v.endFreq) * std::exp(-t / v.pitchDecay)) * slideMultiplier * vibRatio;
                     v.phase += 2.0 * juce::MathConstants<double>::pi * freq * sampleTime;
                     sample = (float)std::sin(v.phase) * padAmp * 0.85f;
                     break;
@@ -399,7 +452,7 @@ void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
 
                 case 14: // Claves
                 {
-                    v.phase += 2.0 * juce::MathConstants<double>::pi * (double)v.startFreq * sampleTime;
+                    v.phase += 2.0 * juce::MathConstants<double>::pi * (double)(v.startFreq * slideMultiplier * vibRatio) * sampleTime;
                     sample = (float)std::sin(v.phase) * padAmp * 0.7f;
                     break;
                 }
@@ -408,7 +461,7 @@ void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
                 {
                     const float noise = nextNoise(v.noiseSeed);
                     const float noiseBurst = noise * (t < 0.01f ? 1.0f - t / 0.01f : 0.0f);
-                    const float bodyPitch = v.endFreq + (v.startFreq - v.endFreq) * std::exp(-t / v.pitchDecay);
+                    const float bodyPitch = (v.endFreq + (v.startFreq - v.endFreq) * std::exp(-t / v.pitchDecay)) * slideMultiplier * vibRatio;
                     v.phase += 2.0 * juce::MathConstants<double>::pi * bodyPitch * sampleTime;
                     const float body = (float)std::sin(v.phase) * 0.6f;
                     sample = (noiseBurst * 0.8f + body) * padAmp * 0.75f;

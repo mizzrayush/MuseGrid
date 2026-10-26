@@ -346,9 +346,10 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   const automationLane = automationLanes[targetTrackId]
   const laneIsFormula = automationLane?.source === 'formula'
   const laneTargetKind = parseAutomationTarget(automationTarget)?.kind ?? 'builtin'
-  // Each engine only follows the parameters it actually reads, so a drum lane never offers LFOs.
+  // Each engine only follows the parameters it actually reads. A pad now wobbles and sweeps in all
+  // four paths, so a drum lane gets those two plus pitch; tremolo stays synth-only by design.
   const exprTargets: ExpressionLaneTarget[] = instrument === 'drum'
-    ? ['filterCutoff', 'detune', 'glideAmount']
+    ? ['filterCutoff', 'vibratoDepth', 'vibratoRate', 'detune', 'glideAmount']
     : instrument === 'vst3'
       ? ['detune', 'glideAmount']
       : EXPRESSION_LANE_TARGETS

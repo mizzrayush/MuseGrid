@@ -213,25 +213,12 @@ float SynthVoice::nextNoise()
 float SynthVoice::sampleCurve(const std::array<float, musegrid::NoteExpression::kCurvePoints>& curve,
                               int count, float t)
 {
-    if (count < 2) return juce::jlimit(0.0f, 1.0f, t);
-
-    const int points = juce::jmin(count, musegrid::NoteExpression::kCurvePoints);
-    const float pos = juce::jlimit(0.0f, 1.0f, t) * (float)(points - 1);
-    const int i0 = (int)pos;
-    const int i1 = juce::jmin(i0 + 1, points - 1);
-    const float frac = pos - (float)i0;
-    const float value = curve[(size_t)i0] + (curve[(size_t)i1] - curve[(size_t)i0]) * frac;
-    return juce::jlimit(0.0f, 1.0f, value);
+    return musegrid::sampleCurveLut(curve, count, t);
 }
 
 float SynthVoice::waveform(int wave, double phase)
 {
-    switch (wave)
-    {
-        case 1:  return (float)(2.0 / juce::MathConstants<double>::pi * std::asin(std::sin(phase)));
-        case 2:  return std::sin(phase) >= 0.0 ? 1.0f : -1.0f;
-        default: return (float)std::sin(phase);
-    }
+    return musegrid::lfoWaveform(wave, phase);
 }
 
 void SynthVoice::renderBlock(float* leftOut, float* rightOut, int numSamples, float trackPan, float trackVol)

@@ -1414,6 +1414,16 @@ void AudioEngine::playNote(const juce::String& trackId,
 
     juce::String inst = targetTrack->instrument.isNotEmpty() ? targetTrack->instrument : "synth";
 
+    // A drum hit takes the same note-level fields a synth voice gets: the note length gates how
+    // long the pad rings, and the vibrato/filter fields are the hit's own modulation.
+    DrumEngine::HitModulation drumModulation;
+    drumModulation.holdSeconds = durationSeconds;
+    drumModulation.vibratoDepthCents = vibratoDepthCents;
+    drumModulation.vibratoRateHz = vibratoRateHz;
+    drumModulation.filterStartHz = filterStartHz;
+    drumModulation.filterEndHz = filterEndHz;
+    drumModulation.filterSweepSeconds = filterSweepTimeSeconds;
+
     // Per-note sound override takes precedence over the track instrument.
     if (expression.overrideKind.isNotEmpty() && expression.overrideValue.isNotEmpty())
     {
@@ -1509,7 +1519,7 @@ void AudioEngine::playNote(const juce::String& trackId,
             targetTrack->drumEngine.triggerHit((int)pitchMidi, velocity, pitchOffsetSemitones,
                                                drumDecay, slideSemitones, slideTimeSeconds,
                                                punchOctaves, resonanceHz, expression.overrideValue,
-                                               expression.fxChainId, expression);
+                                               expression.fxChainId, expression, drumModulation);
             return;
         }
 
@@ -1659,7 +1669,7 @@ void AudioEngine::playNote(const juce::String& trackId,
     }
     else if (inst == "drum")
     {
-        targetTrack->drumEngine.triggerHit((int)pitchMidi, velocity, pitchOffsetSemitones, drumDecay, slideSemitones, slideTimeSeconds, punchOctaves, resonanceHz, {}, expression.fxChainId, expression);
+        targetTrack->drumEngine.triggerHit((int)pitchMidi, velocity, pitchOffsetSemitones, drumDecay, slideSemitones, slideTimeSeconds, punchOctaves, resonanceHz, {}, expression.fxChainId, expression, drumModulation);
     }
     else if (inst == "physical")
     {

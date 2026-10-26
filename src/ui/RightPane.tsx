@@ -1866,6 +1866,49 @@ export const RightPane: React.FC = () => {
                       suffix=" ticks"
                       onChange={val => handleMPEChange('pitchSlideTime', val)}
                     />
+
+                    {/* Both engines curve a pad slide, so the shape the note asks for is set here. */}
+                    <SelectRow
+                      label="Slide Shape"
+                      value={commonPitchSlideRamp}
+                      options={[
+                        ...(commonPitchSlideRamp === 'mixed' ? [{ value: 'mixed', label: 'Mixed Ramps' }] : []),
+                        { value: 'linear', label: 'Linear' },
+                        { value: 'exponential', label: 'Exponential' },
+                        { value: 'logarithmic', label: 'Logarithmic' },
+                        { value: 'sigmoid', label: 'S-Curve (Sigmoid)' },
+                        { value: 'custom', label: 'Custom Equation' }
+                      ]}
+                      onChange={val => handleMPEChange('pitchSlideRamp', val === 'mixed' ? undefined : val)}
+                    />
+                    {commonPitchSlideRamp === 'custom' && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginTop: '2px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span style={{ fontSize: '10px', color: 'var(--text-muted)', fontWeight: 700 }}>CUSTOM MATH EQUATION</span>
+                          <span style={{ fontSize: '9px', color: '#888' }}>var: t (0 to 1)</span>
+                        </div>
+                        <input
+                          type="text"
+                          value={commonPitchSlideCustomCurve === 'mixed' ? '' : commonPitchSlideCustomCurve}
+                          placeholder="e.g. t * t, Math.sin(t * Math.PI / 2)"
+                          onChange={e => handleMPEChange('pitchSlideCustomCurve', e.target.value)}
+                          onMouseDown={e => e.stopPropagation()}
+                          onMouseUp={e => e.stopPropagation()}
+                          onClick={e => e.stopPropagation()}
+                          onKeyDown={e => e.stopPropagation()}
+                          style={{
+                            background: '#191b21',
+                            border: '1px solid rgba(255,255,255,0.08)',
+                            color: '#00e6ff',
+                            borderRadius: '4px',
+                            padding: '6px 10px',
+                            fontSize: '11px',
+                            fontFamily: 'monospace',
+                            outline: 'none'
+                          }}
+                        />
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -2181,6 +2224,106 @@ export const RightPane: React.FC = () => {
                 />
               </div>
 
+            </div>
+          )}
+
+          {/* Drum expression: the two levers a hit can actually play - a tone wobble and a one-shot
+              sweep. Slide target and time live in Drum Pitch Tuning above, and tremolo plus glide
+              voice routing are synth-only, so neither is offered here. */}
+          {trackType === 'drum' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', borderTop: '1px solid rgba(255,255,255,0.04)', paddingTop: '16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <IconTimeline size={12} style={{ color: '#ff3366' }} />
+                <label style={{ fontSize: '11px', fontWeight: 700, color: '#ff3366', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Infinite Expression (MPE)</label>
+              </div>
+
+              {/* Pad wobble */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', background: 'rgba(255,255,255,0.02)', padding: '10px', borderRadius: '6px' }}>
+                <span style={{ fontSize: '10px', fontWeight: 800, color: 'var(--text-muted)' }}>PAD WOBBLE (VIBRATO)</span>
+                <SliderRow
+                  label="Depth"
+                  value={commonVibratoDepth === 'mixed' ? 0 : commonVibratoDepth}
+                  min={0} max={1200} step={1}
+                  color="#ffcc00" suffix="ct"
+                  onChange={val => handleMPEChange('vibratoDepth', val === 0 ? undefined : val)}
+                />
+                <SliderRow
+                  label="Rate"
+                  value={commonVibratoRate === 'mixed' ? 5 : commonVibratoRate}
+                  min={0.01} max={40} step={0.01}
+                  color="#ffcc00" suffix="Hz"
+                  onChange={val => handleMPEChange('vibratoRate', val)}
+                />
+                <SliderRow
+                  label="Delay"
+                  value={commonVibratoDelay === 'mixed' ? 0 : commonVibratoDelay}
+                  min={0} max={2000} step={1}
+                  color="#ffcc00" suffix=" ms"
+                  onChange={val => handleMPEChange('vibratoDelay', val === 0 ? undefined : val)}
+                />
+                <SliderRow
+                  label="Fade In"
+                  value={commonVibratoFade === 'mixed' ? 0 : commonVibratoFade}
+                  min={0} max={2000} step={1}
+                  color="#ffcc00" suffix=" ms"
+                  onChange={val => handleMPEChange('vibratoFade', val === 0 ? undefined : val)}
+                />
+                <SelectRow
+                  label="Waveform"
+                  value={commonVibratoWave}
+                  options={[
+                    ...(commonVibratoWave === 'mixed' ? [{ value: 'mixed', label: 'Mixed' }] : []),
+                    { value: 'sine', label: 'Sine' },
+                    { value: 'triangle', label: 'Triangle' },
+                    { value: 'square', label: 'Square' }
+                  ]}
+                  onChange={val => {
+                    if (val === 'mixed') return
+                    handleMPEChange('vibratoWave', val)
+                  }}
+                />
+              </div>
+
+              {/* Tone sweep */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', background: 'rgba(255,255,255,0.02)', padding: '10px', borderRadius: '6px' }}>
+                <span style={{ fontSize: '10px', fontWeight: 800, color: 'var(--text-muted)' }}>TONE SWEEP (WAH)</span>
+                <SliderRow
+                  label="Start Freq"
+                  value={commonFilterStart === 'mixed' ? 20000 : commonFilterStart}
+                  min={20} max={20000} step={100}
+                  color="#4dabf7" suffix="Hz"
+                  onChange={val => handleMPEChange('filterStart', val >= 20000 ? undefined : val)}
+                />
+                <SliderRow
+                  label="End Freq"
+                  value={commonFilterEnd === 'mixed' ? 20000 : commonFilterEnd}
+                  min={20} max={20000} step={100}
+                  color="#4dabf7" suffix="Hz"
+                  onChange={val => handleMPEChange('filterEnd', val)}
+                />
+                <SliderRow
+                  label="Sweep Duration"
+                  value={commonFilterSweepTime === 'mixed' ? 48 : commonFilterSweepTime}
+                  min={0} max={7680} step={1}
+                  color="#4dabf7" suffix=" ticks"
+                  onChange={val => handleMPEChange('filterSweepTime', val)}
+                />
+                <SelectRow
+                  label="Sweep Shape"
+                  value={commonFilterSweepRamp}
+                  options={[
+                    ...(commonFilterSweepRamp === 'mixed' ? [{ value: 'mixed', label: 'Mixed Ramps' }] : []),
+                    { value: 'linear', label: 'Linear' },
+                    { value: 'exponential', label: 'Exponential' },
+                    { value: 'logarithmic', label: 'Logarithmic' },
+                    { value: 'sigmoid', label: 'S-Curve (Sigmoid)' }
+                  ]}
+                  onChange={val => {
+                    if (val === 'mixed') return
+                    handleMPEChange('filterSweepRamp', val)
+                  }}
+                />
+              </div>
             </div>
           )}
 

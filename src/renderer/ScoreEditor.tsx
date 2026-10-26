@@ -89,6 +89,7 @@ export default function ScoreEditor() {
   const tracks = useStore(state => state.tracks)
   const notes = useStore(state => state.notes)
   const activeTrackId = useStore(state => state.activeTrackId)
+  const readOnlyMode = useStore(state => state.readOnlyMode)
   const addNote = useStore(state => state.addNote)
   const removeNote = useStore(state => state.removeNote)
   const updateNote = useStore(state => state.updateNote)
@@ -133,7 +134,9 @@ export default function ScoreEditor() {
 
   // Timing limits & pagination
   const beatsPerMeasure = parseInt(sigNum) || 4
-  const ticksPerMeasure = beatsPerMeasure * 192
+  const beatType = parseInt(sigDen) || 4
+  const ticksPerBeat = beatType === 8 ? 96 : (beatType === 2 ? 384 : 192)
+  const ticksPerMeasure = beatsPerMeasure * ticksPerBeat
   const measuresPerSystem = 4
   const ticksPerSystem = ticksPerMeasure * measuresPerSystem
 
@@ -254,18 +257,18 @@ export default function ScoreEditor() {
     const existingNote = trackNotes.find(n => n.pitch === hoverPos.pitch && Math.abs(n.time - hoverPos.time) < 12)
 
     if (existingNote) {
-      // Select if not selected, otherwise delete
+      // Select if not selected, otherwise delete (unless read-only)
       const isSelected = selectedNoteIds.includes(existingNote.id)
       if (!isSelected) {
         setSelectedNoteIds([existingNote.id])
         setIsRightPaneVisible(true)
         setNoteInspectorEnabled(true)
-      } else {
+      } else if (!readOnlyMode) {
         useStore.getState().commitHistory()
         removeNote(existingNote.id)
         setSelectedNoteIds([])
       }
-    } else {
+    } else if (!readOnlyMode) {
       // Create new note
       useStore.getState().commitHistory()
       const id = Math.random().toString(36).substr(2, 9)
@@ -387,6 +390,22 @@ export default function ScoreEditor() {
 
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          {readOnlyMode && (
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '3px 8px',
+              borderRadius: '4px',
+              background: 'rgba(255, 170, 0, 0.12)',
+              border: '1px solid rgba(255, 170, 0, 0.4)',
+              color: '#ffa94d',
+              fontSize: '10px',
+              fontWeight: 800
+            }}>
+              READ ONLY (LOCKED)
+            </div>
+          )}
           {/* Note name display setting */}
           <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', userSelect: 'none' }}>
             <input
@@ -630,7 +649,7 @@ export default function ScoreEditor() {
                                 setSelectedNoteIds([note.id])
                                 setIsRightPaneVisible(true)
                                 setNoteInspectorEnabled(true)
-                              } else {
+                              } else if (!readOnlyMode) {
                                 useStore.getState().commitHistory()
                                 removeNote(note.id)
                                 setSelectedNoteIds([])
@@ -989,84 +1008,88 @@ export default function ScoreEditor() {
               >
                 <IconSliders size={12} style={{ color: '#4dabf7' }} /> Inspect Note
               </button>
-              {activeTrack?.instrument === 'synth' && (
+              {!readOnlyMode && (
                 <>
+                  {activeTrack?.instrument === 'synth' && (
+                    <>
+                      <button
+                        style={{
+                          width: '100%',
+                          padding: '8px 12px',
+                          background: 'none',
+                          border: 'none',
+                          color: '#00e6ff',
+                          cursor: 'pointer',
+                          textAlign: 'left',
+                          fontSize: '11px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          fontWeight: 600
+                        }}
+                        onClick={() => {
+                          const step = (activeTrack.edoDivision && activeTrack.edoDivision !== 12) ? (12 / activeTrack.edoDivision) : 1
+                          const n = notes.find(x => x.id === contextMenu.noteId)
+                          if (n) {
+                            updateNote(n.id, { pitch: Math.round((n.pitch + step) * 1000) / 1000 })
+                          }
+                          setContextMenu(null)
+                        }}
+                      >
+                        Tune +1 EDO Step ({activeTrack.edoDivision ? `${(1200 / activeTrack.edoDivision).toFixed(1)}¢` : '100¢'})
+                      </button>
+                      <button
+                        style={{
+                          width: '100%',
+                          padding: '8px 12px',
+                          background: 'none',
+                          border: 'none',
+                          color: '#00e6ff',
+                          cursor: 'pointer',
+                          textAlign: 'left',
+                          fontSize: '11px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          fontWeight: 600
+                        }}
+                        onClick={() => {
+                          const step = (activeTrack.edoDivision && activeTrack.edoDivision !== 12) ? (12 / activeTrack.edoDivision) : 1
+                          const n = notes.find(x => x.id === contextMenu.noteId)
+                          if (n) {
+                            updateNote(n.id, { pitch: Math.round((n.pitch - step) * 1000) / 1000 })
+                          }
+                          setContextMenu(null)
+                        }}
+                      >
+                        Tune -1 EDO Step ({activeTrack.edoDivision ? `${(1200 / activeTrack.edoDivision).toFixed(1)}¢` : '100¢'})
+                      </button>
+                    </>
+                  )}
                   <button
                     style={{
                       width: '100%',
                       padding: '8px 12px',
                       background: 'none',
                       border: 'none',
-                      color: '#00e6ff',
+                      color: '#ff6b6b',
                       cursor: 'pointer',
                       textAlign: 'left',
                       fontSize: '11px',
                       display: 'flex',
                       alignItems: 'center',
-                      gap: '8px',
-                      fontWeight: 600
+                      gap: '8px'
                     }}
                     onClick={() => {
-                      const step = (activeTrack.edoDivision && activeTrack.edoDivision !== 12) ? (12 / activeTrack.edoDivision) : 1
-                      const n = notes.find(x => x.id === contextMenu.noteId)
-                      if (n) {
-                        updateNote(n.id, { pitch: Math.round((n.pitch + step) * 1000) / 1000 })
-                      }
+                      useStore.getState().commitHistory()
+                      removeNote(contextMenu.noteId!)
                       setContextMenu(null)
                     }}
                   >
-                    Tune +1 EDO Step ({activeTrack.edoDivision ? `${(1200 / activeTrack.edoDivision).toFixed(1)}¢` : '100¢'})
-                  </button>
-                  <button
-                    style={{
-                      width: '100%',
-                      padding: '8px 12px',
-                      background: 'none',
-                      border: 'none',
-                      color: '#00e6ff',
-                      cursor: 'pointer',
-                      textAlign: 'left',
-                      fontSize: '11px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '8px',
-                      fontWeight: 600
-                    }}
-                    onClick={() => {
-                      const step = (activeTrack.edoDivision && activeTrack.edoDivision !== 12) ? (12 / activeTrack.edoDivision) : 1
-                      const n = notes.find(x => x.id === contextMenu.noteId)
-                      if (n) {
-                        updateNote(n.id, { pitch: Math.round((n.pitch - step) * 1000) / 1000 })
-                      }
-                      setContextMenu(null)
-                    }}
-                  >
-                    Tune -1 EDO Step ({activeTrack.edoDivision ? `${(1200 / activeTrack.edoDivision).toFixed(1)}¢` : '100¢'})
+                    <IconTrash size={12} style={{ color: '#ff6b6b' }} /> Delete Note
                   </button>
                 </>
               )}
-              <button
-                style={{
-                  width: '100%',
-                  padding: '8px 12px',
-                  background: 'none',
-                  border: 'none',
-                  color: '#ff6b6b',
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                  fontSize: '11px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px'
-                }}
-                onClick={() => {
-                  useStore.getState().commitHistory()
-                  removeNote(contextMenu.noteId!)
-                  setContextMenu(null)
-                }}
-              >
-                <IconTrash size={12} style={{ color: '#ff6b6b' }} /> Delete Note
-              </button>
             </>
           )}
         </div>

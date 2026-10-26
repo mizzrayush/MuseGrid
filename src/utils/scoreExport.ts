@@ -124,9 +124,45 @@ export function generateMusicXML(tracks: Track[], allNotes: Note[], bpm: number,
     }
   }
 
+  interface SlicedNote extends Note {
+    sliceTime: number;
+    sliceDuration: number;
+    tieStart?: boolean;
+    tieStop?: boolean;
+  }
+
+  const sliceNoteForMeasures = (note: Note, measureTicks: number): SlicedNote[] => {
+    const noteEnd = note.time + note.duration
+    const slices: SlicedNote[] = []
+    let curStart = note.time
+
+    while (curStart < noteEnd) {
+      const curMeasureIndex = Math.floor(curStart / measureTicks)
+      const measureEnd = (curMeasureIndex + 1) * measureTicks
+      const curEnd = Math.min(noteEnd, measureEnd)
+      const curDur = Math.max(1, curEnd - curStart)
+
+      const isFirst = curStart === note.time
+      const isLast = curEnd === noteEnd
+
+      slices.push({
+        ...note,
+        sliceTime: curStart,
+        sliceDuration: curDur,
+        tieStart: !isLast,
+        tieStop: !isFirst
+      })
+
+      curStart = curEnd
+    }
+
+    return slices
+  }
+
   tracks.forEach((track, idx) => {
     xml += `  <part id="P${idx + 1}">\n`
-    const trackNotes = allNotes.filter(n => n.trackId === track.id)
+    const rawTrackNotes = allNotes.filter(n => n.trackId === track.id)
+    const trackNotes = rawTrackNotes.flatMap(n => sliceNoteForMeasures(n, ticksPerMeasure))
 
     for (let m = 0; m < totalMeasures; m++) {
       const measureNumber = m + 1
@@ -168,13 +204,13 @@ export function generateMusicXML(tracks: Track[], allNotes: Note[], bpm: number,
       }
 
       // Filter notes starting in this measure
-      const measureNotes = trackNotes.filter(n => n.time >= startTick && n.time < endTick)
+      const measureNotes = trackNotes.filter(n => n.sliceTime >= startTick && n.sliceTime < endTick)
 
       // Group by start time
       const chordGroups: Record<number, typeof trackNotes> = {}
       measureNotes.forEach(note => {
-        if (!chordGroups[note.time]) chordGroups[note.time] = []
-        chordGroups[note.time].push(note)
+        if (!chordGroups[note.sliceTime]) chordGroups[note.sliceTime] = []
+        chordGroups[note.sliceTime].push(note)
       })
 
       const sortedTimes = Object.keys(chordGroups).map(Number).sort((a, b) => a - b)
@@ -188,7 +224,7 @@ export function generateMusicXML(tracks: Track[], allNotes: Note[], bpm: number,
         }
 
         const chordNotes = chordGroups[time]
-        const firstNoteDuration = chordNotes[0]?.duration || 48
+        const firstNoteDuration = chordNotes[0]?.sliceDuration || 48
         const chordDuration = Math.max(1, Math.min(firstNoteDuration, endTick - time))
 
         chordNotes.forEach((note, index) => {
@@ -217,6 +253,13 @@ export function generateMusicXML(tracks: Track[], allNotes: Note[], bpm: number,
           xml += `        <duration>${chordDuration}</duration>
         <voice>1</voice>
         <type>${typeStr}</type>\n`
+
+          if (note.tieStart) {
+            xml += `        <tie type="start"/>\n`
+          }
+          if (note.tieStop) {
+            xml += `        <tie type="stop"/>\n`
+          }
           
           if (track.instrument !== 'drum' && accidental) {
             xml += `        <accidental>${accidental}</accidental>\n`
@@ -225,6 +268,12 @@ export function generateMusicXML(tracks: Track[], allNotes: Note[], bpm: number,
             xml += `        <lyric number="1">
           <text>${escapeXml(note.lyric)}</text>
         </lyric>\n`
+          }
+          if (note.tieStart || note.tieStop) {
+            xml += `        <notations>\n`
+            if (note.tieStop) xml += `          <tied type="stop"/>\n`
+            if (note.tieStart) xml += `          <tied type="start"/>\n`
+            xml += `        </notations>\n`
           }
           xml += `      </note>\n`
         })

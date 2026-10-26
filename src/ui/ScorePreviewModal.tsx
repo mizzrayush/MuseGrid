@@ -75,9 +75,12 @@ export default function ScorePreviewModal({ onClose }: ScorePreviewModalProps) {
     return notes.filter(n => selectedTrackIds.includes(n.trackId)).sort((a, b) => a.time - b.time)
   }, [notes, selectedTrackIds])
 
-  // Determine measure count dynamically from time signature (e.g. 4/4 = 768 ticks per measure)
-  const beatsPerMeasure = parseInt((timeSignature || '4/4').split('/')[0]) || 4
-  const ticksPerMeasure = beatsPerMeasure * 192
+  // Determine measure count dynamically from time signature (e.g. 4/4 = 768 ticks per measure, 6/8 = 576 ticks per measure)
+  const [sigNum, sigDen] = (timeSignature || '4/4').split('/')
+  const beatsPerMeasure = parseInt(sigNum) || 4
+  const beatType = parseInt(sigDen) || 4
+  const ticksPerBeat = beatType === 8 ? 96 : (beatType === 2 ? 384 : 192)
+  const ticksPerMeasure = beatsPerMeasure * ticksPerBeat
   const maxTime = useMemo(() => {
     if (trackNotes.length === 0) return ticksPerMeasure * 4
     return Math.max(...trackNotes.map(n => n.time + n.duration))
@@ -528,8 +531,8 @@ export default function ScorePreviewModal({ onClose }: ScorePreviewModalProps) {
                             {/* Time Signature */}
                             {systemIndex === 0 && (
                               <g>
-                                <text x="55" y={yCenter - 8} fontSize="16" fontWeight="800" fontFamily="serif" fill="#e0e0e0">4</text>
-                                <text x="55" y={yCenter + 10} fontSize="16" fontWeight="800" fontFamily="serif" fill="#e0e0e0">4</text>
+                                <text x="55" y={yCenter - 8} fontSize="16" fontWeight="800" fontFamily="serif" fill="#e0e0e0">{beatsPerMeasure}</text>
+                                <text x="55" y={yCenter + 10} fontSize="16" fontWeight="800" fontFamily="serif" fill="#e0e0e0">{beatType}</text>
                               </g>
                             )}
 

@@ -677,13 +677,15 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         activeEl?.tagName === 'INPUT' ||
         activeEl?.tagName === 'SELECT' ||
         activeEl?.tagName === 'TEXTAREA' ||
-        activeEl?.tagName === 'BUTTON' ||
         activeEl?.hasAttribute('contenteditable')
       ) {
         return
       }
 
       const store = useStore.getState()
+      const activeTrack = store.tracks.find(t => t.id === store.activeTrackId)
+      const currentTrackInstrument = activeTrack?.instrument === 'drum' ? 'drum' : 'synth'
+      if (currentTrackInstrument !== instrument) return
 
       // Undo / Redo
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); store.undo(); return }

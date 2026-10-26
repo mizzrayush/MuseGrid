@@ -98,7 +98,11 @@ export default function ScorePreviewModal({ onClose }: ScorePreviewModalProps) {
   // Handler to print sheet music (PDF Export)
   const handlePrint = () => {
     const printWindow = window.open('', '_blank')
-    if (!printWindow) return
+    if (!printWindow) {
+      useStore.getState().showToast('Direct print dialog unavailable in desktop mode. Exporting high-res score image instead...', 'info')
+      handleDownloadPng()
+      return
+    }
 
     const scoreHtml = document.getElementById('musegrid-printable-score')?.innerHTML || ''
     const title = selectedTracks.length === 1 ? selectedTracks[0].name : 'Multi-Track Score'

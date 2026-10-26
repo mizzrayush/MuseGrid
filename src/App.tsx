@@ -232,6 +232,135 @@ function App() {
     document.title = `MuseGrid - ${projectName || 'Untitled'}${isDirty ? '*' : ''}`
   }, [projectName, isDirty])
 
+  const handleSaveProject = async () => {
+    const ipc = (window as any).ipcRenderer
+    const state = useStore.getState()
+    if (ipc) {
+      if (state.projectFilePath) {
+        const success = await ipc.invoke('save-project-path', getProjectDataString(), state.projectFilePath)
+        if (success) { state.setIsDirty(false); state.showToast('Project saved', 'success') }
+        else { state.showToast('Failed to save project', 'error') }
+      } else {
+        const filePath = await ipc.invoke('save-project', getProjectDataString())
+        if (filePath) {
+          state.setProjectInfo({ projectFilePath: filePath, projectName: filePath.split(/[\\/]/).pop()?.replace('.muz', '') || 'Project' })
+          state.setIsDirty(false)
+          state.showToast('Project saved', 'success')
+        }
+      }
+    } else {
+      const blob = new Blob([getProjectDataString()], { type: 'application/json' })
+      const saved = await saveFileWithDialog(blob, {
+        filename: 'project.muz',
+        title: 'Save Project',
+        filters: [{ name: 'MuseGrid Project', extensions: ['muz', 'muse'] }]
+      })
+      if (saved) state.setIsDirty(false)
+    }
+  }
+
+  const handleOpenProject = async () => {
+    const ipc = (window as any).ipcRenderer
+    if (ipc) {
+      try {
+        const res = await ipc.invoke('open-project')
+        if (!res) return
+        const parsed = JSON.parse(res.data)
+        if (parsed.format === 'muztrack') {
+          const data = parsed
+          useStore.getState().loadState({
+            projectName: res.filePath.split(/[\\/]/).pop().replace(/\.(muz|muztrack)$/i, ''),
+            projectFilePath: res.filePath,
+            automationTargets: {},
+            automationLanes: {},
+            bpm: data.bpm || 120,
+            timeSignature: data.timeSignature || '4/4',
+            tracks: data.tracks.map((t: any) => ({
+              ...t,
+              instrument: t.instrument || 'synth',
+              volume: t.volume ?? 0.8,
+              pan: t.pan ?? 0,
+              muted: false,
+              soloed: false
+            })),
+            notes: data.notes.map((n: any) => ({
+              id: n.id || `n_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+              trackId: n.trackId,
+              pitch: n.pitch,
+              time: n.time,
+              duration: n.duration,
+              velocity: n.velocity ?? 0.8,
+              lyric: n.lyric
+            }))
+          })
+          audioEngine.setBpm(data.bpm || 120)
+          useStore.getState().tracks.forEach(track => { audioEngine.createInstrument(track.id, track.instrument || 'synth') })
+          const state = useStore.getState()
+          if (state.tracks.length > 0) state.setActiveTrackId(state.tracks[0].id)
+          useStore.getState().showToast(`Opened .muztrack project (${data.tracks.length} tracks)`, 'success')
+          return
+        }
+        useStore.getState().loadState({ ...parsed, automationTargets: parsed.automationTargets ?? {}, automationLanes: parsed.automationLanes ?? {}, projectFilePath: res.filePath, projectName: res.filePath.split(/[\\/]/).pop().replace('.muz', '') })
+        audioEngine.setBpm(parsed.bpm || 120)
+        useStore.getState().tracks.forEach(track => { audioEngine.createInstrument(track.id, track.instrument || 'synth') })
+        const state = useStore.getState()
+        const activeExists = state.tracks.some(t => t.id === state.activeTrackId)
+        if (!activeExists && state.tracks.length > 0) state.setActiveTrackId(state.tracks[0].id)
+      } catch (err) { console.error(err); useStore.getState().showToast('Failed to load project', 'error') }
+    } else {
+      const input = document.createElement('input')
+      input.type = 'file'; input.accept = '.muz,.muztrack'
+      input.onchange = async (e) => {
+        const file = (e.target as HTMLInputElement).files?.[0]
+        if (!file) return
+        try {
+          const text = await file.text()
+          const parsed = JSON.parse(text)
+          if (parsed.format === 'muztrack') {
+            const data = parsed
+            useStore.getState().loadState({
+              projectName: file.name.replace(/\.(muz|muztrack)$/i, ''),
+              automationTargets: {},
+              automationLanes: {},
+              bpm: data.bpm || 120,
+              timeSignature: data.timeSignature || '4/4',
+              tracks: data.tracks.map((t: any) => ({
+                ...t,
+                instrument: t.instrument || 'synth',
+                volume: t.volume ?? 0.8,
+                pan: t.pan ?? 0,
+                muted: false,
+                soloed: false
+              })),
+              notes: data.notes.map((n: any) => ({
+                id: n.id || `n_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                trackId: n.trackId,
+                pitch: n.pitch,
+                time: n.time,
+                duration: n.duration,
+                velocity: n.velocity ?? 0.8,
+                lyric: n.lyric
+              }))
+            })
+            audioEngine.setBpm(data.bpm || 120)
+            useStore.getState().tracks.forEach(track => { audioEngine.createInstrument(track.id, track.instrument || 'synth') })
+            const state = useStore.getState()
+            if (state.tracks.length > 0) state.setActiveTrackId(state.tracks[0].id)
+            useStore.getState().showToast(`Opened .muztrack project (${data.tracks.length} tracks)`, 'success')
+            return
+          }
+          useStore.getState().loadState({ ...parsed, automationTargets: parsed.automationTargets ?? {}, automationLanes: parsed.automationLanes ?? {}, projectName: file.name.replace('.muz', '') })
+          audioEngine.setBpm(parsed.bpm || 120)
+          useStore.getState().tracks.forEach(track => { audioEngine.createInstrument(track.id, track.instrument || 'synth') })
+          const state = useStore.getState()
+          const activeExists = state.tracks.some(t => t.id === state.activeTrackId)
+          if (!activeExists && state.tracks.length > 0) state.setActiveTrackId(state.tracks[0].id)
+        } catch (err) { console.error('Failed to parse project file', err); useStore.getState().showToast('Failed to load project: Invalid file format', 'error') }
+      }
+      input.click()
+    }
+  }
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'F11') {
@@ -244,6 +373,59 @@ function App() {
           } else {
             document.exitFullscreen().catch(() => {})
           }
+        }
+        return
+      }
+
+      const activeEl = document.activeElement
+      const isInput =
+        activeEl?.tagName === 'INPUT' ||
+        activeEl?.tagName === 'TEXTAREA' ||
+        activeEl?.tagName === 'SELECT' ||
+        activeEl?.hasAttribute('contenteditable') ||
+        activeEl?.classList?.contains('monaco-editor')
+
+      if (isInput) return
+
+      // Global Spacebar Play / Pause
+      if (e.code === 'Space' || e.key === ' ') {
+        e.preventDefault()
+        audioEngine.togglePlay()
+        return
+      }
+
+      // Ctrl+S / Cmd+S (Save Project)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault()
+        handleSaveProject()
+        return
+      }
+
+      // Ctrl+O / Cmd+O (Open Project)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'o') {
+        e.preventDefault()
+        handleOpenProject()
+        return
+      }
+
+      // Tool Switching Shortcuts (when no modifier key is held)
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        const k = e.key.toLowerCase()
+        if (k === 'b' || k === 'd') {
+          useStore.getState().setActiveTool('draw')
+          return
+        }
+        if (k === 'e') {
+          useStore.getState().setActiveTool('erase')
+          return
+        }
+        if (k === 'v' || k === 's') {
+          useStore.getState().setActiveTool('select')
+          return
+        }
+        if (k === 'c' || k === 'x') {
+          useStore.getState().setActiveTool('slice')
+          return
         }
       }
     }
@@ -709,33 +891,8 @@ function App() {
             <div style={{ display: 'flex', alignItems: 'stretch', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px' }}>
               <button
                 style={{ display: 'flex', alignItems: 'center', gap: '5px', background: 'transparent', color: '#d0d5e2', borderRadius: projectFilePath ? '5px 0 0 5px' : '6px', padding: '5px 10px', cursor: 'pointer', fontSize: '11px', fontWeight: 600, border: 'none', transition: 'all 0.12s' }}
-                title={projectFilePath ? "Save" : "Save Project"}
-                onClick={async () => {
-                  const ipc = (window as any).ipcRenderer
-                  const state = useStore.getState()
-                  if (ipc) {
-                    if (projectFilePath) {
-                      const success = await ipc.invoke('save-project-path', getProjectDataString(), projectFilePath)
-                      if (success) { state.setIsDirty(false); state.showToast('Project saved', 'success') }
-                      else { state.showToast('Failed to save project', 'error') }
-                    } else {
-                      const filePath = await ipc.invoke('save-project', getProjectDataString())
-                      if (filePath) {
-                        state.setProjectInfo({ projectFilePath: filePath, projectName: filePath.split(/[\\/]/).pop().replace('.muz', '') })
-                        state.setIsDirty(false)
-                        state.showToast('Project saved', 'success')
-                      }
-                    }
-                  } else {
-                    const blob = new Blob([getProjectDataString()], { type: 'application/json' })
-                    const saved = await saveFileWithDialog(blob, {
-                      filename: 'project.muz',
-                      title: 'Save Project',
-                      filters: [{ name: 'MuseGrid Project', extensions: ['muz', 'muse'] }]
-                    })
-                    if (saved) state.setIsDirty(false)
-                  }
-                }}
+                title={projectFilePath ? "Save (Ctrl+S)" : "Save Project (Ctrl+S)"}
+                onClick={handleSaveProject}
                 onMouseEnter={e => e.currentTarget.style.color = '#fff'}
                 onMouseLeave={e => e.currentTarget.style.color = '#d0d5e2'}
               >
@@ -796,108 +953,8 @@ function App() {
           {/* Open */}
           <button
             style={{ display: 'flex', alignItems: 'center', gap: '5px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#d0d5e2', borderRadius: '6px', padding: '5px 10px', cursor: 'pointer', fontSize: '11px', fontWeight: 600, transition: 'all 0.12s' }}
-            title="Open Project or .muztrack Grid"
-            onClick={async () => {
-              const ipc = (window as any).ipcRenderer
-              if (ipc) {
-                try {
-                  const res = await ipc.invoke('open-project')
-                  if (!res) return
-                  const parsed = JSON.parse(res.data)
-                  if (parsed.format === 'muztrack') {
-                    const data = parsed
-                    useStore.getState().loadState({
-                      projectName: res.filePath.split(/[\\/]/).pop().replace(/\.(muz|muztrack)$/i, ''),
-                      projectFilePath: res.filePath,
-                      automationTargets: {},
-                      automationLanes: {},
-                      bpm: data.bpm || 120,
-                      timeSignature: data.timeSignature || '4/4',
-                      tracks: data.tracks.map((t: any) => ({
-                        ...t,
-                        instrument: t.instrument || 'synth',
-                        volume: t.volume ?? 0.8,
-                        pan: t.pan ?? 0,
-                        muted: false,
-                        soloed: false
-                      })),
-                      notes: data.notes.map((n: any) => ({
-                        id: n.id || `n_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-                        trackId: n.trackId,
-                        pitch: n.pitch,
-                        time: n.time,
-                        duration: n.duration,
-                        velocity: n.velocity ?? 0.8,
-                        lyric: n.lyric
-                      }))
-                    })
-                    audioEngine.setBpm(data.bpm || 120)
-                    useStore.getState().tracks.forEach(track => { audioEngine.createInstrument(track.id, track.instrument || 'synth') })
-                    const state = useStore.getState()
-                    if (state.tracks.length > 0) state.setActiveTrackId(state.tracks[0].id)
-                    useStore.getState().showToast(`Opened .muztrack project (${data.tracks.length} tracks)`, 'success')
-                    return
-                  }
-                  useStore.getState().loadState({ ...parsed, automationTargets: parsed.automationTargets ?? {}, automationLanes: parsed.automationLanes ?? {}, projectFilePath: res.filePath, projectName: res.filePath.split(/[\\/]/).pop().replace('.muz', '') })
-                  audioEngine.setBpm(parsed.bpm || 120)
-                  useStore.getState().tracks.forEach(track => { audioEngine.createInstrument(track.id, track.instrument || 'synth') })
-                  const state = useStore.getState()
-                  const activeExists = state.tracks.some(t => t.id === state.activeTrackId)
-                  if (!activeExists && state.tracks.length > 0) state.setActiveTrackId(state.tracks[0].id)
-                } catch (err) { console.error(err); useStore.getState().showToast('Failed to load project', 'error') }
-              } else {
-                const input = document.createElement('input')
-                input.type = 'file'; input.accept = '.muz,.muztrack'
-                input.onchange = async (e) => {
-                  const file = (e.target as HTMLInputElement).files?.[0]
-                  if (!file) return
-                  try {
-                    const text = await file.text()
-                    const parsed = JSON.parse(text)
-                    if (parsed.format === 'muztrack') {
-                      const data = parsed
-                      useStore.getState().loadState({
-                        projectName: file.name.replace(/\.(muz|muztrack)$/i, ''),
-                        automationTargets: {},
-                        automationLanes: {},
-                        bpm: data.bpm || 120,
-                        timeSignature: data.timeSignature || '4/4',
-                        tracks: data.tracks.map((t: any) => ({
-                          ...t,
-                          instrument: t.instrument || 'synth',
-                          volume: t.volume ?? 0.8,
-                          pan: t.pan ?? 0,
-                          muted: false,
-                          soloed: false
-                        })),
-                        notes: data.notes.map((n: any) => ({
-                          id: n.id || `n_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-                          trackId: n.trackId,
-                          pitch: n.pitch,
-                          time: n.time,
-                          duration: n.duration,
-                          velocity: n.velocity ?? 0.8,
-                          lyric: n.lyric
-                        }))
-                      })
-                      audioEngine.setBpm(data.bpm || 120)
-                      useStore.getState().tracks.forEach(track => { audioEngine.createInstrument(track.id, track.instrument || 'synth') })
-                      const state = useStore.getState()
-                      if (state.tracks.length > 0) state.setActiveTrackId(state.tracks[0].id)
-                      useStore.getState().showToast(`Opened .muztrack project (${data.tracks.length} tracks)`, 'success')
-                      return
-                    }
-                    useStore.getState().loadState({ ...parsed, automationTargets: parsed.automationTargets ?? {}, automationLanes: parsed.automationLanes ?? {}, projectName: file.name.replace('.muz', '') })
-                    audioEngine.setBpm(parsed.bpm || 120)
-                    useStore.getState().tracks.forEach(track => { audioEngine.createInstrument(track.id, track.instrument || 'synth') })
-                    const state = useStore.getState()
-                    const activeExists = state.tracks.some(t => t.id === state.activeTrackId)
-                    if (!activeExists && state.tracks.length > 0) state.setActiveTrackId(state.tracks[0].id)
-                  } catch (err) { console.error('Failed to parse project file', err); useStore.getState().showToast('Failed to load project: Invalid file format', 'error') }
-                }
-                input.click()
-              }
-            }}
+            title="Open Project or .muztrack Grid (Ctrl+O)"
+            onClick={handleOpenProject}
             onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.1)'; e.currentTarget.style.color = '#fff' }}
             onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = '#d0d5e2' }}
           >

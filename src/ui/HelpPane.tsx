@@ -3,7 +3,7 @@ import { useStore } from '../engine/store';
 import {
   IconSettings, IconMusic, IconDrum, IconAlign, IconSave, IconPlay,
   IconTerminal, IconBook, IconDownload, IconCopy, IconTrash,
-  IconSearch, IconAlertCircle, IconAlertTriangle, IconInfo, IconCheck, IconX, IconMic
+  IconSearch, IconAlertCircle, IconAlertTriangle, IconInfo, IconCheck, IconX, IconMic, IconSliders
 } from './Icons';
 import {
   subscribeToLogs, clearLogs, downloadLogsAsFile, copyLogsToClipboard,
@@ -74,6 +74,7 @@ export default function HelpPane() {
     { id: 'top_bar', label: 'Top Bar & Navigation', icon: <IconAlign size={14} /> },
     { id: 'left_pane', label: 'Tracks & Instruments', icon: <IconMusic size={14} /> },
     { id: 'grid_canvas', label: 'Grid Canvas & Piano Roll', icon: <IconMusic size={14} /> },
+    { id: 'automation_lanes', label: 'Automation & Modulation Lanes', icon: <IconSliders size={14} /> },
     { id: 'drum_sequencer', label: 'Drum Sequencer', icon: <IconDrum size={14} /> },
     { id: 'right_pane', label: 'Advanced Tools & Gen', icon: <IconSettings size={14} /> },
     { id: 'midi_editing_suite', label: 'Advanced MIDI Suite & Theory', icon: <IconMusic size={14} /> },
@@ -686,6 +687,44 @@ export default function HelpPane() {
                   <li><strong>Velocity Dynamics</strong>: Choose Flat, Crescendo (gradual swell), or Decrescendo (fade out) dynamic profiles.</li>
                   <li><strong>Micro-Nudge (±1t, ±6t)</strong>: Nudge drum triggers by subtle sub-grid tick amounts to dial in unquantized groove and pocketing.</li>
                 </ul>
+              </div>
+            )}
+
+            {activeSection === 'automation_lanes' && (
+              <div>
+                <h1 style={{ margin: '0 0 20px', color: '#fff' }}>Automation & Modulation Lanes</h1>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>
+                  MuseGrid features a multi-target automation engine with continuous curve interpolation and concurrent multi-parameter execution.
+                </p>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Accessing the Automation Drawer</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Toggle Lane</strong>: Click the <strong>Automation</strong> button in the bottom panel beneath the Piano Roll or Drum matrix.</li>
+                  <li><strong>Target Selector</strong>: Use the dropdown in the automation toolbar to choose which parameter to draw and edit.</li>
+                </ul>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Supported Automation Targets</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Velocity (Vel)</strong>: Controls note strike strength and initial dynamic response (0 to 127).</li>
+                  <li><strong>Volume (Vol)</strong>: Continuous audio gain scaling across the track timeline.</li>
+                  <li><strong>Pan (L/R)</strong>: Stereo field placement from 100% Left (-1.0) to Center (0.0) to 100% Right (+1.0).</li>
+                  <li><strong>Filter Cutoff (Hz)</strong>: Sweeps lowpass and resonant filter frequencies dynamically during note playback.</li>
+                  <li><strong>Pitch Bend / Glides</strong>: Microtonal pitch modulation across notes.</li>
+                  <li><strong>Expression & Dynamics</strong>: Polyphonic expression and timbre modulations.</li>
+                </ul>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Drawing & Editing Points</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Add Point</strong>: Click anywhere on the automation canvas to create a new control point at that tick and value.</li>
+                  <li><strong>Move Point</strong>: Click and drag any existing point to adjust its timing or value.</li>
+                  <li><strong>Delete Point</strong>: Right-click or double-click a point to remove it.</li>
+                  <li><strong>Clear Active Curve</strong>: Click the <strong>Clear</strong> button to wipe all points for the selected parameter while preserving other automation curves.</li>
+                </ul>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Concurrent Multi-Parameter Curves</h3>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>
+                  Each track maintains independent, non-destructive automation curves for every parameter simultaneously. For instance, you can combine a rising Volume swell with a panning sweep and a filter cutoff drop—all evaluated concurrently during playback, stem bounce, and native C++ rendering.
+                </p>
               </div>
             )}
 

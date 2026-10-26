@@ -90,6 +90,7 @@ struct TrackState
     {
         juce::String identifier;
         juce::String name;
+        int fxChainId = 0;
         std::unique_ptr<juce::AudioPluginInstance> plugin;
         juce::MidiBuffer pendingMidi;
         std::mutex midiMutex;
@@ -105,6 +106,7 @@ struct TrackState
     struct NoteFxStep
     {
         juce::String type;
+        juce::String fxId; // stable UI instance id (track rack only)
         bool bypassed = false;
         float wet = 1.0f; // VST3 steps only; built-in wet lives in their own parameters
         std::unique_ptr<EQEffect> eq;
@@ -118,6 +120,7 @@ struct TrackState
         std::unique_ptr<ReverbEffect> reverb;
         std::unique_ptr<ReverbEffect> freeverb;
         std::unique_ptr<juce::AudioPluginInstance> vst3;
+        std::unique_ptr<Vst3PluginWindow> editorWindow;
         juce::String pluginIdentifier;
         juce::String pluginName;
     };
@@ -129,6 +132,12 @@ struct TrackState
     };
 
     std::map<int, std::unique_ptr<NoteFxChain>> noteFxChains;
+
+    // Ordered, duplicate-friendly track rack built from the UI's fxInstances list. When
+    // fxRackActive is false the fixed legacy rack above is used instead.
+    std::vector<std::unique_ptr<NoteFxStep>> fxRack;
+    juce::String fxRackSignature;
+    bool fxRackActive = false;
 };
 
 class AudioEngine : public juce::AudioIODeviceCallback
@@ -146,6 +155,10 @@ public:
     bool isPlaying() const { return playing; }
     void setBpm(float newBpm) { bpm = juce::jlimit(20.0f, 400.0f, newBpm); }
     float getBpm() const { return bpm; }
+
+    // Master bus
+    void setMasterVolume(float vol) { masterVolume = juce::jlimit(0.0f, 2.0f, vol); }
+    void setMasterLimiter(bool enabled, float thresholdDb);
 
     // Track management
     void addTrack(const juce::String& trackId, const juce::String& instrument);
@@ -222,6 +235,12 @@ public:
     // spec is an array of objects: { type, bypassed?, wet?, pluginId?, params? }.
     bool ensureNoteFxChain(const juce::String& trackId, int chainId, const juce::String& signature,
                            const juce::var& effects);
+    void pruneNoteFxChains(const juce::String& trackId, const juce::var& activeChainIds);
+
+    // Ordered track rack from the UI (built-ins and VST3 interleaved, duplicates allowed).
+    bool setTrackFxChain(const juce::String& trackId, const juce::String& signature,
+                         const juce::var& effects);
+    bool openNoteFxVst3Editor(const juce::String& trackId, int chainId, int stepIndex);
 
     bool addTrackVst3Fx(const juce::String& trackId, const juce::String& fxId, const juce::String& pluginIdentifier);
     void removeTrackVst3Fx(const juce::String& trackId, const juce::String& fxId);

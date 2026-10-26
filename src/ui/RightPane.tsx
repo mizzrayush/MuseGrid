@@ -2,10 +2,10 @@ import React, { useMemo, useState } from 'react'
 import { useStore, deduplicateNotes, isPluginDrum, isPluginSynth, getPluginInstrumentType, type Note, type FxInstance, type CustomFxConfig } from '../engine/store'
 import { SYNTH_PRESETS, DRUM_KITS, type SynthPreset, type DrumKit } from '../utils/instruments'
 import { audioEngine } from '../engine/AudioEngine'
-import { NOTE_FX_DEFAULTS } from '../utils/noteFxChain'
+import { NOTE_FX_DEFAULTS, noteFxChainId } from '../utils/noteFxChain'
 import { NOTE_NAMES_SHARP, snapToScale, detectChord, detectScaleDegree } from '../utils/musicTheory'
 import { applyRatchet, applyMicroNudge } from '../utils/midiEditing'
-import { IconX, IconVolume, IconTimeline, IconMusic, IconDrum, IconSpeaker, IconTrash, IconPlus } from './Icons'
+import { IconX, IconVolume, IconTimeline, IconMusic, IconDrum, IconSpeaker, IconTrash, IconPlus, IconOpen } from './Icons'
 
 const PITCH_TO_PIECE: Record<number, string> = {
   0: 'Kick', 1: 'Snare', 2: 'Hihat Closed', 3: 'Hihat Open', 4: 'Clap',
@@ -171,6 +171,7 @@ const NoteFxChainSection: React.FC<NoteFxChainSectionProps> = ({ notes, selected
   const updateNotes = useStore(state => state.updateNotes)
   const [draggingIndex, setDraggingIndex] = useState<number | null>(null)
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
+  const isNative = Boolean((window as any).__isJuceNative__)
 
   if (notes.length === 0) return null
 
@@ -255,6 +256,7 @@ const NoteFxChainSection: React.FC<NoteFxChainSectionProps> = ({ notes, selected
             <SliderRow label="Phaser" value={get(inst, 'wet')} min={0} max={1} step={0.01} color="#00e6ff" onChange={v => update('wet', v)} />
             <SliderRow label="P-Rate" value={get(inst, 'frequency', 0.5)} min={0.1} max={10} step={0.1} suffix="Hz" color="#00e6ff" onChange={v => update('frequency', v)} />
             <SliderRow label="P-BaseFreq" value={get(inst, 'baseFreq', 350)} min={20} max={4000} step={10} suffix="Hz" color="#00e6ff" onChange={v => update('baseFreq', v)} />
+            <SliderRow label="P-Octaves" value={get(inst, 'octaves', 3)} min={0.5} max={6} step={0.1} color="#00e6ff" onChange={v => update('octaves', v)} />
           </>
         )
       case 'delay':
@@ -279,6 +281,8 @@ const NoteFxChainSection: React.FC<NoteFxChainSectionProps> = ({ notes, selected
           <>
             <SliderRow label="Reverb" value={get(inst, 'wet')} min={0} max={1} step={0.01} color="#b197fc" onChange={v => update('wet', v)} />
             <SliderRow label="R-Decay" value={get(inst, 'decay', 2.5)} min={0.1} max={10} step={0.1} suffix="s" color="#b197fc" onChange={v => update('decay', v)} />
+            <SliderRow label="R-PreDelay" value={get(inst, 'preDelay', 0.01)} min={0} max={1} step={0.01} suffix="s" color="#b197fc" onChange={v => update('preDelay', v)} />
+            <SliderRow label="R-Damping" value={get(inst, 'damping', 0.5)} min={0} max={1} step={0.01} color="#b197fc" onChange={v => update('damping', v)} />
           </>
         )
       case 'freeverb':
@@ -337,6 +341,12 @@ const NoteFxChainSection: React.FC<NoteFxChainSectionProps> = ({ notes, selected
         {mixed && (
           <div style={{ fontSize: '9px', color: '#ffcc00', lineHeight: 1.4 }}>
             Selected notes use different chains. Adding or removing an effect applies this chain to all of them.
+          </div>
+        )}
+
+        {isNative && instances.some(i => i.type !== 'vst3' && !NOTE_FX_DEFAULTS[i.type]) && (
+          <div style={{ fontSize: '9px', color: '#ffcc00', lineHeight: 1.4 }}>
+            Custom JS effects only run in the browser engine. The native engine skips them; built-in and VST3 effects in this chain still apply.
           </div>
         )}
 
@@ -406,6 +416,30 @@ const NoteFxChainSection: React.FC<NoteFxChainSectionProps> = ({ notes, selected
                   </span>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  {isNative && inst.type === 'vst3' && inst.pluginId && (
+                    <button
+                      onClick={e => {
+                        e.stopPropagation()
+                        const bridge = (window as any).juceAudioBridge
+                        if (bridge) {
+                          // Native chains omit custom JS steps, so the native step index differs.
+                          const stepIndex = instances.slice(0, index).filter(prev =>
+                            prev.type === 'vst3' ? Boolean(prev.pluginId) : Boolean(NOTE_FX_DEFAULTS[prev.type])
+                          ).length
+                          bridge.postCommand({
+                            type: 'openNoteFxVst3Editor',
+                            trackId: first.trackId,
+                            chainId: noteFxChainId(first.trackId, first.id),
+                            stepIndex
+                          })
+                        }
+                      }}
+                      title="Open native plugin window"
+                      style={{ background: 'rgba(0,255,136,0.1)', border: '1px solid rgba(0,255,136,0.35)', color: '#00ff88', padding: '2px 5px', borderRadius: '3px', cursor: 'pointer', display: 'flex', alignItems: 'center' }}
+                    >
+                      <IconOpen size={10} />
+                    </button>
+                  )}
                   <button
                     onClick={() => {
                       const copy: FxInstance = { ...inst, id: `${inst.type}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}` }

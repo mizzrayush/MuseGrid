@@ -38,11 +38,12 @@ public:
     // or a "data:audio/...;base64,..." URI / raw base64 of a WAV file (re-decodes buffer).
     void setConfig(const Config& newConfig, const juce::String& base64Data);
 
-    void noteOn(int noteId, float pitchMidi, float velocity, float durationSeconds, float pitchOffsetSemitones);
+    void noteOn(int noteId, float pitchMidi, float velocity, float durationSeconds, float pitchOffsetSemitones, int fxChainId = 0);
     void noteOff(int noteId);
     void allNotesOff();
 
-    void renderBlock(float* leftOut, float* rightOut, int numSamples);
+    // Renders only voices tagged with fxChainId (0 = voices without a per-note chain).
+    void renderBlock(float* leftOut, float* rightOut, int numSamples, int fxChainId = 0);
 
     bool isReady() const { return readyFlag.load(std::memory_order_acquire); }
 
@@ -59,6 +60,7 @@ private:
         int bufCh1 = 1;
         bool usingReverse = false;
         float velocity = 1.0f;
+        int fxChainId = 0;
         float remainingSeconds = -1.0f;
         EnvStage stage = EnvStage::Attack;
         float stageElapsed = 0.0f;

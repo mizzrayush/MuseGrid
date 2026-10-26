@@ -1235,10 +1235,10 @@ sounds the same in both engines.
 - Registration: `AudioEngine.ensureNoteFxChain` before the first note, and `syncNoteVst3Overrides`
   walks all notes so chains exist before transport start. `OfflineRenderer.cpp:297` registers the
   same chain for every bounced note.
-- Limits: per-note chains are bypassed for sampler voices, track-level VST3 instrument notes and
-  per-note VST3-instrument notes (those paths return before a chain id is attached). Note FX VST3
-  has wet/bypass but no plugin editor; native reverb ignores pre-delay; chain registry entries are
-  not reclaimed when a note is deleted.
+- Limits (superseded by §17): per-note chains are bypassed for sampler voices, track-level VST3
+  instrument notes and per-note VST3-instrument notes (those paths return before a chain id is
+  attached). Note FX VST3 has wet/bypass but no plugin editor; native reverb ignores pre-delay; chain
+  registry entries are not reclaimed when a note is deleted. All four were addressed in §17.
 
 ### 16.3 Multi-note glide from the grid
 
@@ -1275,35 +1275,100 @@ is the browser fallback and is not authoritative.
 | VST3 instruments (track and per-note override) | Yes; note slots registered before playback and in export. |
 | Per-note glide, vibrato (wave/delay/fade), tremolo, filter sweep, detune/pitch offset | Yes, via `NoteExpression` LUTs; identical maths to the UI preview. |
 | Microtonal EDO pitches, drum pitch offsets/punch/resonance, per-hit decay | Yes. |
-| Track built-in FX (eq, filter, distortion, bitcrush, chorus, phaser, delay, dpreverb, reverb, freeverb) and VST3 FX | Yes, both live and offline; bypass is emulated per type. |
-| Per-note FX chains (built-ins + VST3) | Yes for synth, physical, vocal and drum voices. |
+| Track built-in FX (eq, filter, distortion, bitcrush, chorus, phaser, delay, dpreverb, reverb, freeverb) and VST3 FX | Yes, both live and offline, in UI order with duplicates. |
+| Per-note FX chains (built-ins + VST3) | Yes for synth, vocal, physical, drum, sampler, notes on a track VST3 instrument (cloned per chain) and per-note VST3 overrides. |
+| Master volume and limiter on/off + threshold | Yes, live and offline. |
+| Groups (volume / mute / solo) | Yes, VCA-style on top of member tracks in native, Tone and export; WASM receives the effective volume/mute (it has no solo parameter). |
 | Transport, loop, metronome, offline export | Yes. |
 
-### Not wired, or different in native
+### The 11 gaps: status
 
-1. **Master Volume** — `studioSettings.masterVolume` only moves `Tone.Destination`; JUCE never reads
-   it (`AudioEngine.h:261` declares an unused `masterVolume`, no bridge command exists).
-2. **Limiter on/off and threshold** — the native limiter is always on with its own fixed settings;
-   the Engine-panel values are Tone-only.
-3. **Track FX order and duplicates** — native applies a fixed
-   `eq → distortion → bitcrush → filter → chorus → phaser → delay → dpreverb → reverb → freeverb`
-   sequence (`AudioEngine.cpp:1356`) and keeps one instance per type, so drag-reordering and adding
-   the same effect twice are not reproduced.
-4. **Reverb pre-delay / damping** — `reverbPreDelay` is never sent and the native reverb has no
-   pre-delay stage; reverb decay is converted to room size. DPreverb decay/shape are approximated
-   from `tail` only.
-5. **Phaser octaves** — exposed in the card but not sent; native maps wet/rate/base frequency only.
-6. **Custom JS FX** — browser-only. Native maps `custom-bitcrusher` to the built-in bitcrusher and
-   ignores every other custom effect, including inside note chains.
-7. **Track-level `vocal` / `physical` presets** — `SynthVoice::setPreset` has no case for them, so a
-   track set to those presets falls back to the generic synth in JUCE. Only the per-note instrument
-   override reaches `VocalModelVoice` / `PhysicalModelVoice`.
-8. **Per-note FX on some voices** — chains are ignored for sampler voices, notes using the track
-   VST3 instrument, and notes using a per-note VST3 instrument override.
-9. **Note-FX VST3 editor and exact params** — no plugin GUI for note-chain VST3; native parameter
-   mapping is approximate (reverb pre-delay, dpreverb shape).
-10. **Note-FX lifecycle** — chains are keyed by note id and not deleted when a note is removed; a
-    long editing session accumulates dormant chain objects until the track is deleted.
-11. **Groups** — `groups` are organisational only; neither engine routes audio through group buses,
-    so this is an app-level gap rather than a native regression.
+1. **Master Volume — fixed.** `AudioEngine.syncNativeMaster()` (`src/engine/AudioEngine.ts:3172`) posts
+   `setMasterVolume`; JUCE stores it in `AudioEngine::masterVolume` and applies it after the track
+   mix and before the ceiling limiter (`native/Source/Audio/AudioEngine.cpp:1965`). Both live play
+   and `OfflineRenderer` use the live engine, so the bounce inherits it.
+2. **Limiter on/off and threshold — fixed.** `setMasterLimiter(enabled, threshold)` drives
+   `LimiterEffect::setEnabled` / `setCeiling` (`AudioEngine.cpp:284`, `LimiterEffect.h`). The bridge
+   accepts a bool or string `enabled` value, and the offline bounce defers the limiter only when the
+   metronome click has to be mixed in first.
+3. **Track FX order and duplicates — fixed.** `buildNativeTrackFxChain`
+   (`src/engine/AudioEngine.ts:3190`) sends the UI rack in display order, one step per instance,
+   including repeated types and VST3 steps. `AudioEngine::setTrackFxChain` builds an ordered
+   `fxRack` and reuses loaded VST3 plugins across reorders/slider moves (`AudioEngine.cpp:779`).
+   The fixed legacy sequence remains only for sessions that never post `setTrackFxChain`.
+4. **Reverb pre-delay / damping — fixed.** R-Damping is a UI row now; `preDelay` and `damping` are
+   sent for track and note chains, and `ReverbEffect` has a real pre-delay stage (`ReverbEffect.h`).
+   DPreverb now maps all three UI controls: tail → pre-delay (tail × 0.25 s), shape → room size,
+   tone → damping (`AudioEngine.cpp:70`). This is still an approximation, not a copy of the script.
+5. **Phaser octaves — fixed.** `octaves` is sent and a dedicated 4-stage all-pass phaser sweeps
+   ±octaves/2 around the base frequency (`PhaserEffect.h`), including note chains.
+6. **Custom JS FX — handled honestly.** Script effects are skipped by the native rack and by note
+   chains, because JUCE cannot execute browser scripts. The UI shows a warning in both the track rack
+   and the note chain on native. The legacy `custom-bitcrusher` preset is still approximated by the
+   built-in bitcrusher on track racks, so it is excluded from the track warning; note chains do not
+   map it.
+7. **Track-level `vocal` / `physical` presets — fixed.** `playNote` routes `instrument === "vocal"`,
+   `instrument === "physical"`, `synthPreset === "vocal"` and `synthPreset === "physical"` to the
+   vocal/physical voices instead of the generic synth (`AudioEngine.cpp:1312`).
+8. **Per-note FX on missing voices — fixed.** Sampler voices carry `fxChainId`
+   (`SampleEngine::noteOn`), per-note VST3 instrument slots are tagged with the chain id
+   (`AudioEngine.cpp:1113`), and notes on a track VST3 instrument get a per-chain clone that copies
+   the track plugin state before processing (`AudioEngine.cpp:1250`). Tagged instruments render into
+   the note chain and bypass the track rack, like the other voices.
+9. **Note-FX VST3 editor and exact parameters — fixed.** Each VST3 card in the note chain has an
+   editor button wired to `openNoteFxVst3Editor`; the UI maps the card index to the native step
+   index after skipped custom JS. Built-in note parameters include phaser octaves and reverb
+   pre-delay/damping. VST3 plugins are still edited in their own window; the chain only owns bypass
+   and wet.
+10. **Note-FX lifecycle — fixed.** The store subscription notices chain changes and note identity
+    changes, calls `syncNoteVst3Overrides`, and prunes native chains whose note was deleted
+    (`pruneNativeNoteFxChains`, `src/engine/AudioEngine.ts:4932`). Pruning also drops chain-tagged
+    VST3 slots (`AudioEngine.cpp:891`). Chain rebuilds keep existing VST3 instances and editor
+    windows instead of reloading them.
+11. **Groups — fixed at the app level.** `getEffectiveTrackLevel` (`src/utils/groupAudio.ts`)
+    multiplies group volume and ORs group mute/solo onto each member. Native applies those effective
+    values in `applyTrackSettings` (and re-applies on group changes), Tone uses the same effective
+    values, the WASM rack receives effective volume/mute (its protocol has no solo flag), and
+    `audioRender.ts` filters and mixes with them for export. Groups remain VCA-style controls, not
+    insert buses.
+
+The Groups panel in the left pane is now usable without becoming a second mixer: rename by
+double-click, colour swatches, collapse, member count, M/S, 0–100% volume, add-from-list and
+`+ ACTIVE`, per-member remove, delete, and new groups seeded from the current selection or active
+track (`src/ui/LeftPane.tsx:9298`).
+
+### Limits that remain
+
+- DPreverb is a pre-delayed reverb approximation (tail/shape/tone mapped as above), not the original
+  script DSP. Likewise, edits to the bundled `custom-bitcrusher` script are not read by JUCE; its
+  drive/bits/dive/mix values map to the built-in bitcrusher.
+- Native reverb pre-delay delays the reverb input (including its dry component); JUCE's reverb has
+  no separate wet-only pre-delay tap. Damping is the JUCE dsp damping curve.
+- VST3 parameters are not duplicated as generic sliders in either rack: edit them in the plugin GUI.
+  Note-chain VST3 state lives on the native instance, not in `Note.fxSettings`.
+- A per-note clone of the track VST3 instrument copies state when created; later edits in the track
+  plugin GUI are not pushed into existing clones.
+- Rebuilding a note chain keeps VST3 instances but recreates built-in processors, which resets their
+  delay/reverb tails.
+- Groups do not create nested buses, group inserts or per-group FX; they are volume/mute/solo
+  controllers.
+- Old sessions that never post `setTrackFxChain` keep the legacy fixed-order rack until the next
+  track edit posts one.
+
+### Verification
+
+- `npx tsc --noEmit -p tsconfig.app.json` — clean after the final UI edits.
+- `scripts\build_native.bat` — `ninja: no work to do`, executable and assets synced to `bin/`
+  (`bin/MuseGrid.exe`).
+- `npx vite build` — succeeded; `dist` copied to `bin/dist` and `bin/dist/index.html` points at the
+  new bundle (`index-BEq1Dlk-.js`).
+- Browser (`npm run dev:web`, Chrome): created a group from the active track, saw 1 member, renamed
+  by double-click (Enter/blur commit), moved volume to 42%, changed the colour swatch, toggled M
+  (line-through) and S, collapsed/expanded, added Drum Machine, saw `+ ACTIVE` disable when the
+  active track was already a member, removed the member, and deleted the group; the panel returned
+  to "No groups yet". No new console errors; the one `audio-processor.js` detached-buffer error is
+  the pre-existing experimental WASM path.
+- Not verified by ear: master gain/limiter levels, per-note chain output on a real VST3, or the
+  group fader on a dense mix. The code paths and bridge commands were inspected, but an audible
+  native pass is still required.
 

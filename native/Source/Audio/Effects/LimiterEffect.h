@@ -33,12 +33,16 @@ public:
         limiter.setRelease(juce::jlimit(5.0f, 500.0f, releaseMs));
     }
 
+    void setEnabled(bool shouldLimit) { enabled = shouldLimit; }
+
     void process(juce::dsp::AudioBlock<float>& block)
     {
+        if (!enabled) return;
         juce::dsp::ProcessContextReplacing<float> context(block);
         limiter.process(context);
     }
 
 private:
     juce::dsp::Limiter<float> limiter;
+    bool enabled = true;
 };

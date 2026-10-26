@@ -875,6 +875,10 @@ export interface TrackGroup {
   color: string
   trackIds: string[]
   collapsed: boolean
+  /** Non-destructive group level controls, applied on top of each track. */
+  volume?: number
+  muted?: boolean
+  soloed?: boolean
 }
 
 export type PlayheadFollowMode = 'playhead' | 'grid'

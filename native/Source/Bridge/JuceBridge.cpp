@@ -620,6 +620,39 @@ void JuceBridge::handleAudioCommand(const juce::Array<juce::var>& args, juce::We
     {
         audioEngine.setBpm((float)obj->getProperty("bpm"));
     }
+    else if (type == "setMasterVolume")
+    {
+        audioEngine.setMasterVolume((float)obj->getProperty("volume"));
+    }
+    else if (type == "setMasterLimiter")
+    {
+        auto enabledProp = obj->getProperty("enabled");
+        const bool enabled = enabledProp.isBool() ? (bool)enabledProp
+                                                  : enabledProp.toString().toLowerCase() != "false";
+        const float threshold = obj->hasProperty("threshold") ? (float)obj->getProperty("threshold") : -1.5f;
+        audioEngine.setMasterLimiter(enabled, threshold);
+    }
+    else if (type == "setTrackFxChain")
+    {
+        const juce::String trackId = obj->getProperty("trackId").toString();
+        const juce::String signature = obj->getProperty("signature").toString();
+        auto effects = juce::JSON::parse(obj->getProperty("effects").toString());
+        audioEngine.setTrackFxChain(trackId, signature, effects);
+    }
+    else if (type == "pruneNoteFxChains")
+    {
+        const juce::String trackId = obj->getProperty("trackId").toString();
+        audioEngine.pruneNoteFxChains(trackId, obj->getProperty("chainIds"));
+    }
+    else if (type == "openNoteFxVst3Editor")
+    {
+        const juce::String trackId = obj->getProperty("trackId").toString();
+        const int chainId = (int)obj->getProperty("chainId");
+        const int stepIndex = (int)obj->getProperty("stepIndex");
+        audioEngine.openNoteFxVst3Editor(trackId, chainId, stepIndex);
+        complete(true);
+        return;
+    }
     else if (type == "createTrack")
     {
         const juce::String trackId = obj->getProperty("trackId").toString();

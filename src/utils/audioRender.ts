@@ -1,6 +1,7 @@
 import * as Tone from 'tone'
-import type { AppState, CustomFxConfig, Note, Track } from '../engine/store'
+import type { AppState, CustomFxConfig, Note, Track, TrackGroup } from '../engine/store'
 import { getAutomationValueAtTick } from './automation'
+import { getEffectiveTrackLevel } from './groupAudio'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET, type SynthPreset, type DrumKit } from './instruments'
 import { CustomScriptProcessorNode, DPreverbNode, audioEngine, VocalModelVoice, PhysicalModelVoice } from '../engine/AudioEngine'
 import { getActiveDPreverbInstances, getTrackFxInstances, getTrackFxSetting as readTrackFxSetting, type BuiltInFxType } from '../engine/fxDefaults'
@@ -36,10 +37,11 @@ function gainToDb(gain: number | undefined): number {
   return Tone.gainToDb(Math.max(0.0001, g))
 }
 
-function shouldRenderTrack(track: Track, tracks: Track[]): boolean {
-  const hasSolo = tracks.some(t => t.soloed)
-  if (hasSolo && !track.soloed) return false
-  return !track.muted
+function shouldRenderTrack(track: Track, tracks: Track[], groups: TrackGroup[] = []): boolean {
+  const effective = getEffectiveTrackLevel(track, groups)
+  const hasSolo = tracks.some(t => getEffectiveTrackLevel(t, groups).soloed)
+  if (hasSolo && !effective.soloed) return false
+  return !effective.muted
 }
 
 
@@ -964,7 +966,8 @@ export async function renderProjectAudio(state: AppState, options: RenderOptions
   }
 
   const { notes, tracks, bpm } = state
-  let renderableTracks = tracks.filter(track => shouldRenderTrack(track, tracks))
+  const groups = state.groups ?? []
+  let renderableTracks = tracks.filter(track => shouldRenderTrack(track, tracks, groups))
 
   if (options.trackId) {
     renderableTracks = renderableTracks.filter(t => t.id === options.trackId)
@@ -1162,11 +1165,12 @@ export async function renderProjectAudio(state: AppState, options: RenderOptions
         }
       })
 
+      const effective = getEffectiveTrackLevel(track, groups)
       const channel = new Tone.Channel({
-        volume: gainToDb(track.volume),
+        volume: gainToDb(effective.volume),
         pan: typeof track.pan === 'number' && isFinite(track.pan) ? track.pan : 0,
-        mute: Boolean(track.muted),
-        solo: Boolean(track.soloed),
+        mute: effective.muted,
+        solo: effective.soloed,
       })
 
       lastNode.connect(channel)

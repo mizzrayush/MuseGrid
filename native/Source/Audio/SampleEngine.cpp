@@ -165,7 +165,7 @@ void SampleEngine::setConfig(const Config& newConfig, const juce::String& base64
     }).detach();
 }
 
-void SampleEngine::noteOn(int noteId, float pitchMidi, float velocity, float durationSeconds, float pitchOffsetSemitones)
+void SampleEngine::noteOn(int noteId, float pitchMidi, float velocity, float durationSeconds, float pitchOffsetSemitones, int fxChainId)
 {
     if (!readyFlag.load(std::memory_order_acquire)) return;
     auto* buf = mainBuffer.load(std::memory_order_acquire);
@@ -201,6 +201,7 @@ void SampleEngine::noteOn(int noteId, float pitchMidi, float velocity, float dur
 
     v->active = true;
     v->noteId = noteId;
+    v->fxChainId = fxChainId;
     v->rate = rate;
     v->startIdx = s;
     v->endIdx = e;
@@ -236,7 +237,7 @@ void SampleEngine::allNotesOff()
     for (auto& v : voices) v.active = false;
 }
 
-void SampleEngine::renderBlock(float* leftOut, float* rightOut, int numSamples)
+void SampleEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, int fxChainId)
 {
     if (!readyFlag.load(std::memory_order_acquire)) return;
     auto* buf = mainBuffer.load(std::memory_order_acquire);
@@ -253,7 +254,7 @@ void SampleEngine::renderBlock(float* leftOut, float* rightOut, int numSamples)
 
     for (auto& v : voices)
     {
-        if (!v.active) continue;
+        if (!v.active || v.fxChainId != fxChainId) continue;
 
         const bool isRevVoice = v.usingReverse && rev != nullptr;
         const juce::AudioBuffer<float>* vb = isRevVoice ? rev : buf;

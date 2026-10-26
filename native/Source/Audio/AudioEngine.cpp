@@ -1,4 +1,108 @@
 #include "AudioEngine.h"
+#include <functional>
+#include <set>
+
+namespace
+{
+using FxParam = std::function<float(const char*, float)>;
+
+void configureBuiltinFx(TrackState::NoteFxStep& step, const juce::String& type,
+                        const FxParam& param, double sampleRate, int blockSize,
+                        bool dpreverbApproximation)
+{
+    if (type == "eq")
+    {
+        step.eq = std::make_unique<EQEffect>();
+        step.eq->prepare(sampleRate, blockSize);
+        step.eq->setLowGainDb(param("lowGain", 0.0f));
+        step.eq->setMidGainDb(param("midGain", 0.0f));
+        step.eq->setHighGainDb(param("highGain", 0.0f));
+    }
+    else if (type == "filter")
+    {
+        step.filter = std::make_unique<FilterEffect>();
+        step.filter->prepare(sampleRate, blockSize);
+        step.filter->setCutoff(param("cutoff", param("frequency", 20000.0f)));
+        step.filter->setResonance(param("resonance", param("Q", 0.7f)));
+    }
+    else if (type == "distortion")
+    {
+        step.distortion = std::make_unique<DistortionEffect>();
+        step.distortion->prepare(sampleRate, blockSize);
+        step.distortion->setDrive(param("amount", param("drive", 0.4f)));
+        step.distortion->setMix(param("wet", param("mix", 0.0f)));
+    }
+    else if (type == "bitcrush" || type == "bitcrusher" || type == "custom-bitcrusher")
+    {
+        step.bitcrush = std::make_unique<BitcrushEffect>();
+        step.bitcrush->prepare(sampleRate, blockSize);
+        step.bitcrush->setDrive(param("drive", 1.5f));
+        step.bitcrush->setBits(param("bits", 8.0f));
+        step.bitcrush->setDive(param("dive", 0.5f));
+        step.bitcrush->setMix(param("wet", param("mix", 0.0f)));
+    }
+    else if (type == "chorus")
+    {
+        step.chorus = std::make_unique<ChorusEffect>();
+        step.chorus->prepare(sampleRate, blockSize);
+        step.chorus->setWet(param("wet", 0.0f));
+        step.chorus->setRate(param("frequency", 1.5f));
+        step.chorus->setDepth(param("depth", 0.7f));
+        step.chorus->setDelayTime(param("delayTime", 3.5f));
+    }
+    else if (type == "phaser")
+    {
+        step.phaser = std::make_unique<PhaserEffect>();
+        step.phaser->prepare(sampleRate, blockSize);
+        step.phaser->setWet(param("wet", 0.0f));
+        step.phaser->setRate(param("frequency", 0.5f));
+        step.phaser->setBaseFrequency(param("baseFreq", 350.0f));
+        step.phaser->setOctaves(param("octaves", 3.0f));
+    }
+    else if (type == "delay")
+    {
+        step.delay = std::make_unique<DelayEffect>();
+        step.delay->prepare(sampleRate, blockSize);
+        step.delay->setTime(param("time", 0.25f));
+        step.delay->setFeedback(param("feedback", 0.25f));
+        step.delay->setWet(param("wet", 0.0f));
+    }
+    else if (type == "dpreverb")
+    {
+        step.dpreverb = std::make_unique<ReverbEffect>();
+        step.dpreverb->prepare(sampleRate, blockSize);
+        step.dpreverb->setWet(param("wet", 0.0f));
+        const float tail = juce::jlimit(0.0f, 120.0f, param("tail", 2.0f));
+        const float shape = juce::jlimit(0.05f, 1.0f, param("decay", 0.65f));
+        const float tone = juce::jlimit(0.0f, 1.0f, param("tone", 0.55f));
+        step.dpreverb->setPreDelay(juce::jlimit(0.0f, 1.0f, tail * 0.25f));
+        step.dpreverb->setRoomSize(juce::jlimit(0.05f, 0.98f, 0.35f + shape * 0.6f));
+        step.dpreverb->setDamping(juce::jlimit(0.0f, 1.0f, 1.0f - tone));
+        if (dpreverbApproximation)
+            juce::Logger::writeToLog("[AudioEngine] DPreverb rendered as a pre-delayed reverb (native)");
+    }
+    else if (type == "reverb")
+    {
+        step.reverb = std::make_unique<ReverbEffect>();
+        step.reverb->prepare(sampleRate, blockSize);
+        step.reverb->setWet(param("wet", 0.0f));
+        const float decay = juce::jlimit(0.1f, 30.0f, param("decay", 2.5f));
+        const float room = param("roomSize", juce::jlimit(0.05f, 0.98f, decay / 10.0f));
+        step.reverb->setRoomSize(juce::jlimit(0.05f, 0.98f, room));
+        step.reverb->setDamping(param("damping", 0.5f));
+        step.reverb->setPreDelay(param("preDelay", 0.01f));
+    }
+    else if (type == "freeverb")
+    {
+        step.freeverb = std::make_unique<ReverbEffect>();
+        step.freeverb->prepare(sampleRate, blockSize);
+        step.freeverb->setWet(param("wet", 0.0f));
+        step.freeverb->setRoomSize(param("roomSize", 0.7f));
+        const float damp = param("dampening", param("damping", 4000.0f));
+        step.freeverb->setDamping(damp > 1.0f ? juce::jlimit(0.0f, 1.0f, damp / 10000.0f) : damp);
+    }
+}
+}
 
 AudioEngine::AudioEngine()
 {
@@ -147,7 +251,40 @@ void AudioEngine::prepareForRate(double sampleRate, int blockSize)
                 }
             }
         }
+
+        for (auto& step : t->fxRack)
+        {
+            if (step->eq) step->eq->prepare(currentSampleRate, currentBlockSize);
+            if (step->filter) step->filter->prepare(currentSampleRate, currentBlockSize);
+            if (step->distortion) step->distortion->prepare(currentSampleRate, currentBlockSize);
+            if (step->bitcrush) step->bitcrush->prepare(currentSampleRate, currentBlockSize);
+            if (step->chorus) step->chorus->prepare(currentSampleRate, currentBlockSize);
+            if (step->phaser) step->phaser->prepare(currentSampleRate, currentBlockSize);
+            if (step->delay) step->delay->prepare(currentSampleRate, currentBlockSize);
+            if (step->dpreverb) step->dpreverb->prepare(currentSampleRate, currentBlockSize);
+            if (step->reverb) step->reverb->prepare(currentSampleRate, currentBlockSize);
+            if (step->freeverb) step->freeverb->prepare(currentSampleRate, currentBlockSize);
+            if (step->vst3 != nullptr)
+            {
+                try
+                {
+                    step->vst3->enableAllBuses();
+                    step->vst3->setRateAndBufferSizeDetails(currentSampleRate, currentBlockSize);
+                    step->vst3->prepareToPlay(currentSampleRate, currentBlockSize);
+                }
+                catch (...)
+                {
+                    juce::Logger::writeToLog("[AudioEngine] Warning: track FX VST3 prepare failed: " + step->pluginName);
+                }
+            }
+        }
     }
+}
+
+void AudioEngine::setMasterLimiter(bool enabled, float thresholdDb)
+{
+    masterLimiter.setEnabled(enabled);
+    masterLimiter.setCeiling(thresholdDb);
 }
 
 void AudioEngine::audioDeviceStopped()
@@ -526,6 +663,27 @@ bool AudioEngine::ensureNoteFxChain(const juce::String& trackId, int chainId,
         }
     }
 
+    // Keep already-loaded VST3 instances and their editor windows across parameter edits.
+    std::map<juce::String, std::vector<std::unique_ptr<TrackState::NoteFxStep>>> reusableVst3;
+    {
+        std::lock_guard<std::recursive_mutex> lock(trackMutex);
+        for (auto& t : tracks)
+        {
+            if (t->id != trackId) continue;
+            auto it = t->noteFxChains.find(chainId);
+            if (it != t->noteFxChains.end())
+            {
+                for (auto& oldStep : it->second->steps)
+                {
+                    if (oldStep->vst3 != nullptr)
+                        reusableVst3[oldStep->pluginIdentifier].push_back(std::move(oldStep));
+                }
+                it->second->steps.clear();
+            }
+            break;
+        }
+    }
+
     // Building VST3 plugins can be slow, so do it outside the track lock.
     auto chain = std::make_unique<TrackState::NoteFxChain>();
     chain->signature = signature;
@@ -553,114 +711,53 @@ bool AudioEngine::ensureNoteFxChain(const juce::String& trackId, int chainId,
         };
 
         const auto type = step->type;
-        if (type == "eq")
-        {
-            step->eq = std::make_unique<EQEffect>();
-            step->eq->prepare(currentSampleRate, currentBlockSize);
-            step->eq->setLowGainDb(param("lowGain", 0.0f));
-            step->eq->setMidGainDb(param("midGain", 0.0f));
-            step->eq->setHighGainDb(param("highGain", 0.0f));
-        }
-        else if (type == "filter")
-        {
-            step->filter = std::make_unique<FilterEffect>();
-            step->filter->prepare(currentSampleRate, currentBlockSize);
-            step->filter->setCutoff(param("cutoff", 20000.0f));
-            step->filter->setResonance(param("resonance", 0.7f));
-        }
-        else if (type == "distortion")
-        {
-            step->distortion = std::make_unique<DistortionEffect>();
-            step->distortion->prepare(currentSampleRate, currentBlockSize);
-            step->distortion->setDrive(param("amount", param("drive", 0.4f)));
-            step->distortion->setMix(param("wet", param("mix", 0.0f)));
-        }
-        else if (type == "bitcrush" || type == "bitcrusher")
-        {
-            step->bitcrush = std::make_unique<BitcrushEffect>();
-            step->bitcrush->prepare(currentSampleRate, currentBlockSize);
-            step->bitcrush->setDrive(param("drive", 4.0f));
-            step->bitcrush->setBits(param("bits", 8.0f));
-            step->bitcrush->setDive(param("dive", 0.0f));
-            step->bitcrush->setMix(param("wet", param("mix", 0.0f)));
-        }
-        else if (type == "chorus")
-        {
-            step->chorus = std::make_unique<ChorusEffect>();
-            step->chorus->prepare(currentSampleRate, currentBlockSize);
-            step->chorus->setWet(param("wet", 0.0f));
-            step->chorus->setRate(param("frequency", 1.5f));
-            step->chorus->setDepth(param("depth", 0.7f));
-            step->chorus->setDelayTime(param("delayTime", 3.5f));
-        }
-        else if (type == "phaser")
-        {
-            step->phaser = std::make_unique<PhaserEffect>();
-            step->phaser->prepare(currentSampleRate, currentBlockSize);
-            step->phaser->setWet(param("wet", 0.0f));
-            step->phaser->setRate(param("frequency", 0.5f));
-            step->phaser->setBaseFrequency(param("baseFreq", 350.0f));
-        }
-        else if (type == "delay")
-        {
-            step->delay = std::make_unique<DelayEffect>();
-            step->delay->prepare(currentSampleRate, currentBlockSize);
-            step->delay->setTime(param("time", 0.25f));
-            step->delay->setFeedback(param("feedback", 0.25f));
-            step->delay->setWet(param("wet", 0.0f));
-        }
-        else if (type == "dpreverb")
-        {
-            step->dpreverb = std::make_unique<ReverbEffect>();
-            step->dpreverb->prepare(currentSampleRate, currentBlockSize);
-            step->dpreverb->setWet(param("wet", 0.0f));
-            step->dpreverb->setRoomSize(param("tail", param("decay", 2.0f)) > 1.0f ? 0.75f : 0.5f);
-            step->dpreverb->setDamping(param("tone", 0.55f));
-        }
-        else if (type == "reverb")
-        {
-            step->reverb = std::make_unique<ReverbEffect>();
-            step->reverb->prepare(currentSampleRate, currentBlockSize);
-            step->reverb->setWet(param("wet", 0.0f));
-            const float decay = param("decay", 2.5f);
-            step->reverb->setRoomSize(param("roomSize", juce::jlimit(0.05f, 1.0f, decay / 10.0f)));
-            step->reverb->setDamping(param("damping", 0.5f));
-        }
-        else if (type == "freeverb")
-        {
-            step->freeverb = std::make_unique<ReverbEffect>();
-            step->freeverb->prepare(currentSampleRate, currentBlockSize);
-            step->freeverb->setWet(param("wet", 0.0f));
-            step->freeverb->setRoomSize(param("roomSize", 0.7f));
-            const float damp = param("dampening", param("damping", 4000.0f));
-            step->freeverb->setDamping(damp > 1.0f ? damp / 10000.0f : damp);
-        }
-        else if (type == "vst3")
+        if (type == "vst3")
         {
             const auto pluginId = obj->getProperty("pluginId").toString();
             if (pluginId.isEmpty()) continue;
-            juce::String errorMsg;
-            auto plugin = vst3Host.instantiatePlugin(pluginId, currentSampleRate, currentBlockSize, errorMsg);
-            if (plugin == nullptr)
+            auto reuse = reusableVst3.find(pluginId);
+            if (reuse != reusableVst3.end() && !reuse->second.empty())
             {
-                juce::Logger::writeToLog("[AudioEngine] Note FX VST3 failed (" + pluginId + "): " + errorMsg);
-                continue;
+                auto old = std::move(reuse->second.front());
+                reuse->second.erase(reuse->second.begin());
+                step->vst3 = std::move(old->vst3);
+                step->editorWindow = std::move(old->editorWindow);
+                step->pluginName = old->pluginName;
+                step->pluginIdentifier = pluginId;
             }
-            try
+            else
             {
-                plugin->enableAllBuses();
-                plugin->setRateAndBufferSizeDetails(currentSampleRate, currentBlockSize);
-                plugin->prepareToPlay(currentSampleRate, currentBlockSize);
+                juce::String errorMsg;
+                auto plugin = vst3Host.instantiatePlugin(pluginId, currentSampleRate, currentBlockSize, errorMsg);
+                if (plugin == nullptr)
+                {
+                    juce::Logger::writeToLog("[AudioEngine] Note FX VST3 failed (" + pluginId + "): " + errorMsg);
+                    continue;
+                }
+                try
+                {
+                    plugin->enableAllBuses();
+                    plugin->setRateAndBufferSizeDetails(currentSampleRate, currentBlockSize);
+                    plugin->prepareToPlay(currentSampleRate, currentBlockSize);
+                }
+                catch (...) {}
+                step->pluginName = plugin->getName();
+                step->pluginIdentifier = pluginId;
+                step->vst3 = std::move(plugin);
             }
-            catch (...) {}
-            step->pluginName = plugin->getName();
-            step->pluginIdentifier = pluginId;
-            step->vst3 = std::move(plugin);
         }
-        else
+        else if (type == "custom" || type == "script" || type == "customjs")
         {
             // Custom JS FX only exist in the browser engine.
             continue;
+        }
+        else
+        {
+            configureBuiltinFx(*step, type, param, currentSampleRate, currentBlockSize, false);
+            const bool built = step->eq || step->filter || step->distortion || step->bitcrush
+                            || step->chorus || step->phaser || step->delay || step->dpreverb
+                            || step->reverb || step->freeverb;
+            if (!built) continue;
         }
 
         chain->steps.push_back(std::move(step));
@@ -677,6 +774,231 @@ bool AudioEngine::ensureNoteFxChain(const juce::String& trackId, int chainId,
         return true;
     }
     return false;
+}
+
+bool AudioEngine::setTrackFxChain(const juce::String& trackId, const juce::String& signature,
+                                  const juce::var& effects)
+{
+    auto* effectsArray = effects.getArray();
+    if (effectsArray == nullptr) return false;
+
+    std::lock_guard<std::recursive_mutex> lock(trackMutex);
+    for (auto& t : tracks)
+    {
+        if (t->id != trackId) continue;
+        if (t->fxRackActive && t->fxRackSignature == signature)
+            return true;
+
+        // Keep already-loaded VST3 plugins so reordering or slider moves never reload them.
+        std::map<juce::String, std::unique_ptr<TrackState::NoteFxStep>> reusable;
+        for (auto& step : t->fxRack)
+        {
+            if (step->vst3 != nullptr && step->fxId.isNotEmpty())
+            {
+                reusable[step->fxId] = std::move(step);
+            }
+        }
+        t->fxRack.clear();
+
+        std::vector<std::unique_ptr<TrackState::NoteFxStep>> rack;
+        rack.reserve((size_t)effectsArray->size());
+
+        for (const auto& ev : *effectsArray)
+        {
+            auto* obj = ev.getDynamicObject();
+            if (obj == nullptr) continue;
+
+            auto step = std::make_unique<TrackState::NoteFxStep>();
+            step->type = obj->getProperty("type").toString().toLowerCase();
+            step->fxId = obj->getProperty("instanceId").toString();
+            if (step->fxId.isEmpty())
+                step->fxId = obj->getProperty("fxId").toString();
+            if (obj->hasProperty("bypassed"))
+            {
+                const auto b = obj->getProperty("bypassed");
+                step->bypassed = b.isBool() ? (bool)b : (float)b > 0.5f;
+            }
+            if (obj->hasProperty("wet"))
+                step->wet = juce::jlimit(0.0f, 1.0f, (float)obj->getProperty("wet"));
+
+            auto* params = obj->getProperty("params").getDynamicObject();
+            auto param = [params](const char* name, float fallback) -> float
+            {
+                if (params == nullptr || !params->hasProperty(name)) return fallback;
+                return (float)params->getProperty(name);
+            };
+
+            if (step->type == "vst3")
+            {
+                const auto pluginId = obj->getProperty("pluginId").toString();
+                if (pluginId.isEmpty()) continue;
+
+                auto old = reusable.find(step->fxId);
+                if (old != reusable.end() && old->second->pluginIdentifier == pluginId
+                    && old->second->vst3 != nullptr)
+                {
+                    step->vst3 = std::move(old->second->vst3);
+                    step->editorWindow = std::move(old->second->editorWindow);
+                    step->pluginName = old->second->pluginName;
+                    step->pluginIdentifier = pluginId;
+                }
+                else
+                {
+                    juce::String errorMsg;
+                    auto plugin = vst3Host.instantiatePlugin(pluginId, currentSampleRate, currentBlockSize, errorMsg);
+                    if (plugin == nullptr)
+                    {
+                        juce::Logger::writeToLog("[AudioEngine] Track FX VST3 failed (" + pluginId + "): " + errorMsg);
+                        continue;
+                    }
+                    try
+                    {
+                        plugin->enableAllBuses();
+                        plugin->setRateAndBufferSizeDetails(currentSampleRate, currentBlockSize);
+                        plugin->prepareToPlay(currentSampleRate, currentBlockSize);
+                    }
+                    catch (...) {}
+                    step->pluginName = plugin->getName();
+                    step->pluginIdentifier = pluginId;
+                    step->vst3 = std::move(plugin);
+                }
+            }
+            else if (step->type == "custom" || step->type == "script" || step->type == "customjs")
+            {
+                // Arbitrary JS cannot run inside JUCE; the browser path still renders it.
+                continue;
+            }
+            else
+            {
+                configureBuiltinFx(*step, step->type, param, currentSampleRate, currentBlockSize, true);
+                const bool built = step->eq || step->filter || step->distortion || step->bitcrush
+                                || step->chorus || step->phaser || step->delay || step->dpreverb
+                                || step->reverb || step->freeverb;
+                if (!built) continue;
+            }
+
+            rack.push_back(std::move(step));
+        }
+
+        t->fxRack = std::move(rack);
+        t->fxRackSignature = signature;
+        t->fxRackActive = true;
+        return true;
+    }
+    return false;
+}
+
+void AudioEngine::pruneNoteFxChains(const juce::String& trackId, const juce::var& activeChainIds)
+{
+    std::set<int> active;
+    if (auto* arr = activeChainIds.getArray())
+        for (const auto& id : *arr)
+            active.insert((int)id);
+
+    std::lock_guard<std::recursive_mutex> lock(trackMutex);
+    for (auto& t : tracks)
+    {
+        if (t->id != trackId) continue;
+        for (auto it = t->noteFxChains.begin(); it != t->noteFxChains.end();)
+        {
+            if (active.count(it->first) == 0)
+            {
+                for (auto& step : it->second->steps)
+                    step->editorWindow.reset();
+                it = t->noteFxChains.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+
+        // Chain-tagged VST3 instrument slots are only reachable through their chain.
+        for (auto it = t->noteVst3Slots.begin(); it != t->noteVst3Slots.end();)
+        {
+            if ((*it)->fxChainId != 0 && active.count((*it)->fxChainId) == 0)
+                it = t->noteVst3Slots.erase(it);
+            else
+                ++it;
+        }
+        break;
+    }
+}
+
+bool AudioEngine::openNoteFxVst3Editor(const juce::String& trackId, int chainId, int stepIndex)
+{
+    juce::MessageManager::callAsync([this, trackId, chainId, stepIndex]() {
+        juce::AudioPluginInstance* instPtr = nullptr;
+        juce::String title;
+        TrackState::NoteFxStep* stepPtr = nullptr;
+        {
+            std::lock_guard<std::recursive_mutex> lock(trackMutex);
+            for (auto& t : tracks)
+            {
+                if (t->id != trackId) continue;
+                auto chainIt = t->noteFxChains.find(chainId);
+                if (chainIt == t->noteFxChains.end()) return;
+                auto& steps = chainIt->second->steps;
+                if (stepIndex < 0 || stepIndex >= (int)steps.size()) return;
+                stepPtr = steps[(size_t)stepIndex].get();
+                if (stepPtr == nullptr || stepPtr->vst3 == nullptr) return;
+                if (stepPtr->editorWindow != nullptr)
+                {
+                    stepPtr->editorWindow->setVisible(true);
+                    stepPtr->editorWindow->toFront(true);
+                    return;
+                }
+                instPtr = stepPtr->vst3.get();
+                title = stepPtr->pluginName.isNotEmpty() ? stepPtr->pluginName : "Note FX VST3";
+                break;
+            }
+        }
+
+        if (instPtr == nullptr) return;
+
+        auto newWin = std::make_unique<Vst3PluginWindow>(
+            instPtr,
+            title,
+            [this, trackId, chainId, instPtr]() {
+                juce::MessageManager::callAsync([this, trackId, chainId, instPtr]() {
+                    std::lock_guard<std::recursive_mutex> lock(trackMutex);
+                    for (auto& trk : tracks)
+                    {
+                        if (trk->id != trackId) continue;
+                        auto chainIt = trk->noteFxChains.find(chainId);
+                        if (chainIt == trk->noteFxChains.end()) return;
+                        for (auto& step : chainIt->second->steps)
+                        {
+                            if (step->vst3.get() == instPtr)
+                            {
+                                step->editorWindow.reset();
+                                return;
+                            }
+                        }
+                        return;
+                    }
+                });
+            }
+        );
+
+        std::lock_guard<std::recursive_mutex> lock(trackMutex);
+        for (auto& trk : tracks)
+        {
+            if (trk->id != trackId) continue;
+            auto chainIt = trk->noteFxChains.find(chainId);
+            if (chainIt == trk->noteFxChains.end()) return;
+            for (auto& step : chainIt->second->steps)
+            {
+                if (step->vst3.get() == instPtr)
+                {
+                    step->editorWindow = std::move(newWin);
+                    return;
+                }
+            }
+            return;
+        }
+    });
+    return true;
 }
 
 void AudioEngine::setTrackDrumKit(const juce::String& trackId, const juce::String& kitName)
@@ -792,7 +1114,37 @@ void AudioEngine::playNote(const juce::String& trackId,
         {
             TrackState::NoteVst3Slot* slot = nullptr;
             for (auto& s : targetTrack->noteVst3Slots)
-                if (s->identifier == expression.overrideValue && s->plugin != nullptr) { slot = s.get(); break; }
+                if (s->identifier == expression.overrideValue
+                    && s->fxChainId == expression.fxChainId
+                    && s->plugin != nullptr) { slot = s.get(); break; }
+
+            if (slot == nullptr && expression.fxChainId != 0)
+            {
+                juce::String errorMsg;
+                auto plugin = vst3Host.instantiatePlugin(expression.overrideValue, currentSampleRate,
+                                                         currentBlockSize, errorMsg);
+                if (plugin != nullptr)
+                {
+                    try
+                    {
+                        plugin->enableAllBuses();
+                        plugin->setRateAndBufferSizeDetails(currentSampleRate, currentBlockSize);
+                        plugin->prepareToPlay(currentSampleRate, currentBlockSize);
+                    }
+                    catch (...) {}
+                    auto newSlot = std::make_unique<TrackState::NoteVst3Slot>();
+                    newSlot->identifier = expression.overrideValue;
+                    newSlot->name = plugin->getName();
+                    newSlot->fxChainId = expression.fxChainId;
+                    newSlot->plugin = std::move(plugin);
+                    slot = newSlot.get();
+                    targetTrack->noteVst3Slots.push_back(std::move(newSlot));
+                }
+                else
+                {
+                    juce::Logger::writeToLog("[AudioEngine] Per-note FX VST3 slot failed: " + errorMsg);
+                }
+            }
 
             if (slot != nullptr)
             {
@@ -862,11 +1214,10 @@ void AudioEngine::playNote(const juce::String& trackId,
 
     if (targetTrack->samplerEnabled && targetTrack->vst3Instrument == nullptr)
     {
-        targetTrack->sampleEngine.noteOn(noteId, pitchMidi, velocity, durationSeconds, pitchOffsetSemitones);
+        targetTrack->sampleEngine.noteOn(noteId, pitchMidi, velocity, durationSeconds, pitchOffsetSemitones, expression.fxChainId);
     }
     else if (inst == "vst3" || targetTrack->vst3Instrument != nullptr)
     {
-        std::lock_guard<std::mutex> midiLock(targetTrack->midiMutex);
         int rawPitch = (int)(pitchMidi + 0.5f);
         int midiPitch = rawPitch;
         if (inst == "drum" && rawPitch >= 0 && rawPitch < 16)
@@ -893,13 +1244,66 @@ void AudioEngine::playNote(const juce::String& trackId,
         }
         midiPitch = juce::jlimit(0, 127, midiPitch);
         int midiVel = juce::jlimit(1, 127, (int)(velocity * 127.0f));
-        targetTrack->pendingMidi.addEvent(juce::MidiMessage::noteOn(1, midiPitch, (juce::uint8)midiVel), 0);
+        const int samples = durationSeconds > 0.0f
+            ? std::max(1, (int)(durationSeconds * currentSampleRate)) : 0;
 
-        if (durationSeconds > 0.0f)
+        // A per-note chain needs an isolated instrument output, so the track's VST3 is
+        // cloned (with its current state) into a chain-tagged slot when one exists.
+        if (expression.fxChainId != 0 && targetTrack->vst3Instrument != nullptr
+            && targetTrack->noteFxChains.count(expression.fxChainId) > 0)
         {
-            int samples = std::max(1, (int)(durationSeconds * currentSampleRate));
-            targetTrack->scheduledNoteOffs.push_back({ midiPitch, samples });
+            const auto identifier = targetTrack->vst3InstrumentIdentifier;
+            TrackState::NoteVst3Slot* slot = nullptr;
+            for (auto& s : targetTrack->noteVst3Slots)
+                if (s->identifier == identifier && s->fxChainId == expression.fxChainId
+                    && s->plugin != nullptr) { slot = s.get(); break; }
+
+            if (slot == nullptr && identifier.isNotEmpty())
+            {
+                juce::String errorMsg;
+                auto plugin = vst3Host.instantiatePlugin(identifier, currentSampleRate,
+                                                         currentBlockSize, errorMsg);
+                if (plugin != nullptr)
+                {
+                    try
+                    {
+                        plugin->enableAllBuses();
+                        plugin->setRateAndBufferSizeDetails(currentSampleRate, currentBlockSize);
+                        plugin->prepareToPlay(currentSampleRate, currentBlockSize);
+                        juce::MemoryBlock state;
+                        targetTrack->vst3Instrument->getStateInformation(state);
+                        if (state.getSize() > 0)
+                            plugin->setStateInformation(state.getData(), (int)state.getSize());
+                    }
+                    catch (...) {}
+                    auto newSlot = std::make_unique<TrackState::NoteVst3Slot>();
+                    newSlot->identifier = identifier;
+                    newSlot->name = plugin->getName();
+                    newSlot->fxChainId = expression.fxChainId;
+                    newSlot->plugin = std::move(plugin);
+                    slot = newSlot.get();
+                    targetTrack->noteVst3Slots.push_back(std::move(newSlot));
+                }
+                else
+                {
+                    juce::Logger::writeToLog("[AudioEngine] Track VST3 clone failed: " + errorMsg);
+                }
+            }
+
+            if (slot != nullptr)
+            {
+                std::lock_guard<std::mutex> midiLock(slot->midiMutex);
+                slot->pendingMidi.addEvent(juce::MidiMessage::noteOn(1, midiPitch, (juce::uint8)midiVel), 0);
+                if (samples > 0)
+                    slot->scheduledNoteOffs.push_back({ midiPitch, samples });
+                return;
+            }
         }
+
+        std::lock_guard<std::mutex> midiLock(targetTrack->midiMutex);
+        targetTrack->pendingMidi.addEvent(juce::MidiMessage::noteOn(1, midiPitch, (juce::uint8)midiVel), 0);
+        if (samples > 0)
+            targetTrack->scheduledNoteOffs.push_back({ midiPitch, samples });
     }
     else if (inst == "drum")
     {
@@ -909,9 +1313,13 @@ void AudioEngine::playNote(const juce::String& trackId,
     {
         voiceManager.noteOnPhysical(trackId, noteId, pitchMidi, velocity, durationSeconds, 0.5f, 0.5f, expression.fxChainId);
     }
-    else if (inst == "vocal")
+    else if (inst == "vocal" || (inst == "synth" && targetTrack->synthPreset == "vocal"))
     {
         voiceManager.noteOnVocal(trackId, noteId, pitchMidi, velocity, durationSeconds, lyric, 1.0f, 0.1f, 0.85f, expression.fxChainId);
+    }
+    else if (inst == "synth" && targetTrack->synthPreset == "physical")
+    {
+        voiceManager.noteOnPhysical(trackId, noteId, pitchMidi, velocity, durationSeconds, 0.5f, 0.5f, expression.fxChainId);
     }
     else // Default "synth"
     {
@@ -1196,7 +1604,7 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
         {
             if (t->sampleEngine.isReady())
             {
-                t->sampleEngine.renderBlock(trackL, trackR, numSamples);
+                t->sampleEngine.renderBlock(trackL, trackR, numSamples, 0);
 
                 // Track fader + pan still apply on top of the sampler's own volume/pan
                 float leftGain = t->volume * std::cos((t->pan + 1.0f) * juce::MathConstants<float>::pi * 0.25f);
@@ -1219,7 +1627,7 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
 
             for (auto& slot : t->noteVst3Slots)
             {
-                if (slot->plugin == nullptr) continue;
+                if (slot->plugin == nullptr || slot->fxChainId != 0) continue;
 
                 juce::MidiBuffer midiForBlock;
                 {
@@ -1274,9 +1682,55 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
                 // Pre-fader so the chain hears the instrument at unity, like a per-note insert.
                 voiceManager.renderVoices(t->id, chainL, chainR, numSamples, 0.0f, 1.0f, chainEntry.first);
                 t->drumEngine.renderBlock(chainL, chainR, numSamples, 0.0f, 1.0f, chainEntry.first);
+                t->sampleEngine.renderBlock(chainL, chainR, numSamples, chainEntry.first);
+
+                // Per-note VST3 instrument overrides tagged with this chain render here too.
+                for (auto& slot : t->noteVst3Slots)
+                {
+                    if (slot->plugin == nullptr || slot->fxChainId != chainEntry.first) continue;
+
+                    juce::MidiBuffer slotMidi;
+                    {
+                        std::lock_guard<std::mutex> midiLock(slot->midiMutex);
+                        slotMidi.swapWith(slot->pendingMidi);
+                        for (auto it = slot->scheduledNoteOffs.begin(); it != slot->scheduledNoteOffs.end(); )
+                        {
+                            if (it->sampleCountdown <= numSamples)
+                            {
+                                const int offset = std::clamp(it->sampleCountdown, 0, numSamples - 1);
+                                slotMidi.addEvent(juce::MidiMessage::noteOff(1, it->midiPitch), offset);
+                                it = slot->scheduledNoteOffs.erase(it);
+                            }
+                            else
+                            {
+                                it->sampleCountdown -= numSamples;
+                                ++it;
+                            }
+                        }
+                    }
+
+                    const int outCh = slot->plugin->getTotalNumOutputChannels();
+                    const int inCh = slot->plugin->getTotalNumInputChannels();
+                    const int reqCh = std::max({ 2, inCh, outCh });
+                    fxWetBuffer.setSize(reqCh, numSamples, false, false, true);
+                    fxWetBuffer.clear();
+
+                    if (safePluginProcessBlock(slot->plugin.get(), fxWetBuffer, slotMidi))
+                    {
+                        noteFxBuffer.addFrom(0, 0, fxWetBuffer, 0, 0, numSamples);
+                        noteFxBuffer.addFrom(1, 0, fxWetBuffer, outCh >= 2 ? 1 : 0, 0, numSamples);
+                    }
+                }
 
                 if (chain.steps.empty())
+                {
+                    // Only unsupported (custom JS) steps: fall back to the track rack.
+                    noteFxBuffer.applyGain(0, 0, numSamples, leftGain);
+                    noteFxBuffer.applyGain(1, 0, numSamples, rightGain);
+                    trackBuffer.addFrom(0, 0, noteFxBuffer, 0, 0, numSamples);
+                    trackBuffer.addFrom(1, 0, noteFxBuffer, 1, 0, numSamples);
                     continue;
+                }
 
                 juce::dsp::AudioBlock<float> chainBlock(noteFxBuffer);
                 for (auto& step : chain.steps)
@@ -1351,75 +1805,145 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
             }
         }
 
-        // Process Track Native FX Rack
+        // Process the track FX rack. The UI supplies an ordered instance list (including
+        // duplicates and VST3 steps) through setTrackFxChain; older sessions without one
+        // keep the fixed legacy sequence below.
         juce::dsp::AudioBlock<float> trackBlock(trackBuffer);
-        t->eq.process(trackBuffer);
-        t->distortion.process(trackBlock);
-        t->bitcrush.process(trackBuffer);
-        t->filter.process(trackBlock);
-        t->chorus.process(trackBuffer);
-        t->phaser.process(trackBuffer);
-        t->delay.process(trackBlock);
-        t->dpreverb.process(trackBlock);
-        t->reverb.process(trackBlock);
-        t->freeverb.process(trackBlock);
-
-        // Process Track VST3 FX Chain (with SEH crash protection & robust multi-channel routing)
-        juce::MidiBuffer emptyMidi;
-        for (auto& fx : t->vst3FxChain)
+        if (t->fxRackActive)
         {
-            if (!fx->bypassed && fx->plugin != nullptr && fx->wet > 0.0001f)
+            juce::MidiBuffer emptyMidi;
+            for (auto& step : t->fxRack)
             {
-                int inCh = fx->plugin->getTotalNumInputChannels();
-                int outCh = fx->plugin->getTotalNumOutputChannels();
-                int reqCh = std::max({ 2, inCh, outCh });
+                if (step->bypassed) continue;
 
-                fxWetBuffer.setSize(reqCh, numSamples, false, false, true);
-                fxWetBuffer.clear();
-
-                // Supply stereo track audio to input channels
-                if (inCh >= 2)
+                if (step->vst3 != nullptr)
                 {
-                    fxWetBuffer.copyFrom(0, 0, trackBuffer, 0, 0, numSamples);
-                    fxWetBuffer.copyFrom(1, 0, trackBuffer, 1, 0, numSamples);
-                }
-                else if (inCh == 1)
-                {
-                    // Mono effect input: average stereo to mono
-                    auto* monoIn = fxWetBuffer.getWritePointer(0);
-                    const auto* l = trackBuffer.getReadPointer(0);
-                    const auto* r = trackBuffer.getReadPointer(1);
-                    for (int s = 0; s < numSamples; ++s)
-                        monoIn[s] = 0.5f * (l[s] + r[s]);
-                }
-                else
-                {
-                    fxWetBuffer.copyFrom(0, 0, trackBuffer, 0, 0, numSamples);
-                    if (reqCh >= 2)
-                        fxWetBuffer.copyFrom(1, 0, trackBuffer, 1, 0, numSamples);
-                }
+                    const int inCh = step->vst3->getTotalNumInputChannels();
+                    const int outCh = step->vst3->getTotalNumOutputChannels();
+                    const int reqCh = std::max({ 2, inCh, outCh });
 
-                if (safePluginProcessBlock(fx->plugin.get(), fxWetBuffer, emptyMidi))
-                {
-                    float wetAmt = juce::jlimit(0.0f, 1.0f, fx->wet);
-                    float dryAmt = 1.0f - wetAmt;
-
-                    const float* wetL = fxWetBuffer.getReadPointer(0);
-                    const float* wetR = (outCh >= 2) ? fxWetBuffer.getReadPointer(1) : wetL;
-
-                    float* destL = trackBuffer.getWritePointer(0);
-                    float* destR = trackBuffer.getWritePointer(1);
-
-                    for (int s = 0; s < numSamples; ++s)
+                    fxWetBuffer.setSize(reqCh, numSamples, false, false, true);
+                    fxWetBuffer.clear();
+                    if (inCh >= 2)
                     {
-                        destL[s] = destL[s] * dryAmt + wetL[s] * wetAmt;
-                        destR[s] = destR[s] * dryAmt + wetR[s] * wetAmt;
+                        fxWetBuffer.copyFrom(0, 0, trackBuffer, 0, 0, numSamples);
+                        fxWetBuffer.copyFrom(1, 0, trackBuffer, 1, 0, numSamples);
+                    }
+                    else if (inCh == 1)
+                    {
+                        auto* monoIn = fxWetBuffer.getWritePointer(0);
+                        const auto* l = trackBuffer.getReadPointer(0);
+                        const auto* r = trackBuffer.getReadPointer(1);
+                        for (int s = 0; s < numSamples; ++s)
+                            monoIn[s] = 0.5f * (l[s] + r[s]);
+                    }
+                    else
+                    {
+                        fxWetBuffer.copyFrom(0, 0, trackBuffer, 0, 0, numSamples);
+                        if (reqCh >= 2)
+                            fxWetBuffer.copyFrom(1, 0, trackBuffer, 1, 0, numSamples);
+                    }
+
+                    if (step->wet > 0.0001f && safePluginProcessBlock(step->vst3.get(), fxWetBuffer, emptyMidi))
+                    {
+                        const float wetAmt = juce::jlimit(0.0f, 1.0f, step->wet);
+                        const float dryAmt = 1.0f - wetAmt;
+                        const float* wetL = fxWetBuffer.getReadPointer(0);
+                        const float* wetR = (outCh >= 2) ? fxWetBuffer.getReadPointer(1) : wetL;
+                        float* destL = trackBuffer.getWritePointer(0);
+                        float* destR = trackBuffer.getWritePointer(1);
+                        for (int s = 0; s < numSamples; ++s)
+                        {
+                            destL[s] = destL[s] * dryAmt + wetL[s] * wetAmt;
+                            destR[s] = destR[s] * dryAmt + wetR[s] * wetAmt;
+                        }
+                    }
+                    else if (step->wet > 0.0001f)
+                    {
+                        step->bypassed = true;
+                        juce::Logger::writeToLog("[AudioEngine] Track FX VST3 crash isolated: " + step->pluginName);
                     }
                 }
-                else
+                else if (step->eq) step->eq->process(trackBuffer);
+                else if (step->distortion) step->distortion->process(trackBlock);
+                else if (step->bitcrush) step->bitcrush->process(trackBuffer);
+                else if (step->filter) step->filter->process(trackBlock);
+                else if (step->chorus) step->chorus->process(trackBuffer);
+                else if (step->phaser) step->phaser->process(trackBuffer);
+                else if (step->delay) step->delay->process(trackBlock);
+                else if (step->dpreverb) step->dpreverb->process(trackBlock);
+                else if (step->reverb) step->reverb->process(trackBlock);
+                else if (step->freeverb) step->freeverb->process(trackBlock);
+            }
+        }
+        else
+        {
+            t->eq.process(trackBuffer);
+            t->distortion.process(trackBlock);
+            t->bitcrush.process(trackBuffer);
+            t->filter.process(trackBlock);
+            t->chorus.process(trackBuffer);
+            t->phaser.process(trackBuffer);
+            t->delay.process(trackBlock);
+            t->dpreverb.process(trackBlock);
+            t->reverb.process(trackBlock);
+            t->freeverb.process(trackBlock);
+
+            // Legacy standalone VST3 FX chain (sessions that predate the unified rack).
+            juce::MidiBuffer emptyMidi;
+            for (auto& fx : t->vst3FxChain)
+            {
+                if (!fx->bypassed && fx->plugin != nullptr && fx->wet > 0.0001f)
                 {
-                    fx->bypassed = true;
-                    juce::Logger::writeToLog("[AudioEngine] VST3 FX crash isolated in: " + fx->pluginName + " (bypassed)");
+                    int inCh = fx->plugin->getTotalNumInputChannels();
+                    int outCh = fx->plugin->getTotalNumOutputChannels();
+                    int reqCh = std::max({ 2, inCh, outCh });
+
+                    fxWetBuffer.setSize(reqCh, numSamples, false, false, true);
+                    fxWetBuffer.clear();
+
+                    if (inCh >= 2)
+                    {
+                        fxWetBuffer.copyFrom(0, 0, trackBuffer, 0, 0, numSamples);
+                        fxWetBuffer.copyFrom(1, 0, trackBuffer, 1, 0, numSamples);
+                    }
+                    else if (inCh == 1)
+                    {
+                        auto* monoIn = fxWetBuffer.getWritePointer(0);
+                        const auto* l = trackBuffer.getReadPointer(0);
+                        const auto* r = trackBuffer.getReadPointer(1);
+                        for (int s = 0; s < numSamples; ++s)
+                            monoIn[s] = 0.5f * (l[s] + r[s]);
+                    }
+                    else
+                    {
+                        fxWetBuffer.copyFrom(0, 0, trackBuffer, 0, 0, numSamples);
+                        if (reqCh >= 2)
+                            fxWetBuffer.copyFrom(1, 0, trackBuffer, 1, 0, numSamples);
+                    }
+
+                    if (safePluginProcessBlock(fx->plugin.get(), fxWetBuffer, emptyMidi))
+                    {
+                        float wetAmt = juce::jlimit(0.0f, 1.0f, fx->wet);
+                        float dryAmt = 1.0f - wetAmt;
+
+                        const float* wetL = fxWetBuffer.getReadPointer(0);
+                        const float* wetR = (outCh >= 2) ? fxWetBuffer.getReadPointer(1) : wetL;
+
+                        float* destL = trackBuffer.getWritePointer(0);
+                        float* destR = trackBuffer.getWritePointer(1);
+
+                        for (int s = 0; s < numSamples; ++s)
+                        {
+                            destL[s] = destL[s] * dryAmt + wetL[s] * wetAmt;
+                            destR[s] = destR[s] * dryAmt + wetR[s] * wetAmt;
+                        }
+                    }
+                    else
+                    {
+                        fx->bypassed = true;
+                        juce::Logger::writeToLog("[AudioEngine] VST3 FX crash isolated in: " + fx->pluginName + " (bypassed)");
+                    }
                 }
             }
         }
@@ -1435,6 +1959,17 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
         {
             outL[i] += finalTrackL[i];
             outR[i] += finalTrackR[i];
+        }
+    }
+
+    // Master fader sits before the ceiling limiter, matching the browser chain.
+    if (std::abs(masterVolume - 1.0f) > 0.0001f)
+    {
+        const float gain = masterVolume;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            outL[i] *= gain;
+            outR[i] *= gain;
         }
     }
 
@@ -1784,6 +2319,16 @@ void AudioEngine::setTrackVst3FxBypass(const juce::String& trackId, const juce::
                     break;
                 }
             }
+            for (auto& step : t->fxRack)
+            {
+                if (step->type == "vst3" && step->fxId == fxId)
+                {
+                    step->bypassed = bypassed;
+                    if (bypassed && step->vst3 != nullptr)
+                        step->vst3->reset();
+                    break;
+                }
+            }
             break;
         }
     }
@@ -1804,6 +2349,14 @@ void AudioEngine::setTrackVst3FxWet(const juce::String& trackId, const juce::Str
                     break;
                 }
             }
+            for (auto& step : t->fxRack)
+            {
+                if (step->type == "vst3" && step->fxId == fxId)
+                {
+                    step->wet = juce::jlimit(0.0f, 1.0f, wet);
+                    break;
+                }
+            }
             break;
         }
     }
@@ -1818,7 +2371,25 @@ void AudioEngine::openTrackVst3FxEditor(const juce::String& trackId, const juce:
             std::lock_guard<std::recursive_mutex> lock(trackMutex);
             for (auto& t : tracks)
             {
-                if (t->id == trackId)
+                if (t->id != trackId) continue;
+
+                for (auto& step : t->fxRack)
+                {
+                    if (step->type == "vst3" && step->fxId == fxId && step->vst3 != nullptr)
+                    {
+                        if (step->editorWindow != nullptr)
+                        {
+                            step->editorWindow->setVisible(true);
+                            step->editorWindow->toFront(true);
+                            return;
+                        }
+                        pluginPtr = step->vst3.get();
+                        title = step->pluginName.isNotEmpty() ? step->pluginName : "VST3 Effect";
+                        break;
+                    }
+                }
+
+                if (pluginPtr == nullptr)
                 {
                     for (auto& fx : t->vst3FxChain)
                     {
@@ -1835,8 +2406,8 @@ void AudioEngine::openTrackVst3FxEditor(const juce::String& trackId, const juce:
                             break;
                         }
                     }
-                    break;
                 }
+                break;
             }
         }
 
@@ -1848,36 +2419,52 @@ void AudioEngine::openTrackVst3FxEditor(const juce::String& trackId, const juce:
             [this, trackId, fxId]() {
                 juce::MessageManager::callAsync([this, trackId, fxId]() {
                     std::lock_guard<std::recursive_mutex> lock(trackMutex);
-                    for (auto& trk : tracks) {
-                        if (trk->id == trackId) {
-                            for (auto& f : trk->vst3FxChain) {
-                                if (f->fxId == fxId) {
-                                    f->editorWindow.reset();
-                                    return;
-                                }
+                    for (auto& trk : tracks)
+                    {
+                        if (trk->id != trackId) continue;
+                        for (auto& step : trk->fxRack)
+                        {
+                            if (step->type == "vst3" && step->fxId == fxId)
+                            {
+                                step->editorWindow.reset();
+                                return;
                             }
                         }
+                        for (auto& f : trk->vst3FxChain)
+                        {
+                            if (f->fxId == fxId)
+                            {
+                                f->editorWindow.reset();
+                                return;
+                            }
+                        }
+                        return;
                     }
                 });
             }
         );
 
+        std::lock_guard<std::recursive_mutex> lock(trackMutex);
+        for (auto& t : tracks)
         {
-            std::lock_guard<std::recursive_mutex> lock(trackMutex);
-            for (auto& t : tracks)
+            if (t->id != trackId) continue;
+            for (auto& step : t->fxRack)
             {
-                if (t->id == trackId)
+                if (step->type == "vst3" && step->fxId == fxId && step->vst3.get() == pluginPtr)
                 {
-                    for (auto& fx : t->vst3FxChain)
-                    {
-                        if (fx->fxId == fxId && fx->plugin.get() == pluginPtr)
-                        {
-                            fx->editorWindow = std::move(newWin);
-                            return;
-                        }
-                    }
+                    step->editorWindow = std::move(newWin);
+                    return;
                 }
             }
+            for (auto& fx : t->vst3FxChain)
+            {
+                if (fx->fxId == fxId && fx->plugin.get() == pluginPtr)
+                {
+                    fx->editorWindow = std::move(newWin);
+                    return;
+                }
+            }
+            return;
         }
     });
 }

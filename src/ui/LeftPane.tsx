@@ -1217,6 +1217,8 @@ export default function LeftPane() {
   const [draggingIndex, setDraggingIndex] = useState<number | null>(null)
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
   const [editingTrackId, setEditingTrackId] = useState<string | null>(null)
+  const [editingGroupId, setEditingGroupId] = useState<string | null>(null)
+  const [groupNameDraft, setGroupNameDraft] = useState('')
   const [chordFamily, setChordFamily] = useState('Triads')
   const [customChordFormula, setCustomChordFormula] = useState('0, 4, 7')
   const [chordRootNote, setChordRootNote] = useState<number>(0)
@@ -9291,29 +9293,119 @@ for (let channel = 0; channel < input.length; channel++) {
         </Section>
 
         <Section title="Groups" defaultOpen={false}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
             {groups.length === 0 && <div style={{ fontSize: '11px', color: '#444' }}>No groups yet.</div>}
-            {groups.map(group => (
-              <div key={group.id} style={{ borderRadius: '6px', border: `1px solid ${group.color}33`, background: `${group.color}0a`, overflow: 'hidden' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '5px 8px' }}>
-                  <button onClick={() => updateGroup(group.id, { collapsed: !group.collapsed })} style={{ background: 'none', border: 'none', color: group.color, cursor: 'pointer', fontSize: '12px', lineHeight: 1 }}>{group.collapsed ? '>' : 'v'}</button>
-                  <span style={{ flex: 1, fontSize: '11px', fontWeight: 700, color: group.color }}>{group.name}</span>
-                  <button onClick={() => { if (activeTrackId) updateGroup(group.id, { trackIds: [...new Set([...group.trackIds, activeTrackId])] }) }} style={{ background: 'none', border: 'none', color: '#aaa', cursor: 'pointer', fontSize: '10px' }} title="Add active track">+T</button>
-                  <button onClick={() => removeGroup(group.id)} style={{ background: 'none', border: 'none', color: '#ff3366', cursor: 'pointer', fontSize: '12px', lineHeight: 1 }}>x</button>
+            {groups.map(group => {
+              const members = group.trackIds.map(tid => tracks.find(t => t.id === tid)).filter((t): t is NonNullable<typeof t> => Boolean(t))
+              const available = tracks.filter(t => !group.trackIds.includes(t.id))
+              const groupVolume = group.volume ?? 1
+              const isRenaming = editingGroupId === group.id
+              return (
+                <div key={group.id} style={{ borderRadius: '6px', border: `1px solid ${group.color}33`, background: `${group.color}0a`, overflow: 'hidden' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '5px 6px' }}>
+                    <button onClick={() => updateGroup(group.id, { collapsed: !group.collapsed })} style={{ background: 'none', border: 'none', color: group.color, cursor: 'pointer', fontSize: '12px', lineHeight: 1, padding: 0, width: '12px' }}>{group.collapsed ? '>' : 'v'}</button>
+                    {isRenaming ? (
+                      <input
+                        autoFocus
+                        value={groupNameDraft}
+                        onChange={e => setGroupNameDraft(e.target.value)}
+                        onBlur={() => {
+                          const name = groupNameDraft.trim()
+                          if (name) updateGroup(group.id, { name })
+                          setEditingGroupId(null)
+                        }}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') e.currentTarget.blur()
+                          if (e.key === 'Escape') { setEditingGroupId(null); setGroupNameDraft('') }
+                        }}
+                        style={{ flex: 1, minWidth: 0, background: '#0f1118', border: `1px solid ${group.color}66`, borderRadius: '3px', color: '#eee', fontSize: '11px', fontWeight: 700, padding: '1px 4px', outline: 'none' }}
+                      />
+                    ) : (
+                      <span
+                        onDoubleClick={() => { setEditingGroupId(group.id); setGroupNameDraft(group.name) }}
+                        title="Double-click to rename"
+                        style={{ flex: 1, minWidth: 0, fontSize: '11px', fontWeight: 700, color: group.color, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', cursor: 'text', textDecoration: group.muted ? 'line-through' : 'none' }}
+                      >
+                        {group.name}
+                      </span>
+                    )}
+                    <span title={`${group.trackIds.length} track${group.trackIds.length === 1 ? '' : 's'}`} style={{ fontSize: '9px', fontWeight: 700, color: '#555', minWidth: '10px', textAlign: 'right' }}>{group.trackIds.length}</span>
+                    <button
+                      onClick={() => updateGroup(group.id, { muted: !group.muted })}
+                      title={group.muted ? 'Unmute group' : 'Mute group'}
+                      style={{ width: '18px', height: '18px', borderRadius: '3px', border: 'none', background: group.muted ? '#ff3366' : '#333', color: 'white', cursor: 'pointer', fontSize: '8px', fontWeight: 700, padding: 0 }}
+                    >M</button>
+                    <button
+                      onClick={() => updateGroup(group.id, { soloed: !group.soloed })}
+                      title={group.soloed ? 'Unsolo group' : 'Solo group'}
+                      style={{ width: '18px', height: '18px', borderRadius: '3px', border: 'none', background: group.soloed ? '#00e6ff' : '#333', color: 'white', cursor: 'pointer', fontSize: '8px', fontWeight: 700, padding: 0 }}
+                    >S</button>
+                    <button onClick={() => removeGroup(group.id)} title="Delete group" style={{ background: 'none', border: 'none', color: '#ff3366', cursor: 'pointer', fontSize: '12px', lineHeight: 1, padding: 0 }}>x</button>
+                  </div>
+                  {!group.collapsed && (
+                    <>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '2px 8px 6px' }}>
+                        <span style={{ fontSize: '9px', fontWeight: 700, color: '#666', width: '22px' }}>VOL</span>
+                        <AppSlider value={groupVolume} min={0} max={1} step={0.01} color={group.color} compact onChange={v => updateGroup(group.id, { volume: v })} />
+                        <span style={{ fontSize: '9px', color: '#888', width: '28px', textAlign: 'right' }}>{Math.round(groupVolume * 100)}%</span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '0 8px 6px' }}>
+                        <span style={{ fontSize: '9px', fontWeight: 700, color: '#666', width: '22px' }}>CLR</span>
+                        {TRACK_COLORS.map(color => (
+                          <button
+                            key={color}
+                            onClick={() => updateGroup(group.id, { color })}
+                            title="Set group color"
+                            style={{ width: '12px', height: '12px', borderRadius: '3px', background: color, border: group.color === color ? '1px solid #fff' : '1px solid rgba(255,255,255,0.15)', cursor: 'pointer', padding: 0 }}
+                          />
+                        ))}
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '0 8px 6px' }}>
+                        <select
+                          value=""
+                          onChange={e => {
+                            const tid = e.target.value
+                            if (tid) updateGroup(group.id, { trackIds: [...group.trackIds, tid] })
+                          }}
+                          onMouseDown={e => e.stopPropagation()}
+                          disabled={available.length === 0}
+                          style={{ flex: 1, minWidth: 0, background: '#12141c', border: '1px solid rgba(255,255,255,0.08)', color: available.length ? '#8b92a5' : '#444', fontSize: '10px', padding: '3px 5px', borderRadius: '4px', outline: 'none', colorScheme: 'dark', cursor: available.length ? 'pointer' : 'default' }}
+                        >
+                          <option value="">{available.length ? '+ Add track to group…' : 'All tracks in group'}</option>
+                          {available.map(t => (
+                            <option key={t.id} value={t.id} style={{ background: '#12141c', color: '#ccc' }}>{t.name}</option>
+                          ))}
+                        </select>
+                        <button
+                          onClick={() => { if (activeTrackId && !group.trackIds.includes(activeTrackId)) updateGroup(group.id, { trackIds: [...group.trackIds, activeTrackId] }) }}
+                          disabled={!activeTrackId || group.trackIds.includes(activeTrackId)}
+                          title="Add the active track"
+                          style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '4px', color: activeTrackId && !group.trackIds.includes(activeTrackId) ? '#aaa' : '#444', cursor: activeTrackId && !group.trackIds.includes(activeTrackId) ? 'pointer' : 'default', fontSize: '9px', fontWeight: 700, padding: '3px 6px', whiteSpace: 'nowrap' }}
+                        >+ ACTIVE</button>
+                      </div>
+                      {members.map(t => (
+                        <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '3px 8px 3px 16px', borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+                          <span style={{ width: 6, height: 6, borderRadius: '50%', background: t.color }} />
+                          <span style={{ flex: 1, minWidth: 0, fontSize: '11px', color: '#aaa', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.name}</span>
+                          <button onClick={() => updateGroup(group.id, { trackIds: group.trackIds.filter(id => id !== t.id) })} title="Remove from group" style={{ background: 'none', border: 'none', color: '#555', cursor: 'pointer', fontSize: '11px', padding: 0 }}>x</button>
+                        </div>
+                      ))}
+                      {members.length === 0 && (
+                        <div style={{ padding: '3px 8px 6px 16px', fontSize: '10px', color: '#444' }}>No tracks assigned.</div>
+                      )}
+                    </>
+                  )}
                 </div>
-                {!group.collapsed && group.trackIds.map(tid => {
-                  const t = tracks.find(track => track.id === tid)
-                  return t ? (
-                    <div key={tid} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '3px 8px 3px 24px', borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                      <span style={{ width: 6, height: 6, borderRadius: '50%', background: t.color }} />
-                      <span style={{ flex: 1, fontSize: '11px', color: '#aaa' }}>{t.name}</span>
-                      <button onClick={() => updateGroup(group.id, { trackIds: group.trackIds.filter(id => id !== tid) })} style={{ background: 'none', border: 'none', color: '#555', cursor: 'pointer', fontSize: '11px' }}>x</button>
-                    </div>
-                  ) : null
-                })}
-              </div>
-            ))}
-            <button onClick={() => addGroup({ id: newId(), name: `Group ${groups.length + 1}`, color: '#b197fc', trackIds: activeTrackId ? [activeTrackId] : [], collapsed: false })} style={{ marginTop: '4px', padding: '5px', borderRadius: '5px', border: '1px solid rgba(177,151,252,0.3)', background: 'rgba(177,151,252,0.08)', color: '#b197fc', cursor: 'pointer', fontSize: '11px', fontWeight: 600 }}>
+              )
+            })}
+            <button
+              onClick={() => {
+                const seed = selectedTrackIds.length > 0 ? selectedTrackIds : activeTrackId ? [activeTrackId] : []
+                addGroup({ id: newId(), name: `Group ${groups.length + 1}`, color: '#b197fc', trackIds: [...new Set(seed)], collapsed: false })
+              }}
+              title="New group from selected tracks"
+              style={{ marginTop: '4px', padding: '5px', borderRadius: '5px', border: '1px solid rgba(177,151,252,0.3)', background: 'rgba(177,151,252,0.08)', color: '#b197fc', cursor: 'pointer', fontSize: '11px', fontWeight: 600 }}
+            >
               + New Group
             </button>
           </div>
@@ -9498,6 +9590,7 @@ for (let channel = 0; channel < input.length; channel++) {
                       <SliderRow label="Reverb" value={getFXSetting(inst, 'wet', 0)} min={0} max={1} step={0.01} color="#b197fc" onChange={value => updateVal('wet', value)} fxModulator={getMod('wet')} onFxModulatorChange={m => updateMod('wet', m)} />
                       <SliderRow label="R-Decay" value={getFXSetting(inst, 'decay', 2.5)} min={0.1} max={10} step={0.1} suffix="s" color="#b197fc" onChange={value => updateVal('decay', value)} fxModulator={getMod('decay')} onFxModulatorChange={m => updateMod('decay', m)} />
                       <TextInputRow label="R-PreDelay" value={getFXSetting(inst, 'preDelay', 0.01)} onChange={v => updateVal('preDelay', v)} color="#b197fc" />
+                      <SliderRow label="R-Damping" value={getFXSetting(inst, 'damping', 0.5)} min={0} max={1} step={0.01} color="#b197fc" onChange={value => updateVal('damping', value)} fxModulator={getMod('damping')} onFxModulatorChange={m => updateMod('damping', m)} />
                     </div>
                   )
                 case 'freeverb':
@@ -10157,6 +10250,11 @@ for (let channel = 0; channel < input.length; channel++) {
                                 ▶ Effects Signal Chain
                               </summary>
                               <div style={{ marginTop: '8px' }}>
+                                {Boolean((window as any).__isJuceNative__) && getTrackFxInstances(track.fxInstances).some(inst => inst.type !== 'custom-bitcrusher' && customFxConfigs.some(c => c.id === inst.type)) && (
+                                  <div style={{ fontSize: '9px', color: '#ffcc00', lineHeight: 1.4, marginBottom: '6px' }}>
+                                    Custom JS effects only run in the browser engine. The native engine skips those steps; built-in and VST3 steps still apply in order.
+                                  </div>
+                                )}
                                 {(() => {
                                   const currentFxInstances = getTrackFxInstances(track.fxInstances)
                                   const displayInstances = [...currentFxInstances].reverse()

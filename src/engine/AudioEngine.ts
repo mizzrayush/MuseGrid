@@ -5,6 +5,7 @@ import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET, type DrumKit, type SynthPreset 
 import { getAutomationValueAtTick } from '../utils/automation'
 import { calculateFourierPartials } from '../utils/mathWaveform'
 import { getTrackFxInstances, getTrackFxSetting as readTrackFxSetting } from './fxDefaults'
+import { getEffectiveTrackLevel } from '../utils/groupAudio'
 import { buildNativeNoteOnCommand } from './nativeNoteCommand'
 import { buildNoteFxChain } from '../utils/noteFxChain'
 import { evaluateGlideCurve } from '../utils/glideCurves'
@@ -2788,6 +2789,7 @@ class AudioEngine {
     this.applyLoop(state.loopEnabled, state.loopStart, state.loopEnd)
     this.applyMetronomeSettings(state.metronomeSettings)
     this.applyLimiterSettings(state.studioSettings.limiterEnabled, state.studioSettings.limiterThreshold)
+    this.syncNativeMaster()
     state.tracks.forEach(track => this.applyTrackSettings(track))
 
     useStore.subscribe((state, prevState) => {
@@ -2846,6 +2848,31 @@ class AudioEngine {
         })
 
         state.tracks.forEach(track => this.applyTrackSettings(track))
+        this.pruneNativeNoteFxChains()
+      }
+      if (state.notes !== prevState.notes) {
+        const prevById = new Map(prevState.notes.map(note => [note.id, note]))
+        let idsChanged = state.notes.length !== prevState.notes.length
+        let chainsChanged = false
+        for (const note of state.notes) {
+          const prev = prevById.get(note.id)
+          if (!prev) {
+            idsChanged = true
+            if (note.fxInstances?.length) chainsChanged = true
+            continue
+          }
+          const hadChain = Boolean(prev.fxInstances?.length)
+          const hasChain = Boolean(note.fxInstances?.length)
+          if ((hadChain || hasChain) && (prev.fxInstances !== note.fxInstances || prev.fxSettings !== note.fxSettings)) {
+            chainsChanged = true
+          }
+        }
+        if (chainsChanged) this.syncNoteVst3Overrides()
+        if (idsChanged || chainsChanged) this.pruneNativeNoteFxChains()
+      }
+      if (state.groups !== prevState.groups) {
+        // Group volume/mute/solo are applied on top of each member track.
+        state.tracks.forEach(track => this.applyTrackSettings(track))
       }
       if (state.engineMode !== prevState.engineMode) {
         if (this.wasmNode) {
@@ -2877,10 +2904,12 @@ class AudioEngine {
       }
       if (state.studioSettings.masterVolume !== prevState.studioSettings.masterVolume) {
         Tone.Destination.volume.value = Tone.gainToDb(state.studioSettings.masterVolume)
+        this.syncNativeMaster()
       }
       if (state.studioSettings.limiterEnabled !== prevState.studioSettings.limiterEnabled ||
         state.studioSettings.limiterThreshold !== prevState.studioSettings.limiterThreshold) {
         this.applyLimiterSettings(state.studioSettings.limiterEnabled, state.studioSettings.limiterThreshold)
+        this.syncNativeMaster()
       }
       if (state.studioSettings.proceduralFxEnabled !== prevState.studioSettings.proceduralFxEnabled ||
         state.studioSettings.proceduralFxRate !== prevState.studioSettings.proceduralFxRate) {
@@ -3139,7 +3168,111 @@ class AudioEngine {
     }
   }
 
+  /** Native master bus: the JUCE engine applies gain before its limiter. */
+  private syncNativeMaster() {
+    if (!(window as any).__isJuceNative__ || !(window as any).juceAudioBridge) return
+    const settings = useStore.getState().studioSettings
+    ;(window as any).juceAudioBridge.postCommand({
+      type: 'setMasterVolume',
+      volume: settings.masterVolume
+    })
+    ;(window as any).juceAudioBridge.postCommand({
+      type: 'setMasterLimiter',
+      enabled: settings.limiterEnabled,
+      threshold: settings.limiterThreshold
+    })
+  }
+
+  /**
+   * Ordered native track rack. Duplicates are kept, VST3 steps keep their UI instance id and
+   * custom JS effects are skipped because JUCE cannot execute browser scripts.
+   */
+  private buildNativeTrackFxChain(track: Track) {
+    const effects: Array<Record<string, unknown>> = []
+    for (const inst of getTrackFxInstances(track.fxInstances)) {
+      const bypassed = this.isFxBypassed(track, inst) ? 1 : 0
+      const getV = (param: string, fallback: number) =>
+        this.getTrackFxSetting(track, inst.id, inst.type, param, fallback)
+
+      if (inst.type === 'vst3') {
+        if (!inst.pluginId) continue
+        effects.push({
+          instanceId: inst.id,
+          type: 'vst3',
+          pluginId: inst.pluginId,
+          bypassed,
+          wet: bypassed ? 0 : getV('wet', 1)
+        })
+        continue
+      }
+
+      let params: Record<string, number> | undefined
+      switch (inst.type) {
+        case 'eq':
+          params = { lowGain: getV('lowGain', 0), midGain: getV('midGain', 0), highGain: getV('highGain', 0) }
+          break
+        case 'filter':
+          params = { cutoff: getV('frequency', 20000), resonance: getV('Q', 1) }
+          break
+        case 'distortion':
+          params = { amount: getV('amount', 0.4), wet: getV('wet', 0) }
+          break
+        case 'chorus':
+          params = {
+            wet: getV('wet', 0), frequency: getV('frequency', 1.5),
+            depth: getV('depth', 0.7), delayTime: getV('delayTime', 3.5)
+          }
+          break
+        case 'phaser':
+          params = {
+            wet: getV('wet', 0), frequency: getV('frequency', 0.5),
+            baseFreq: getV('baseFreq', 350), octaves: getV('octaves', 3)
+          }
+          break
+        case 'delay':
+          params = { time: getV('time', 0.25), feedback: getV('feedback', 0.25), wet: getV('wet', 0) }
+          break
+        case 'dpreverb':
+          params = {
+            wet: getV('wet', 0), tail: getV('tail', 2),
+            decay: getV('decay', 0.65), tone: getV('tone', 0.55)
+          }
+          break
+        case 'reverb': {
+          const decay = getV('decay', -1)
+          params = {
+            wet: getV('wet', 0),
+            roomSize: decay >= 0 ? Math.min(0.98, Math.max(0.05, decay / 10)) : getV('roomSize', 0.7),
+            damping: getV('damping', 0.5),
+            preDelay: getV('preDelay', 0.01)
+          }
+          break
+        }
+        case 'freeverb':
+          params = { wet: getV('wet', 0), roomSize: getV('roomSize', 0.7), dampening: getV('dampening', 4000) }
+          break
+        case 'bitcrusher':
+        case 'custom-bitcrusher':
+          params = {
+            drive: getV('drive', 1.5), bits: getV('bits', 8),
+            dive: getV('dive', 0.5), mix: getV('mix', 0.5)
+          }
+          break
+        default:
+          continue
+      }
+
+      effects.push({ instanceId: inst.id, type: inst.type, bypassed, params })
+    }
+
+    return {
+      effects,
+      signature: JSON.stringify(effects)
+    }
+  }
+
   private applyTrackSettings(track: Track) {
+    const effective = getEffectiveTrackLevel(track, useStore.getState().groups)
     if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
       (window as any).juceAudioBridge.postCommand({
         type: 'createTrack',
@@ -3155,7 +3288,7 @@ class AudioEngine {
         type: 'setTrackParam',
         trackId: track.id,
         param: 'volume',
-        value: track.volume
+        value: effective.volume
       });
       (window as any).juceAudioBridge.postCommand({
         type: 'setTrackParam',
@@ -3167,13 +3300,13 @@ class AudioEngine {
         type: 'setTrackParam',
         trackId: track.id,
         param: 'muted',
-        value: track.muted ? 1 : 0
+        value: effective.muted ? 1 : 0
       });
       (window as any).juceAudioBridge.postCommand({
         type: 'setTrackParam',
         trackId: track.id,
         param: 'soloed',
-        value: track.soloed ? 1 : 0
+        value: effective.soloed ? 1 : 0
       });
       if (track.synthPreset) {
         (window as any).juceAudioBridge.postCommand({
@@ -3343,6 +3476,14 @@ class AudioEngine {
           (window as any).juceAudioBridge.postCommand({ type: 'setTrackFx', trackId: track.id, fxType: 'bitcrusher', param: 'mix', value: getV('mix', 0.5) });
         }
       });
+
+      const nativeChain = this.buildNativeTrackFxChain(track);
+      (window as any).juceAudioBridge.postCommand({
+        type: 'setTrackFxChain',
+        trackId: track.id,
+        signature: nativeChain.signature,
+        effects: JSON.stringify(nativeChain.effects)
+      });
       return; // Handled natively in JUCE C++! Avoid running WebAudio graph.
     }
 
@@ -3403,16 +3544,16 @@ class AudioEngine {
     }
 
     // 4. General channel settings
-    rack.channel.volume.value = Tone.gainToDb(Math.max(0.0001, track.volume))
+    rack.channel.volume.value = Tone.gainToDb(Math.max(0.0001, effective.volume))
     rack.channel.pan.value = track.pan
-    rack.channel.mute = track.muted
-    rack.channel.solo = track.soloed
+    rack.channel.mute = effective.muted
+    rack.channel.solo = effective.soloed
 
     if (this.wasmNode) {
       const wasmIdx = this.getTrackWasmIndex(track.id);
       const instType = track.instrument === 'drum' ? 1 : 0;
       this.wasmNode.port.postMessage({ type: 'track-param', trackId: wasmIdx, paramId: 11, value: instType });
-      this.wasmNode.port.postMessage({ type: 'track-param', trackId: wasmIdx, paramId: 5, value: track.muted ? 0.0 : track.volume });
+      this.wasmNode.port.postMessage({ type: 'track-param', trackId: wasmIdx, paramId: 5, value: effective.muted ? 0.0 : effective.volume });
       this.wasmNode.port.postMessage({ type: 'track-param', trackId: wasmIdx, paramId: 6, value: track.pan });
 
       if (instType === 0) {
@@ -4785,6 +4926,23 @@ class AudioEngine {
         if (chain) this.ensureNoteFxChain(n.trackId, chain.chainId, chain.signature, chain.effects)
       }
     })
+  }
+
+  /** Drops native note-FX chains whose notes were deleted or whose override was cleared. */
+  private pruneNativeNoteFxChains() {
+    if (!(window as any).__isJuceNative__ || !(window as any).juceAudioBridge) return
+    const state = useStore.getState()
+    for (const track of state.tracks) {
+      const chainIds = state.notes
+        .filter(note => note.trackId === track.id)
+        .map(note => buildNoteFxChain(note)?.chainId)
+        .filter((id): id is number => typeof id === 'number')
+      ;(window as any).juceAudioBridge.postCommand({
+        type: 'pruneNoteFxChains',
+        trackId: track.id,
+        chainIds
+      })
+    }
   }
 
   removeTrackVst3Instrument(trackId: string) {

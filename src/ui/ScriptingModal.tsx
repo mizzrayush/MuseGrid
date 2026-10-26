@@ -1210,6 +1210,8 @@ export const ScriptingModal: React.FC = () => {
   const outerContainerRef = React.useRef<HTMLDivElement>(null);
   const editorRef = React.useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const cancelScriptRef = React.useRef(false);
+  const abortControllerRef = React.useRef<AbortController | null>(null);
   const isDraggingDivider = React.useRef(false);
   const isDraggingVerticalDivider = React.useRef(false);
 
@@ -1276,7 +1278,25 @@ export const ScriptingModal: React.FC = () => {
     );
   };
 
+  const handleCancelScript = () => {
+    cancelScriptRef.current = true;
+    abortControllerRef.current?.abort();
+    if (activePrompt) {
+      activePrompt.resolve(null);
+      setActivePrompt(null);
+    }
+    try {
+      audioEngine.stop();
+      ScriptAPI.Tone.Transport.stop();
+    } catch (_) {}
+    addLog('Script execution cancelled by user.', 'error');
+    useStore.getState().showToast('Script cancelled', 'info');
+    setIsRunning(false);
+  };
+
   const executeScript = async () => {
+    cancelScriptRef.current = false;
+    abortControllerRef.current = new AbortController();
     setIsRunning(true);
     addLog('Executing script...', 'info');
 
@@ -1287,26 +1307,43 @@ export const ScriptingModal: React.FC = () => {
     
     const customConsole = {
       log: (...args: any[]) => {
+        if (cancelScriptRef.current) return;
         const msg = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' ');
         console.log(...args);
         addLog(msg, 'info');
       },
       error: (...args: any[]) => {
+        if (cancelScriptRef.current) return;
         const msg = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' ');
         console.error(...args);
         addLog(msg, 'error');
       },
       warn: (...args: any[]) => {
+        if (cancelScriptRef.current) return;
         const msg = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' ');
         console.warn(...args);
         addLog(msg, 'info');
       },
       info: (...args: any[]) => {
+        if (cancelScriptRef.current) return;
         const msg = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' ');
         console.info(...args);
         addLog(msg, 'info');
       }
     };
+
+    // Inject cancellable sleep on ScriptAPI
+    (ScriptAPI as any).sleep = (ms: number) => new Promise((resolve, reject) => {
+      if (cancelScriptRef.current) return reject(new Error('Script cancelled'));
+      const timer = setTimeout(() => {
+        if (cancelScriptRef.current) reject(new Error('Script cancelled'));
+        else resolve(undefined);
+      }, ms);
+      abortControllerRef.current?.signal.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(new Error('Script cancelled'));
+      });
+    });
 
     try {
       // Create an async function context so users can use top-level await
@@ -1317,6 +1354,11 @@ export const ScriptingModal: React.FC = () => {
       
       await executor(ScriptAPI.getState(), ScriptAPI, ScriptAPI.Tone, customConsole);
       
+      if (cancelScriptRef.current) {
+        addLog('Script execution cancelled.', 'info');
+        return;
+      }
+
       addLog('Execution complete.', 'success');
       useStore.getState().showToast('Script executed successfully', 'success');
 
@@ -1342,6 +1384,10 @@ export const ScriptingModal: React.FC = () => {
         return next;
       });
     } catch (err: unknown) {
+      if (cancelScriptRef.current) {
+        addLog('Script execution cancelled.', 'info');
+        return;
+      }
       console.error(err);
       addLog((err as Error).message || String(err), 'error');
       useStore.getState().showToast('Script execution failed. Check console.', 'error');
@@ -1404,7 +1450,16 @@ export const ScriptingModal: React.FC = () => {
 
   return (
     <div className="animate-modal-bg" 
-      onKeyDown={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && isRunning) {
+          const sel = window.getSelection()?.toString();
+          if (!sel) {
+            e.preventDefault();
+            handleCancelScript();
+          }
+        }
+      }}
       style={{
       position: 'fixed', inset: 0, 
       background: 'rgba(8, 9, 14, 0.78)', 
@@ -1499,18 +1554,56 @@ export const ScriptingModal: React.FC = () => {
             >
               <IconHelp size={12} /> {rightPanelTab === 'docs' ? 'Console' : 'Help / API'}
             </button>
+            {isRunning && (
+              <span
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  background: 'rgba(255, 82, 82, 0.12)',
+                  border: '1px solid rgba(255, 82, 82, 0.35)',
+                  padding: '4px 8px',
+                  borderRadius: '12px',
+                  fontSize: '10px',
+                  fontWeight: 700,
+                  color: '#ff6b6b',
+                  letterSpacing: '0.04em',
+                  textTransform: 'uppercase'
+                }}
+              >
+                <span
+                  style={{
+                    width: '6px',
+                    height: '6px',
+                    borderRadius: '50%',
+                    background: '#ff6b6b',
+                    boxShadow: '0 0 6px #ff6b6b',
+                    display: 'inline-block'
+                  }}
+                />
+                Running
+              </span>
+            )}
             <button 
-              onClick={executeScript} 
-              disabled={isRunning}
+              onClick={isRunning ? handleCancelScript : executeScript} 
               style={{
-                background: '#40c057', color: 'white', border: 'none', 
-                padding: '6px 14px', borderRadius: '6px', fontSize: '11px', fontWeight: 800,
-                cursor: isRunning ? 'wait' : 'pointer', opacity: isRunning ? 0.6 : 1,
-                display: 'flex', alignItems: 'center', gap: '6px'
+                background: isRunning ? '#e03131' : '#40c057',
+                color: 'white',
+                border: 'none', 
+                padding: '6px 14px',
+                borderRadius: '6px',
+                fontSize: '11px',
+                fontWeight: 800,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                transition: 'all 0.15s ease'
               }}
+              title={isRunning ? "Cancel Running Script (Ctrl+C)" : "Execute Script"}
             >
               {isRunning ? <IconStop size={12} /> : <IconPlay size={12} />}
-              {isRunning ? 'Running...' : 'Run Script'}
+              {isRunning ? 'Cancel' : 'Run Script'}
             </button>
             <button 
               onClick={() => setIsVisible(false)}

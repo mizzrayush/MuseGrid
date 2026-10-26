@@ -1,6 +1,7 @@
 import type { AppState, Track } from '../engine/store'
 import { mapNoteToScheduledEvent, TICKS_PER_BEAT } from '../engine/Scheduler'
 import { buildNativeNoteOnCommand, type NativeNoteOnCommand } from '../engine/nativeNoteCommand'
+import { buildGlideIntoMap } from './midiEditing'
 
 export type NativeBitDepth = 16 | 24 | 32
 
@@ -108,13 +109,14 @@ export function buildNativeBouncePayload(state: AppState, request: NativeBounceR
 
   const events: NativeBounceEvent[] = []
   let lastNoteEndSeconds = 0
+  const glideIntoMap = buildGlideIntoMap(state.notes)
 
   state.notes.forEach(note => {
     if (!renderableTrackIds.has(note.trackId)) return
     if (note.time + note.duration <= request.startTick || note.time >= request.endTick) return
 
     const track = state.tracks.find(t => t.id === note.trackId)
-    const mapped = mapNoteToScheduledEvent(note, track, state.bpm, state.automationCurves[note.trackId])
+    const mapped = mapNoteToScheduledEvent(note, track, state.bpm, state.automationCurves[note.trackId], glideIntoMap.get(note.id))
     const command = buildNativeNoteOnCommand({
       trackId: note.trackId,
       type: track?.instrument ?? 'synth',

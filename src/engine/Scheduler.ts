@@ -3,6 +3,7 @@ import { audioEngine } from './AudioEngine'
 import { useStore } from './store'
 import type { Track, Note, AutomationPoint } from './store'
 import { getAutomationValueAtTick } from '../utils/automation'
+import { buildGlideIntoMap, resolveGlidePlayback, type GlideIntoSpec } from '../utils/midiEditing'
 import { getActiveDPreverbInstances } from './fxDefaults'
 
 export const TICKS_PER_BEAT = 192
@@ -31,28 +32,34 @@ export function mapNoteToScheduledEvent(
   n: Note,
   track: Track | undefined,
   globalBpm: number,
-  automationPoints: AutomationPoint[] | undefined
+  automationPoints: AutomationPoint[] | undefined,
+  glideInto?: GlideIntoSpec
 ): ScheduledNoteMapping {
   const trackBpm = track?.targetTempo ?? globalBpm
   const multiplier = trackBpm / globalBpm
   const globalTPS = (globalBpm / 60) * TICKS_PER_BEAT
-  const positionTicks = n.time / multiplier
+  // A destination-voice glide starts the landed note early, at the source pitch.
+  const playback = resolveGlidePlayback(n, glideInto)
+  const positionTicks = playback.startTick / multiplier
 
   const transpose = track?.instrument === 'synth' ? (track.transpose ?? 0) : 0
   const drumMapShift = track?.instrument === 'drum' ? (track.drumMapShift ?? 0) : 0
-  const isMicrotonal = track?.instrument === 'synth' && (n.pitch % 1 !== 0 || (track.edoDivision !== undefined && track.edoDivision !== 12))
+  const soundingPitch = playback.pitch
+  const isMicrotonal = track?.instrument === 'synth' && (soundingPitch % 1 !== 0 || (track.edoDivision !== undefined && track.edoDivision !== 12))
 
   const finalPitch = track?.instrument === 'drum'
-    ? (n.pitch >= 1000 ? n.pitch : (n.pitch >= 16 ? n.pitch : ((n.pitch + drumMapShift) % 16 + 16) % 16))
-    : (isMicrotonal ? Tone.Frequency(n.pitch + transpose, 'midi').toFrequency() : Tone.Frequency(n.pitch + transpose, 'midi').toNote())
+    ? (soundingPitch >= 1000 ? soundingPitch : (soundingPitch >= 16 ? soundingPitch : ((soundingPitch + drumMapShift) % 16 + 16) % 16))
+    : (isMicrotonal ? Tone.Frequency(soundingPitch + transpose, 'midi').toFrequency() : Tone.Frequency(soundingPitch + transpose, 'midi').toNote())
 
   const noteBpm = n.bpm ?? trackBpm
   const noteTPS = (noteBpm / 60) * TICKS_PER_BEAT
-  const durationSeconds = Math.max(0.005, n.duration / noteTPS)
+  const durationSeconds = Math.max(0.005, playback.durationTicks / noteTPS)
 
-  const finalPitchEnd = n.pitchEnd !== undefined && track?.instrument !== 'drum'
-    ? (isMicrotonal ? Tone.Frequency(n.pitchEnd + transpose, 'midi').toFrequency() : Tone.Frequency(n.pitchEnd + transpose, 'midi').toNote())
-    : undefined
+  const finalPitchEnd = glideInto && track?.instrument !== 'drum'
+    ? (isMicrotonal ? Tone.Frequency(n.pitch + transpose, 'midi').toFrequency() : Tone.Frequency(n.pitch + transpose, 'midi').toNote())
+    : (n.pitchEnd !== undefined && track?.instrument !== 'drum'
+      ? (isMicrotonal ? Tone.Frequency(n.pitchEnd + transpose, 'midi').toFrequency() : Tone.Frequency(n.pitchEnd + transpose, 'midi').toNote())
+      : undefined)
 
   return {
     time: `${Math.round(positionTicks)}i`,
@@ -64,7 +71,7 @@ export function mapNoteToScheduledEvent(
     velocity: getAutomationValueAtTick(automationPoints, n.time + n.duration / 2, n.velocity) / 127,
     instrumentOverride: n.instrumentOverride,
     detune: n.detune,
-    note: n
+    note: playback.note
   }
 }
 
@@ -151,6 +158,7 @@ class Scheduler {
     })
 
     const globalBpm = useStore.getState().bpm
+    const glideIntoMap = buildGlideIntoMap(notes)
 
     // Create a new Part for each track
     notesByTrack.forEach((trackNotes, trackId) => {
@@ -161,7 +169,7 @@ class Scheduler {
       const automationPoints = useStore.getState().automationCurves[trackId]
       const events: ScheduledTrackEvent[] = trackNotes.map(n => ({
         kind: 'note',
-        ...mapNoteToScheduledEvent(n, track, globalBpm, automationPoints)
+        ...mapNoteToScheduledEvent(n, track, globalBpm, automationPoints, glideIntoMap.get(n.id))
       }))
 
       if (track) {

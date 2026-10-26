@@ -1,6 +1,7 @@
 #include "AudioEngine.h"
 #include <functional>
 #include <set>
+#include <cmath>
 
 namespace
 {
@@ -1048,6 +1049,148 @@ void AudioEngine::setTrackSampler(const juce::String& trackId, bool enabled, con
     targetTrack->sampleEngine.setConfig(config, base64Data);
 }
 
+// ---------------------------------------------------------------------------
+// VST3 pitch-bend glides
+// ---------------------------------------------------------------------------
+
+static float samplePitchCurve(const std::array<float, musegrid::NoteExpression::kCurvePoints>& curve,
+                              int size, float t)
+{
+    t = juce::jlimit(0.0f, 1.0f, t);
+    if (size <= 1) return t;
+
+    const float pos = t * (float)(size - 1);
+    const int i0 = juce::jlimit(0, size - 1, (int)pos);
+    const int i1 = juce::jmin(i0 + 1, size - 1);
+    const float frac = pos - (float)i0;
+    return curve[(size_t)i0] * (1.0f - frac) + curve[(size_t)i1] * frac;
+}
+
+/**
+ * Widens a plugin's own pitch-bend range when it exposes one as a parameter. Most VST3
+ * instruments ignore the RPN fallback, so this is what makes large glides audible.
+ */
+static void widenPluginPitchBend(juce::AudioPluginInstance* plugin, int semitones)
+{
+    if (plugin == nullptr) return;
+
+    for (auto* param : plugin->getParameters())
+    {
+        if (param == nullptr) continue;
+        const auto name = param->getName(96).toLowerCase();
+        const bool isBendRange = name.contains("pitch") && name.contains("bend")
+            && (name.contains("range") || name.contains("amount") || name.contains("sensitivity"));
+        if (!isBendRange) continue;
+
+        auto* ranged = dynamic_cast<juce::RangedAudioParameter*>(param);
+        if (ranged == nullptr) continue;
+
+        const auto& range = ranged->getNormalisableRange();
+        const float target = juce::jlimit(range.start, range.end, (float)semitones);
+        if (target > ranged->getValue())
+            ranged->setValueNotifyingHost(ranged->convertTo0to1(target));
+        return;
+    }
+}
+
+/**
+ * Reserves a MIDI channel for the gliding note, queues a pitch-bend-sensitivity RPN and
+ * registers the ramp. Returns the channel the note-on must use.
+ */
+static int startVst3Glide(std::vector<PitchGlide>& glides,
+                          juce::MidiBuffer& midi,
+                          const musegrid::NoteExpression& expression,
+                          int& nextChannel,
+                          juce::AudioPluginInstance* plugin,
+                          int midiPitch,
+                          float startPitch,
+                          float endPitch,
+                          float slideSeconds,
+                          float durationSeconds,
+                          double sampleRate)
+{
+    if (endPitch < 0.0f || std::abs(endPitch - startPitch) < 0.001f) return 1;
+
+    const float totalSeconds = slideSeconds > 0.0f ? slideSeconds : durationSeconds;
+    if (totalSeconds <= 0.0f || sampleRate <= 0.0) return 1;
+
+    const int channel = juce::jlimit(2, 16, nextChannel);
+    nextChannel = channel >= 16 ? 2 : channel + 1;
+
+    PitchGlide glide;
+    glide.channel = channel;
+    glide.midiPitch = midiPitch;
+    glide.semitoneDelta = endPitch - startPitch;
+    glide.stepped = expression.steppedGlide;
+    glide.curveSize = juce::jlimit(0, musegrid::NoteExpression::kCurvePoints, expression.slideCurveSize);
+    for (int i = 0; i < glide.curveSize; ++i)
+        glide.curve[(size_t)i] = expression.slideCurve[(size_t)i];
+
+    const int bendRange = juce::jlimit(2, 96, (int)std::ceil(std::abs(glide.semitoneDelta)));
+    glide.bendRangeSemitones = bendRange;
+    glide.totalSamples = juce::jmax(1.0f, totalSeconds * (float)sampleRate);
+
+    // RPN 0 = pitch-bend sensitivity, in semitones. Plugins that ignore RPN still get the
+    // bend stream, clamped to their own fixed range.
+    midi.addEvent(juce::MidiMessage::controllerEvent(channel, 101, 0), 0);
+    midi.addEvent(juce::MidiMessage::controllerEvent(channel, 100, 0), 0);
+    midi.addEvent(juce::MidiMessage::controllerEvent(channel, 6, bendRange), 0);
+    midi.addEvent(juce::MidiMessage::controllerEvent(channel, 38, 0), 0);
+    midi.addEvent(juce::MidiMessage::pitchWheel(channel, 8192), 0);
+
+    widenPluginPitchBend(plugin, bendRange);
+    glides.push_back(glide);
+    return channel;
+}
+
+static void renderVst3Glides(std::vector<PitchGlide>& glides, juce::MidiBuffer& midi, int numSamples)
+{
+    for (auto it = glides.begin(); it != glides.end(); )
+    {
+        // The bend for the end of this block, or the exact landing point when the glide
+        // finishes inside it. Erasing without emitting t = 1 would leave the note a few
+        // cents flat, which is audible on short slides.
+        const float remaining = it->totalSamples - it->elapsedSamples;
+        const bool landsInBlock = remaining <= (float)numSamples;
+        const int offset = landsInBlock ? juce::jlimit(0, juce::jmax(0, numSamples - 1), (int)std::ceil(remaining))
+                                        : juce::jmax(0, numSamples - 1);
+        const float t = landsInBlock ? 1.0f
+                                     : (it->totalSamples > 0.0f ? juce::jlimit(0.0f, 1.0f, (it->elapsedSamples + (float)offset) / it->totalSamples) : 1.0f);
+        float semitones = it->semitoneDelta * samplePitchCurve(it->curve, it->curveSize, t);
+        if (it->stepped) semitones = std::round(semitones);
+
+        const float normalised = semitones / (float)it->bendRangeSemitones;
+        const int bend = juce::jlimit(0, 16383, 8192 + (int)std::lround(normalised * 8191.0f));
+        if (bend != it->lastBend)
+        {
+            midi.addEvent(juce::MidiMessage::pitchWheel(it->channel, bend), offset);
+            it->lastBend = bend;
+        }
+
+        it->elapsedSamples += (float)numSamples;
+        if (landsInBlock)
+            it = glides.erase(it);
+        else
+            ++it;
+    }
+}
+
+static void clearPitchGlides(std::vector<PitchGlide>& glides, juce::MidiBuffer& midi, int midiPitch)
+{
+    for (auto it = glides.begin(); it != glides.end(); )
+    {
+        if (midiPitch < 0 || it->midiPitch == midiPitch)
+        {
+            midi.addEvent(juce::MidiMessage::pitchWheel(it->channel, 8192), 0);
+            it = glides.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
 void AudioEngine::playNote(const juce::String& trackId,
                           float pitchMidi,
                           float velocity,
@@ -1160,11 +1303,15 @@ void AudioEngine::playNote(const juce::String& trackId,
                 }
                 midiPitch = juce::jlimit(0, 127, midiPitch);
                 int midiVel = juce::jlimit(1, 127, (int)(velocity * 127.0f));
-                slot->pendingMidi.addEvent(juce::MidiMessage::noteOn(1, midiPitch, (juce::uint8)midiVel), 0);
+                const int channel = startVst3Glide(slot->pitchGlides, slot->pendingMidi, expression,
+                                                   slot->nextGlideChannel, slot->plugin.get(),
+                                                   midiPitch, pitchMidi, targetPitchMidi,
+                                                   slideTimeSeconds, durationSeconds, currentSampleRate);
+                slot->pendingMidi.addEvent(juce::MidiMessage::noteOn(channel, midiPitch, (juce::uint8)midiVel), 0);
                 if (durationSeconds > 0.0f)
                 {
                     int samples = std::max(1, (int)(durationSeconds * currentSampleRate));
-                    slot->scheduledNoteOffs.push_back({ midiPitch, samples });
+                    slot->scheduledNoteOffs.push_back({ midiPitch, samples, channel });
                 }
             }
             else
@@ -1293,17 +1440,25 @@ void AudioEngine::playNote(const juce::String& trackId,
             if (slot != nullptr)
             {
                 std::lock_guard<std::mutex> midiLock(slot->midiMutex);
-                slot->pendingMidi.addEvent(juce::MidiMessage::noteOn(1, midiPitch, (juce::uint8)midiVel), 0);
+                const int channel = startVst3Glide(slot->pitchGlides, slot->pendingMidi, expression,
+                                                   slot->nextGlideChannel, slot->plugin.get(),
+                                                   midiPitch, pitchMidi, targetPitchMidi,
+                                                   slideTimeSeconds, durationSeconds, currentSampleRate);
+                slot->pendingMidi.addEvent(juce::MidiMessage::noteOn(channel, midiPitch, (juce::uint8)midiVel), 0);
                 if (samples > 0)
-                    slot->scheduledNoteOffs.push_back({ midiPitch, samples });
+                    slot->scheduledNoteOffs.push_back({ midiPitch, samples, channel });
                 return;
             }
         }
 
         std::lock_guard<std::mutex> midiLock(targetTrack->midiMutex);
-        targetTrack->pendingMidi.addEvent(juce::MidiMessage::noteOn(1, midiPitch, (juce::uint8)midiVel), 0);
+        const int channel = startVst3Glide(targetTrack->pitchGlides, targetTrack->pendingMidi, expression,
+                                           targetTrack->nextGlideChannel, targetTrack->vst3Instrument.get(),
+                                           midiPitch, pitchMidi, targetPitchMidi,
+                                           slideTimeSeconds, durationSeconds, currentSampleRate);
+        targetTrack->pendingMidi.addEvent(juce::MidiMessage::noteOn(channel, midiPitch, (juce::uint8)midiVel), 0);
         if (samples > 0)
-            targetTrack->scheduledNoteOffs.push_back({ midiPitch, samples });
+            targetTrack->scheduledNoteOffs.push_back({ midiPitch, samples, channel });
     }
     else if (inst == "drum")
     {
@@ -1362,7 +1517,11 @@ void AudioEngine::noteOff(const juce::String& trackId, int noteId)
                         midiPitch = padToGmMidi[rawPitch];
                     }
                     midiPitch = juce::jlimit(0, 127, midiPitch);
-                    slot->pendingMidi.addEvent(juce::MidiMessage::noteOff(1, midiPitch), 0);
+                    int channel = 1;
+                    for (auto& off : slot->scheduledNoteOffs)
+                        if (off.midiPitch == midiPitch) { channel = off.midiChannel; break; }
+                    slot->pendingMidi.addEvent(juce::MidiMessage::noteOff(channel, midiPitch), 0);
+                    clearPitchGlides(slot->pitchGlides, slot->pendingMidi, midiPitch);
                     for (auto it = slot->scheduledNoteOffs.begin(); it != slot->scheduledNoteOffs.end(); )
                     {
                         if (it->midiPitch == midiPitch) it = slot->scheduledNoteOffs.erase(it);
@@ -1371,7 +1530,9 @@ void AudioEngine::noteOff(const juce::String& trackId, int noteId)
                 }
                 else
                 {
-                    slot->pendingMidi.addEvent(juce::MidiMessage::allNotesOff(1), 0);
+                    for (int ch = 1; ch <= 16; ++ch)
+                        slot->pendingMidi.addEvent(juce::MidiMessage::allNotesOff(ch), 0);
+                    clearPitchGlides(slot->pitchGlides, slot->pendingMidi, -1);
                     slot->scheduledNoteOffs.clear();
                 }
             }
@@ -1396,7 +1557,11 @@ void AudioEngine::noteOff(const juce::String& trackId, int noteId)
                     midiPitch = padToGmMidi[rawPitch];
                 }
                 midiPitch = juce::jlimit(0, 127, midiPitch);
-                t->pendingMidi.addEvent(juce::MidiMessage::noteOff(1, midiPitch), 0);
+                int channel = 1;
+                for (auto& off : t->scheduledNoteOffs)
+                    if (off.midiPitch == midiPitch) { channel = off.midiChannel; break; }
+                t->pendingMidi.addEvent(juce::MidiMessage::noteOff(channel, midiPitch), 0);
+                clearPitchGlides(t->pitchGlides, t->pendingMidi, midiPitch);
                 for (auto it = t->scheduledNoteOffs.begin(); it != t->scheduledNoteOffs.end(); )
                 {
                     if (it->midiPitch == midiPitch)
@@ -1407,7 +1572,9 @@ void AudioEngine::noteOff(const juce::String& trackId, int noteId)
             }
             else
             {
-                t->pendingMidi.addEvent(juce::MidiMessage::allNotesOff(1), 0);
+                for (int ch = 1; ch <= 16; ++ch)
+                    t->pendingMidi.addEvent(juce::MidiMessage::allNotesOff(ch), 0);
+                clearPitchGlides(t->pitchGlides, t->pendingMidi, -1);
                 t->scheduledNoteOffs.clear();
             }
             break;
@@ -1428,16 +1595,24 @@ void AudioEngine::allNotesOff()
         if (t->vst3Instrument != nullptr)
         {
             std::lock_guard<std::mutex> midiLock(t->midiMutex);
-            t->pendingMidi.addEvent(juce::MidiMessage::allNotesOff(1), 0);
-            t->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(1), 0);
+            for (int ch = 1; ch <= 16; ++ch)
+            {
+                t->pendingMidi.addEvent(juce::MidiMessage::allNotesOff(ch), 0);
+                t->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(ch), 0);
+            }
+            clearPitchGlides(t->pitchGlides, t->pendingMidi, -1);
             t->scheduledNoteOffs.clear();
         }
 
         for (auto& slot : t->noteVst3Slots)
         {
             std::lock_guard<std::mutex> midiLock(slot->midiMutex);
-            slot->pendingMidi.addEvent(juce::MidiMessage::allNotesOff(1), 0);
-            slot->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(1), 0);
+            for (int ch = 1; ch <= 16; ++ch)
+            {
+                slot->pendingMidi.addEvent(juce::MidiMessage::allNotesOff(ch), 0);
+                slot->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(ch), 0);
+            }
+            clearPitchGlides(slot->pitchGlides, slot->pendingMidi, -1);
             slot->scheduledNoteOffs.clear();
         }
     }
@@ -1460,16 +1635,24 @@ void AudioEngine::killAllNotesOnTrack(const juce::String& trackId)
         if (t->vst3Instrument != nullptr)
         {
             std::lock_guard<std::mutex> midiLock(t->midiMutex);
-            t->pendingMidi.addEvent(juce::MidiMessage::allNotesOff(1), 0);
-            t->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(1), 0);
+            for (int ch = 1; ch <= 16; ++ch)
+            {
+                t->pendingMidi.addEvent(juce::MidiMessage::allNotesOff(ch), 0);
+                t->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(ch), 0);
+            }
+            clearPitchGlides(t->pitchGlides, t->pendingMidi, -1);
         }
         t->scheduledNoteOffs.clear();
 
         for (auto& slot : t->noteVst3Slots)
         {
             std::lock_guard<std::mutex> midiLock(slot->midiMutex);
-            slot->pendingMidi.addEvent(juce::MidiMessage::allNotesOff(1), 0);
-            slot->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(1), 0);
+            for (int ch = 1; ch <= 16; ++ch)
+            {
+                slot->pendingMidi.addEvent(juce::MidiMessage::allNotesOff(ch), 0);
+                slot->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(ch), 0);
+            }
+            clearPitchGlides(slot->pitchGlides, slot->pendingMidi, -1);
             slot->scheduledNoteOffs.clear();
         }
         break;
@@ -1564,7 +1747,8 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
                     if (it->sampleCountdown <= numSamples)
                     {
                         int offset = std::clamp(it->sampleCountdown, 0, numSamples - 1);
-                        midiForBlock.addEvent(juce::MidiMessage::noteOff(1, it->midiPitch), offset);
+                        midiForBlock.addEvent(juce::MidiMessage::noteOff(it->midiChannel, it->midiPitch), offset);
+                        midiForBlock.addEvent(juce::MidiMessage::pitchWheel(it->midiChannel, 8192), offset);
                         it = t->scheduledNoteOffs.erase(it);
                     }
                     else
@@ -1573,6 +1757,8 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
                         ++it;
                     }
                 }
+
+                renderVst3Glides(t->pitchGlides, midiForBlock, numSamples);
             }
             int outCh = t->vst3Instrument->getTotalNumOutputChannels();
             int inCh = t->vst3Instrument->getTotalNumInputChannels();
@@ -1638,7 +1824,8 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
                         if (it->sampleCountdown <= numSamples)
                         {
                             int offset = std::clamp(it->sampleCountdown, 0, numSamples - 1);
-                            midiForBlock.addEvent(juce::MidiMessage::noteOff(1, it->midiPitch), offset);
+                            midiForBlock.addEvent(juce::MidiMessage::noteOff(it->midiChannel, it->midiPitch), offset);
+                            midiForBlock.addEvent(juce::MidiMessage::pitchWheel(it->midiChannel, 8192), offset);
                             it = slot->scheduledNoteOffs.erase(it);
                         }
                         else
@@ -1647,6 +1834,8 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
                             ++it;
                         }
                     }
+
+                    renderVst3Glides(slot->pitchGlides, midiForBlock, numSamples);
                 }
 
                 int outCh = slot->plugin->getTotalNumOutputChannels();
@@ -1698,7 +1887,8 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
                             if (it->sampleCountdown <= numSamples)
                             {
                                 const int offset = std::clamp(it->sampleCountdown, 0, numSamples - 1);
-                                slotMidi.addEvent(juce::MidiMessage::noteOff(1, it->midiPitch), offset);
+                                slotMidi.addEvent(juce::MidiMessage::noteOff(it->midiChannel, it->midiPitch), offset);
+                                slotMidi.addEvent(juce::MidiMessage::pitchWheel(it->midiChannel, 8192), offset);
                                 it = slot->scheduledNoteOffs.erase(it);
                             }
                             else
@@ -1707,6 +1897,8 @@ void AudioEngine::renderBlock(float* const* outputChannelData, int numOutputChan
                                 ++it;
                             }
                         }
+
+                        renderVst3Glides(slot->pitchGlides, slotMidi, numSamples);
                     }
 
                     const int outCh = slot->plugin->getTotalNumOutputChannels();
@@ -2066,6 +2258,7 @@ void AudioEngine::removeTrackVst3Instrument(const juce::String& trackId)
             {
                 std::lock_guard<std::mutex> midiLock(t->midiMutex);
                 t->scheduledNoteOffs.clear();
+                t->pitchGlides.clear();
             }
             t->vst3InstrumentEditor = nullptr;
             t->vst3Instrument = nullptr;
@@ -2144,6 +2337,7 @@ void AudioEngine::releaseNoteVst3Instruments(const juce::String& trackId)
             std::lock_guard<std::mutex> midiLock(slot->midiMutex);
             slot->pendingMidi.addEvent(juce::MidiMessage::allSoundOff(1), 0);
             slot->scheduledNoteOffs.clear();
+            slot->pitchGlides.clear();
         }
         t->noteVst3Slots.clear();
         break;

@@ -1372,3 +1372,96 @@ track (`src/ui/LeftPane.tsx:9298`).
   group fader on a dense mix. The code paths and bridge commands were inspected, but an audible
   native pass is still required.
 
+## 18. GLIDE VOICE ROUTING + VST3 GLIDE — 2026-10-26
+
+### 18.1 Destination-voice glide (which instrument carries the ramp)
+
+A glide link can now be voiced by either end. `Note.glideVoice?: 'source' | 'destination'`
+(`src/engine/store.ts:51`) defaults to source, so existing chains behave exactly as before.
+
+- **Source (default).** The source note plays first and its own voice ramps into the target pitch.
+  Legato extension still stretches the source into the next note.
+- **Destination.** The source note plays plainly. The target note is scheduled **early**, at the
+  source's pitch, for the length of the source's `pitchSlideTime` (or its duration), and the
+  target's own instrument ramps to its own pitch by its own start tick. The source's stored
+  `pitchSlide` interval is suppressed at playback so both instruments do not glide.
+  Legato extension is skipped in this mode (`src/utils/midiEditing.ts:1257`), otherwise both voices
+  would stretch into the junction.
+
+Implementation is a playback-time transform, not note mutation:
+
+- `buildGlideIntoMap` (`src/utils/midiEditing.ts:1128`) maps target note id →
+  `{ startPitch, slideTicks, ramp, customCurve, glideStyle }` for every
+  `glideVoice === 'destination'` link.
+- `resolveGlidePlayback` (`src/utils/midiEditing.ts:1157`) returns the early `startTick`,
+  `durationTicks + slideTicks`, the source pitch, and a synthetic `pitchSlide`/`pitchSlideTime`
+  copied onto the target note. It also strips the stored ramp from a destination-voiced source.
+- `mapNoteToScheduledEvent` (`src/engine/Scheduler.ts:42`) applies that shape for live playback,
+  and native bounce feeds the same function (`src/utils/nativeBounce.ts:112`), so export and
+  playback agree. Tone offline export (`audioRender.ts`) is untouched — it never rendered synth
+  glides, and native bounce remains the authoritative export.
+- Glide Chain panel gains a flat **VOICE** chip row (`Source` / `Dest`) above CURVE
+  (`src/renderer/GridCanvas.tsx:3802`). `Extend Legato` is labelled source-only. The on-grid
+  connector for a destination-voiced link is dashed and starts at the early onset
+  (`src/renderer/GridCanvas.tsx:1415`), and the source note no longer draws an in-note ramp that
+  its voice will not play (`src/renderer/GridCanvas.tsx:1588`).
+
+### 18.2 VST3 glide
+
+VST3 hosting exposes note-on/off only, so a glide is sent as **per-note MIDI pitch bend**:
+
+- Each gliding note gets a reserved channel (2–16, round-robin) via `startVst3Glide`
+  (`native/Source/Audio/AudioEngine.cpp:1100`), leaving channel 1 for ordinary notes.
+- The glide queues RPN 0 (pitch-bend sensitivity), a centre wheel, and stores the shared 33-point
+  glide curve, stepped flag and duration. `renderVst3Glides`
+  (`native/Source/Audio/AudioEngine.cpp:1146`) advances the ramp per block and emits pitch-wheel
+  only on change; the block that finishes a glide emits its exact landing bend at the right sample
+  offset before the glide is dropped. `clearPitchGlides` (`:1172`) recentres on note-off and
+  all-notes-off.
+- Because many instruments ignore RPN, `widenPluginPitchBend`
+  (`native/Source/Audio/AudioEngine.cpp:1073`) scans the plugin parameters once for a
+  pitch-bend range/amount/sensitivity control and widens it to the interval needed by the largest
+  glide on that note (only ever widens, never narrows).
+- Wired into all three VST3 paths — per-note instrument override slot (`:1300`), chain-tagged
+  clone slot (`:1437`), and the track VST3 instrument (`:1449`), with channel-aware note-offs at
+  `:1744`, `:1821`, `:1884` and glide cleanup when an instrument is removed (`:2255`, `:2334`).
+- Destination-voice glides reach VST3 unchanged: the transform above happens in TS before the
+  native note command is built, so the target plugin receives the early note-on at the source
+  pitch plus the ramp.
+
+### Limits that remain
+
+- A VST3 plugin that ignores both RPN 0 and any bend-range parameter keeps its own fixed range;
+  glides wider than that range are clamped (the bend stream is still sent, so small glides work).
+- Pitch bend is 14-bit across the chosen range, so very wide (e.g. 48-semitone) glides are
+  audibly stepped rather than continuous. Non-gliding notes on the same plugin stay on channel 1.
+- More than 15 simultaneous gliding notes on one plugin instance reuse channels round-robin and can
+  steal each other's bends. This is well beyond hand-played material but not a hard guarantee.
+- A destination-voiced cross-track glide interprets slide ticks in the source track's tick space;
+  per-track tempo multipliers and transpose make the landing pitch/timing approximate, same as
+  source-voiced cross-track chains.
+- Sampler, vocal and physical voices still do not glide (unchanged from §17); drums ignore glides.
+- VST3 note-on pitch is rounded to the nearest semitone. A fractional EDO/detuned pitch is not
+  corrected with a static bend, so a microtonal note plays 12-TET on VST3 while the synth and
+  sampler voices play the fraction.
+- Only WAV exports go through JUCE. MP3, multi-region and browser exports use the Tone offline
+  renderer, which does not apply destination-voice scheduling, so those files will not contain the
+  dest-voice glide (source-voice slides do render there).
+- Not verified by ear: no VST3 instrument was available in the browser session, so the bend
+  stream, RPN handling and parameter widening have only been code-verified and built.
+
+### Verification
+
+- `npx tsc --noEmit -p tsconfig.app.json` — clean.
+- `npx vite build` — succeeded; `bin/dist/index.html` now points at `assets/index-DwI77UdN.js`.
+- `scripts\build_native.bat` — rebuilt `AudioEngine.cpp` and relinked `bin/MuseGrid.exe` after the
+  VST3 landing-bend fix (the first build of the change was a no-op).
+- Browser (`npm run dev:web`): added two synth notes (C4 and C5), opened Link Glides, confirmed the
+  VOICE row renders Source active by default, selected Dest, applied, and read the store back:
+  source stores `glideToNoteId`, `glideVoice: 'destination'`, `pitchSlide: 12`, `pitchSlideTime: 96`;
+  the target stores no ramp. Feeding those live notes through the real `mapNoteToScheduledEvent`:
+  source plays plain `C4`, 96 ticks; target starts at tick 96 (early), plays 192 ticks, begins at
+  `C4` with `+12` over 96 ticks. The connector renders dashed from the early onset, and the source
+  note no longer shows an in-note cyan ramp. No new console errors; the only error is the
+  pre-existing WASM `audio-processor.js` detached-buffer one.
+

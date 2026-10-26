@@ -1108,6 +1108,86 @@ export interface GlideChainOptions {
   fixedTicks?: number
   extendLegato?: boolean
   loopLastNote?: boolean
+  /** Which instrument carries the ramp: the note that starts it, or the note it lands on. */
+  glideVoice?: 'source' | 'destination'
+}
+
+/**
+ * Playback-time description of a glide that is carried by the destination note.
+ * Derived from the source link so editing either note's pitch stays in sync.
+ */
+export interface GlideIntoSpec {
+  sourceId: string
+  startPitch: number
+  slideTicks: number
+  ramp?: Note['pitchSlideRamp']
+  customCurve?: string
+  glideStyle?: Note['glideStyle']
+}
+
+export function buildGlideIntoMap(notes: Note[]): Map<string, GlideIntoSpec> {
+  const into = new Map<string, GlideIntoSpec>()
+  for (const source of notes) {
+    if (source.glideVoice !== 'destination' || !source.glideToNoteId) continue
+    const slideTicks = source.pitchSlideTime ?? source.duration
+    if (!(slideTicks > 0)) continue
+    into.set(source.glideToNoteId, {
+      sourceId: source.id,
+      startPitch: source.pitch,
+      slideTicks,
+      ramp: source.pitchSlideRamp,
+      customCurve: source.pitchSlideCustomCurve,
+      glideStyle: source.glideStyle,
+    })
+  }
+  return into
+}
+
+export interface GlidePlaybackShape {
+  startTick: number
+  durationTicks: number
+  pitch: number
+  note: Note
+}
+
+/**
+ * Turns a stored note into what playback should trigger. A destination-voiced link starts
+ * the landed note early at the source pitch; its source is silenced for the ramp.
+ */
+export function resolveGlidePlayback(n: Note, glideInto?: GlideIntoSpec): GlidePlaybackShape {
+  if (glideInto) {
+    return {
+      startTick: Math.max(0, n.time - glideInto.slideTicks),
+      durationTicks: n.duration + glideInto.slideTicks,
+      pitch: glideInto.startPitch,
+      note: {
+        ...n,
+        pitchSlide: n.pitch - glideInto.startPitch,
+        pitchSlideTime: glideInto.slideTicks,
+        pitchSlideRamp: glideInto.ramp,
+        pitchSlideCustomCurve: glideInto.customCurve,
+        glideStyle: glideInto.glideStyle ?? n.glideStyle,
+        glideVoice: undefined,
+      },
+    }
+  }
+
+  if (n.glideVoice === 'destination') {
+    return {
+      startTick: n.time,
+      durationTicks: n.duration,
+      pitch: n.pitch,
+      note: {
+        ...n,
+        pitchSlide: undefined,
+        pitchSlideTime: undefined,
+        pitchSlideRamp: undefined,
+        pitchSlideCustomCurve: undefined,
+      },
+    }
+  }
+
+  return { startTick: n.time, durationTicks: n.duration, pitch: n.pitch, note: n }
 }
 
 /**
@@ -1122,6 +1202,7 @@ export function applyGlideChain(notes: Note[], options: GlideChainOptions = {}):
   const durationMode = options.durationMode || 'full'
   const extendLegato = options.extendLegato ?? true
   const loopLastNote = options.loopLastNote ?? false
+  const glideVoice = options.glideVoice ?? 'source'
 
   // Sort notes according to the chosen order
   const ordered = [...notes].sort((a, b) => {
@@ -1170,8 +1251,10 @@ export function applyGlideChain(notes: Note[], options: GlideChainOptions = {}):
       // Calculate semitone delta
       const semitones = target.pitch - current.pitch
 
-      // Auto-extend duration if legato is enabled and target starts after current
-      if (extendLegato && target.time > current.time) {
+      // Auto-extend duration if legato is enabled and target starts after current.
+      // A destination-voice glide must not stretch the source: the next note's own
+      // voice starts early instead.
+      if (extendLegato && glideVoice === 'source' && target.time > current.time) {
         current.duration = Math.max(current.duration, target.time - current.time)
       }
 
@@ -1189,6 +1272,7 @@ export function applyGlideChain(notes: Note[], options: GlideChainOptions = {}):
       current.pitchSlideTime = slideTicks
       current.pitchSlideRamp = rampType
       current.glideToNoteId = target.id
+      current.glideVoice = glideVoice === 'destination' ? 'destination' : undefined
       if (customCurve) {
         current.pitchSlideCustomCurve = customCurve
       } else {
@@ -1201,6 +1285,7 @@ export function applyGlideChain(notes: Note[], options: GlideChainOptions = {}):
       current.pitchSlideRamp = undefined
       current.pitchSlideCustomCurve = undefined
       current.glideToNoteId = undefined
+      current.glideVoice = undefined
     }
 
     modifiedMap.set(current.id, current)
@@ -1221,6 +1306,7 @@ export function clearNoteGlides(notes: Note[]): Note[] {
     pitchSlideRamp: undefined,
     pitchSlideCustomCurve: undefined,
     glideToNoteId: undefined,
+    glideVoice: undefined,
   }))
 }
 

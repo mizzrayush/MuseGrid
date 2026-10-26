@@ -350,7 +350,8 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
     curve: 'cubicInOut',
     durationMode: 'full',
     extendLegato: true,
-    loopLastNote: false
+    loopLastNote: false,
+    glideVoice: 'source'
   })
   const contextMenuRef = useRef<HTMLDivElement | null>(null)
   useContextMenuDismissal(contextMenu !== null, setContextMenu, contextMenuRef)
@@ -1411,10 +1412,14 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         glideSources.forEach(note => {
           const target = notesById.get(note.glideToNoteId as string)
           if (!target) return
-          const x1 = tickToX(note.time + note.duration)
+          const destVoiced = note.glideVoice === 'destination'
+          const slideTicks = note.pitchSlideTime ?? note.duration
+          const x1 = destVoiced
+            ? tickToX(Math.max(0, target.time - slideTicks))
+            : tickToX(note.time + note.duration)
           const x2 = tickToX(target.time)
           if (Math.max(x1, x2) < minVisibleX || Math.min(x1, x2) > maxVisibleX) return
-          const sourcePitch = note.pitchEnd !== undefined ? note.pitchEnd : note.pitch
+          const sourcePitch = destVoiced ? note.pitch : (note.pitchEnd !== undefined ? note.pitchEnd : note.pitch)
           const y1 = TIMELINE_HEIGHT + getPitchY(sourcePitch) + gridSizeY * 0.5
           const y2 = TIMELINE_HEIGHT + getPitchY(target.pitch) + gridSizeY * 0.5
           if (y1 < TIMELINE_HEIGHT || y2 < TIMELINE_HEIGHT) return
@@ -1437,6 +1442,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
           ctx.fillStyle = color
           ctx.globalAlpha = selectedNoteSet.has(note.id) ? 0.95 : (note.trackId === targetTrackId ? 0.7 : 0.4)
           ctx.lineWidth = 1.5 / zoom
+          if (destVoiced) ctx.setLineDash([5 / zoom, 4 / zoom])
           ctx.beginPath()
           ctx.moveTo(x1, y1)
           if (shape === 'line') {
@@ -1577,8 +1583,10 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
           }
         }
 
-        // Draw Pitch Glide / Slide Trajectory on Synth notes
-        if (!isDrum && note.pitchSlide !== undefined && note.pitchSlide !== 0 && w >= 12) {
+        // Draw Pitch Glide / Slide Trajectory on Synth notes. A destination-voiced
+        // source note stores the interval but must not draw a ramp its own voice never plays.
+        const destVoicedSource = note.glideVoice === 'destination' && !!note.glideToNoteId
+        if (!isDrum && !destVoicedSource && note.pitchSlide !== undefined && note.pitchSlide !== 0 && w >= 12) {
           ctx.save()
           const isUp = note.pitchSlide > 0
           const startY = isUp ? y + h - 3 : y + 3
@@ -3794,6 +3802,14 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                   </div>
 
                   <div>
+                    {glideGroupLabel('VOICE')}
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                      {renderGlideChip('Source', (glideMenu.glideVoice ?? 'source') === 'source', () => setGlideMenu(m => ({ ...m, glideVoice: 'source' })), "The first note's instrument carries the pitch ramp")}
+                      {renderGlideChip('Dest', glideMenu.glideVoice === 'destination', () => setGlideMenu(m => ({ ...m, glideVoice: 'destination' })), "The next note's instrument starts early at the previous pitch and carries the ramp")}
+                    </div>
+                  </div>
+
+                  <div>
                     {glideGroupLabel('CURVE')}
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
                       {renderGlideChip('Line', glideMenu.curve === 'linear', () => setGlideMenu(m => ({ ...m, curve: 'linear' })))}
@@ -3858,7 +3874,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                   </div>
 
                   <div style={{ display: 'flex', gap: '4px' }}>
-                    {renderGlideChip('Extend Legato', glideMenu.extendLegato ?? true, () => setGlideMenu(m => ({ ...m, extendLegato: !(m.extendLegato ?? true) })), 'Stretch each note so the glide reaches the next note')}
+                    {renderGlideChip('Extend Legato', glideMenu.extendLegato ?? true, () => setGlideMenu(m => ({ ...m, extendLegato: !(m.extendLegato ?? true) })), 'Stretch each note so the glide reaches the next note (Source voice only)')}
                     {renderGlideChip('Loop Last', glideMenu.loopLastNote ?? false, () => setGlideMenu(m => ({ ...m, loopLastNote: !(m.loopLastNote ?? false) })), 'Glide from the last note back to the first')}
                   </div>
 

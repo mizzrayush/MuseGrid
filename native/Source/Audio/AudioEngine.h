@@ -4,6 +4,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_dsp/juce_dsp.h>
 #include <vector>
+#include <array>
 #include <map>
 #include <mutex>
 #include <atomic>
@@ -30,6 +31,24 @@ struct TrackVst3Fx
     std::unique_ptr<Vst3PluginWindow> editorWindow;
     bool bypassed = false;
     float wet = 1.0f;
+};
+
+/**
+ * One pitch-bend glide on a hosted VST3 instrument. VST3 has no per-note pitch target, so a
+ * glide is streamed as MIDI pitch bend on a channel reserved for the gliding note.
+ */
+struct PitchGlide
+{
+    int channel = 1;
+    int midiPitch = 60;
+    int bendRangeSemitones = 2;
+    float semitoneDelta = 0.0f;
+    float totalSamples = 1.0f;
+    float elapsedSamples = 0.0f;
+    int lastBend = 8192;
+    bool stepped = false;
+    std::array<float, musegrid::NoteExpression::kCurvePoints> curve {};
+    int curveSize = 0;
 };
 
 struct TrackState
@@ -82,8 +101,11 @@ struct TrackState
     {
         int midiPitch;
         int sampleCountdown;
+        int midiChannel = 1;
     };
     std::vector<ScheduledNoteOff> scheduledNoteOffs;
+    std::vector<PitchGlide> pitchGlides;
+    int nextGlideChannel = 2;
 
     // Extra VST3 instrument instances used by per-note instrument overrides.
     struct NoteVst3Slot
@@ -95,6 +117,8 @@ struct TrackState
         juce::MidiBuffer pendingMidi;
         std::mutex midiMutex;
         std::vector<ScheduledNoteOff> scheduledNoteOffs;
+        std::vector<PitchGlide> pitchGlides;
+        int nextGlideChannel = 2;
     };
     std::vector<std::unique_ptr<NoteVst3Slot>> noteVst3Slots;
 

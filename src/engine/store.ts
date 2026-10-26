@@ -43,6 +43,12 @@ export interface Note {
   tremoloWave?: 'sine' | 'triangle' | 'square'
   /** Target of a multi-note glide chain, used to draw the on-grid connector. */
   glideToNoteId?: string;
+  /**
+   * Which instrument performs the glide into glideToNoteId.
+   * 'source' (default) ramps this note's own voice; 'destination' starts the next note
+   * early at this note's pitch so the next note's instrument carries the glide.
+   */
+  glideVoice?: 'source' | 'destination';
 
   // Vocal properties
   lyric?: string            // Syllable/phonetic text (e.g. "la", "do")

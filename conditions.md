@@ -2319,9 +2319,9 @@ steps at [Scheduler.ts:69](src/engine/Scheduler.ts#L69)-89 and the renderer at
 `laneNoteExtent` returns only `start`, `end` and `curve`, all three produced by `sample()`, and
 `range` appears nowhere in the returned object, whose three fields come from `sample()` and
 `buildLaneCurve()`, so deleting it cannot change any curve. Its helpers survive —
-`exprLaneNeutralValue` has 3 remaining call sites (:262, :287, :315) and
-`EXPRESSION_LANE_RANGES` is still imported at [automation.ts:2](src/utils/automation.ts#L2), so the
-build is unaffected.
+`exprLaneNeutralValue` has 3 remaining call sites (:262, :287, :315) and `EXPRESSION_LANE_RANGES`,
+declared at [automation.ts:128](src/utils/automation.ts#L128), is still read by
+`laneValueToExprParam` (:155) and `exprParamToLaneValue` (:163).
 
 A scratch copy of the HEAD renderer was used for the A/B and deleted afterwards; `git status` showed
 only `audioRender.ts`, `automation.ts`, `conditions.md` and the pre-existing `JUCE` submodule.

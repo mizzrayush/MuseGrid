@@ -643,8 +643,9 @@ export default function HelpPane() {
                 <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
                   <li><strong>Draw Mode (Pencil / B)</strong>: Click on the grid to place a note. Click and drag edges to resize.</li>
                   <li><strong>Erase Mode (Eraser / E)</strong>: Click a note to delete it.</li>
-                  <li><strong>Select Mode (Cursor / V)</strong>: Box-select multiple notes. Drag to move or delete together.</li>
+                  <li><strong>Select Mode (Cursor / V)</strong>: Box-select or lasso multiple notes. Drag to move or delete together.</li>
                   <li><strong>Slice Mode (Knife / C)</strong>: Click and drag vertically across notes to slice them cleanly.</li>
+                  <li><strong>Timeline Region Selection (Ruler Header)</strong>: Click and drag along the top ruler header to highlight a time range across all tracks (or single track). A floating action bar appears with quick actions to Duplicate, Mute/Unmute, Split, Quantize, or Delete notes in the selected span.</li>
                 </ul>
 
                 <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Ghost Notes Suite & Track Jumping</h3>
@@ -1307,6 +1308,9 @@ MuseState.showToast('Batch Render Complete!', 'success');`}
                   <li><strong>Treble Staff Representation</strong>: Maps MIDI note numbers to standard diatonic lines, displaying accidentals.</li>
                   <li><strong>Ledger Lines</strong>: Draws extra lines above and below the standard staff for low and high pitches.</li>
                   <li><strong>Note Name Overlay</strong>: Renders note names inside note heads for educational sheet reading.</li>
+                  <li><strong>Compound Meter Normalization</strong>: Dynamically adjusts measure lengths and ticks per beat for compound and non-standard time signatures (e.g., 6/8, 3/8, 2/2, 4/4).</li>
+                  <li><strong>Cross-Measure Tied Notes</strong>: Notes that cross barlines are cleanly split and marked with MusicXML &lt;tie&gt; and &lt;tied&gt; notations so external engravers (MuseScore, Dorico, Sibelius) render them with proper ties.</li>
+                  <li><strong>Read-Only Mode Lock</strong>: When Read-Only Mode is active, score stave clicking, note tuning, and deletion are locked to prevent accidental edits.</li>
                   <li><strong>Export Formats</strong>:
                     <br />- <strong>Vector SVG</strong>: Download a high-res vector graphic.
                     <br />- <strong>Print Score</strong>: Formats the notation for physical printing.

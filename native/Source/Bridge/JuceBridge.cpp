@@ -243,7 +243,15 @@ juce::WebBrowserComponent::Options JuceBridge::setupOptions(juce::WebBrowserComp
             if (args.isEmpty()) { comp(juce::Array<juce::var>()); return; }
             comp(audioEngine.getTrackVst3Parameters(args[0].toString()));
         })
-        .withNativeFunction("vst3-open-editor", [this](auto& args, auto comp) { handleVst3OpenEditor(args, comp); });
+        .withNativeFunction("vst3-open-editor", [this](auto& args, auto comp) { handleVst3OpenEditor(args, comp); })
+        .withNativeFunction("get-clipboard-text", [](const auto&, auto comp) {
+            comp(juce::SystemClipboard::getTextFromClipboard());
+        })
+        .withNativeFunction("set-clipboard-text", [](const auto& args, auto comp) {
+            if (!args.isEmpty())
+                juce::SystemClipboard::copyTextToClipboard(args[0].toString());
+            comp(true);
+        });
 }
 
 void JuceBridge::handleSaveProject(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete)

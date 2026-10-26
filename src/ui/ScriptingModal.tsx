@@ -5,7 +5,7 @@ import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker';
 import { useStore, type Note, type Track } from '../engine/store';
 import { ScriptAPI } from '../engine/ScriptAPI';
-import { IconPlay, IconStop, IconTrash, IconX, IconOpen, IconSave, IconHelp, IconBook, IconInfo } from './Icons';
+import { IconPlay, IconStop, IconTrash, IconX, IconOpen, IconSave, IconHelp, IconBook, IconInfo, IconPaste } from './Icons';
 import { audioEngine } from '../engine/AudioEngine';
 import { saveFileWithDialog } from '../utils/fileExport';
 
@@ -1208,6 +1208,8 @@ export const ScriptingModal: React.FC = () => {
   }, [docsCategory, docsSearch]);
   const containerRef = React.useRef<HTMLDivElement>(null);
   const outerContainerRef = React.useRef<HTMLDivElement>(null);
+  const editorRef = React.useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
+  const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
   const isDraggingDivider = React.useRef(false);
   const isDraggingVerticalDivider = React.useRef(false);
 
@@ -1378,8 +1380,74 @@ export const ScriptingModal: React.FC = () => {
     input.click();
   };
 
+  const getSystemClipboardText = async (): Promise<string> => {
+    // 1. Try native JUCE bridge
+    try {
+      if ((window as any).ipcRenderer?.invoke) {
+        const nativeText = await (window as any).ipcRenderer.invoke('get-clipboard-text');
+        if (typeof nativeText === 'string' && nativeText.length > 0) {
+          return nativeText;
+        }
+      }
+    } catch (_) {}
+
+    // 2. Try standard navigator.clipboard
+    try {
+      if (navigator?.clipboard?.readText) {
+        const text = await navigator.clipboard.readText();
+        if (typeof text === 'string') return text;
+      }
+    } catch (_) {}
+
+    return '';
+  };
+
+  const handlePaste = async () => {
+    try {
+      const text = await getSystemClipboardText();
+      if (!text) {
+        useStore.getState().showToast('Clipboard is empty or inaccessible', 'info');
+        return;
+      }
+
+      if (!usePlainEditor && editorRef.current) {
+        const editor = editorRef.current;
+        const selection = editor.getSelection();
+        if (selection) {
+          editor.executeEdits('user-paste', [{
+            range: selection,
+            text: text,
+            forceMoveMarkers: true
+          }]);
+          editor.focus();
+        } else {
+          setScriptContent(scriptContent + '\n' + text);
+        }
+      } else if (textareaRef.current) {
+        const ta = textareaRef.current;
+        const start = ta.selectionStart;
+        const end = ta.selectionEnd;
+        const newContent = scriptContent.substring(0, start) + text + scriptContent.substring(end);
+        setScriptContent(newContent);
+        setTimeout(() => {
+          ta.focus();
+          ta.selectionStart = ta.selectionEnd = start + text.length;
+        }, 10);
+      } else {
+        setScriptContent(scriptContent + '\n' + text);
+      }
+
+      useStore.getState().showToast('Pasted from clipboard', 'success');
+    } catch (err) {
+      console.error('Failed to paste:', err);
+      useStore.getState().showToast('Unable to read clipboard', 'error');
+    }
+  };
+
   return (
-    <div className="animate-modal-bg" style={{
+    <div className="animate-modal-bg" 
+      onKeyDown={(e) => e.stopPropagation()}
+      style={{
       position: 'fixed', inset: 0, 
       background: 'rgba(8, 9, 14, 0.78)', 
       backdropFilter: 'blur(10px)',
@@ -1407,7 +1475,7 @@ export const ScriptingModal: React.FC = () => {
               <span style={{ fontSize: '16px', fontWeight: 800, color: 'white', letterSpacing: '-0.02em' }}>MuseGrid Scripting Engine</span>
             </div>
             <div style={{ fontSize: '11px', color: '#666', marginTop: '2px' }}>
-              Algorithmic Composition & Custom DSP
+              Algorithmic Composition &amp; Custom DSP
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
@@ -1423,6 +1491,19 @@ export const ScriptingModal: React.FC = () => {
               title="Load Script"
             >
               <IconOpen size={12} /> Load
+            </button>
+            <button
+              onClick={handlePaste}
+              style={{
+                background: 'rgba(255,255,255,0.05)', color: '#aaa', border: '1px solid rgba(255,255,255,0.1)', 
+                padding: '6px 12px', borderRadius: '6px', fontSize: '11px', fontWeight: 800,
+                cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.15s'
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.1)'; e.currentTarget.style.color = '#fff'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = '#aaa'; }}
+              title="Paste from Clipboard (Ctrl+V)"
+            >
+              <IconPaste size={12} /> Paste
             </button>
             <select
               onChange={(e) => {
@@ -1512,7 +1593,32 @@ export const ScriptingModal: React.FC = () => {
                 value={scriptContent}
                 onChange={(val) => setScriptContent(val || '')}
                 beforeMount={handleEditorWillMount}
-                onMount={() => setEditorLoaded(true)}
+                onMount={(editor, monacoInstance) => {
+                  editorRef.current = editor;
+                  setEditorLoaded(true);
+
+                  // Add custom Paste action to context menu and keybinding
+                  editor.addAction({
+                    id: 'musegrid-paste',
+                    label: 'Paste from Clipboard',
+                    contextMenuGroupId: '9_cutcopypaste',
+                    contextMenuOrder: 3,
+                    keybindings: [monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyCode.KeyV],
+                    run: async (ed) => {
+                      const text = await getSystemClipboardText();
+                      if (text) {
+                        const selection = ed.getSelection();
+                        if (selection) {
+                          ed.executeEdits('custom-paste', [{
+                            range: selection,
+                            text: text,
+                            forceMoveMarkers: true,
+                          }]);
+                        }
+                      }
+                    }
+                  });
+                }}
                 loading={
                   <div style={{
                     display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
@@ -1528,6 +1634,8 @@ export const ScriptingModal: React.FC = () => {
                   wordWrap: 'on',
                   lineNumbersMinChars: 3,
                   scrollBeyondLastLine: false,
+                  contextmenu: true,
+                  automaticLayout: true,
                 }}
               />
             ) : (
@@ -1545,8 +1653,23 @@ export const ScriptingModal: React.FC = () => {
                   </button>
                 </div>
                 <textarea
+                  ref={textareaRef}
                   value={scriptContent}
                   onChange={(e) => setScriptContent(e.target.value)}
+                  onPaste={(e) => {
+                    const text = e.clipboardData?.getData('text');
+                    if (text) {
+                      e.preventDefault();
+                      const target = e.currentTarget;
+                      const start = target.selectionStart;
+                      const end = target.selectionEnd;
+                      const nextVal = target.value.substring(0, start) + text + target.value.substring(end);
+                      setScriptContent(nextVal);
+                      setTimeout(() => {
+                        target.selectionStart = target.selectionEnd = start + text.length;
+                      }, 0);
+                    }
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === 'Tab') {
                       e.preventDefault();

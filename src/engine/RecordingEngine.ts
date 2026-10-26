@@ -368,7 +368,13 @@ class RecordingEngine {
         activeEl?.tagName === 'INPUT' ||
         activeEl?.tagName === 'SELECT' ||
         activeEl?.tagName === 'TEXTAREA' ||
-        activeEl?.hasAttribute('contenteditable')
+        activeEl?.hasAttribute('contenteditable') ||
+        Boolean(activeEl?.closest?.('.monaco-editor')) ||
+        Boolean(activeEl?.closest?.('.animate-modal-bg')) ||
+        Boolean(activeEl?.closest?.('.animate-modal-card')) ||
+        Boolean((e.target as HTMLElement | null)?.closest?.('.monaco-editor')) ||
+        Boolean((e.target as HTMLElement | null)?.closest?.('.animate-modal-bg')) ||
+        useStore.getState().isScriptingModalVisible
       ) {
         return
       }

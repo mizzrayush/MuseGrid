@@ -383,9 +383,17 @@ function App() {
         activeEl?.tagName === 'TEXTAREA' ||
         activeEl?.tagName === 'SELECT' ||
         activeEl?.hasAttribute('contenteditable') ||
-        activeEl?.classList?.contains('monaco-editor')
+        Boolean(activeEl?.closest('.monaco-editor')) ||
+        Boolean(activeEl?.closest('.animate-modal-bg')) ||
+        Boolean(activeEl?.closest('.animate-modal-card'))
 
-      if (isInput) return
+      const isTargetInModal =
+        e.target instanceof HTMLElement &&
+        (Boolean(e.target.closest('.monaco-editor')) ||
+         Boolean(e.target.closest('.animate-modal-bg')) ||
+         Boolean(e.target.closest('.animate-modal-card')))
+
+      if (isInput || isTargetInModal || useStore.getState().isScriptingModalVisible) return
 
       // Global Spacebar Play / Pause
       if (e.code === 'Space' || e.key === ' ') {

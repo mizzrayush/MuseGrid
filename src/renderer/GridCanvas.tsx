@@ -673,16 +673,26 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const activeEl = document.activeElement
-      if (
+      const isInput =
         activeEl?.tagName === 'INPUT' ||
         activeEl?.tagName === 'SELECT' ||
         activeEl?.tagName === 'TEXTAREA' ||
-        activeEl?.hasAttribute('contenteditable')
-      ) {
+        activeEl?.hasAttribute('contenteditable') ||
+        Boolean(activeEl?.closest('.monaco-editor')) ||
+        Boolean(activeEl?.closest('.animate-modal-bg')) ||
+        Boolean(activeEl?.closest('.animate-modal-card'))
+
+      const isTargetInModal =
+        e.target instanceof HTMLElement &&
+        (Boolean(e.target.closest('.monaco-editor')) ||
+         Boolean(e.target.closest('.animate-modal-bg')) ||
+         Boolean(e.target.closest('.animate-modal-card')))
+
+      const store = useStore.getState()
+      if (isInput || isTargetInModal || store.isScriptingModalVisible) {
         return
       }
 
-      const store = useStore.getState()
       const activeTrack = store.tracks.find(t => t.id === store.activeTrackId)
       const currentTrackInstrument = activeTrack?.instrument === 'drum' ? 'drum' : 'synth'
       if (currentTrackInstrument !== instrument) return

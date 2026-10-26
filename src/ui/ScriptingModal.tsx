@@ -5,7 +5,7 @@ import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker';
 import { useStore, type Note, type Track } from '../engine/store';
 import { ScriptAPI } from '../engine/ScriptAPI';
-import { IconPlay, IconStop, IconTrash, IconX, IconOpen, IconSave, IconHelp, IconBook, IconInfo, IconPaste } from './Icons';
+import { IconPlay, IconStop, IconTrash, IconX, IconOpen, IconSave, IconHelp, IconBook, IconInfo } from './Icons';
 import { audioEngine } from '../engine/AudioEngine';
 import { saveFileWithDialog } from '../utils/fileExport';
 
@@ -1402,48 +1402,6 @@ export const ScriptingModal: React.FC = () => {
     return '';
   };
 
-  const handlePaste = async () => {
-    try {
-      const text = await getSystemClipboardText();
-      if (!text) {
-        useStore.getState().showToast('Clipboard is empty or inaccessible', 'info');
-        return;
-      }
-
-      if (!usePlainEditor && editorRef.current) {
-        const editor = editorRef.current;
-        const selection = editor.getSelection();
-        if (selection) {
-          editor.executeEdits('user-paste', [{
-            range: selection,
-            text: text,
-            forceMoveMarkers: true
-          }]);
-          editor.focus();
-        } else {
-          setScriptContent(scriptContent + '\n' + text);
-        }
-      } else if (textareaRef.current) {
-        const ta = textareaRef.current;
-        const start = ta.selectionStart;
-        const end = ta.selectionEnd;
-        const newContent = scriptContent.substring(0, start) + text + scriptContent.substring(end);
-        setScriptContent(newContent);
-        setTimeout(() => {
-          ta.focus();
-          ta.selectionStart = ta.selectionEnd = start + text.length;
-        }, 10);
-      } else {
-        setScriptContent(scriptContent + '\n' + text);
-      }
-
-      useStore.getState().showToast('Pasted from clipboard', 'success');
-    } catch (err) {
-      console.error('Failed to paste:', err);
-      useStore.getState().showToast('Unable to read clipboard', 'error');
-    }
-  };
-
   return (
     <div className="animate-modal-bg" 
       onKeyDown={(e) => e.stopPropagation()}
@@ -1491,19 +1449,6 @@ export const ScriptingModal: React.FC = () => {
               title="Load Script"
             >
               <IconOpen size={12} /> Load
-            </button>
-            <button
-              onClick={handlePaste}
-              style={{
-                background: 'rgba(255,255,255,0.05)', color: '#aaa', border: '1px solid rgba(255,255,255,0.1)', 
-                padding: '6px 12px', borderRadius: '6px', fontSize: '11px', fontWeight: 800,
-                cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.15s'
-              }}
-              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.1)'; e.currentTarget.style.color = '#fff'; }}
-              onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = '#aaa'; }}
-              title="Paste from Clipboard (Ctrl+V)"
-            >
-              <IconPaste size={12} /> Paste
             </button>
             <select
               onChange={(e) => {

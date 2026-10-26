@@ -2296,9 +2296,13 @@ native engine was not rebuilt.
    `laneNote.pitchOffset`/`laneNote.detune` at :873.
 2. **Vibrato depth above 100 still clamps to full scale** in both engines (`min(1, depth/100)`), so a
    300-lane-value vibrato is not three times a 100-value one; the clamp is Tone's own depth ceiling.
-3. **The native bounce is still the default export** for a plain WAV via `canUseNativeBounce()`, so
-   most users will never run this path; it is what MP3, multi-region, procedural-FX and web-mode
-   exports use.
+3. **The native bounce is still the default export.** `canUseNativeBounce()` is true in the packaged
+   app and the Tone renderer then runs in three cases: web mode (`dev:web`, no bridge), the native
+   render throwing, and any bounce that includes procedural FX —
+   [nativeBounce.ts:278](src/utils/nativeBounce.ts#L278) returns null when
+   `includeProceduralFx && proceduralFxEnabled`. Plain MP3 and multi-region bounces stay on JUCE
+   (`renderNativeAudioBuffer` renders each region natively and stitches in JS, per §20.5), so this
+   fix matters most for browser use and for FX-laden bounces.
 
 ### 22.4 accounting
 

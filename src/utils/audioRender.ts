@@ -438,6 +438,56 @@ function triggerDrum(
   }
 }
 
+/**
+ * The per-note modulation nodes, built in the same order and from the same fields the live
+ * preview chains them: vibrato, then tremolo, then filter. They only ever sit on an ephemeral
+ * voice, because a shared poly synth cannot shape one note without affecting the rest.
+ */
+function buildModulationNodes(
+  noteData: any,
+  start: number,
+  durationSeconds: number,
+  ticksPerSecond: number,
+): Tone.ToneAudioNode[] {
+  const nodes: Tone.ToneAudioNode[] = []
+
+  if (noteData?.vibratoDepth) {
+    const vibrato = new Tone.Vibrato({
+      frequency: noteData.vibratoRate || 5,
+      depth: 0,
+      type: noteData.vibratoWave || 'sine'
+    })
+    const depthDelay = Math.max(0, (noteData.vibratoDelay || 0) / 1000)
+    const depthFade = Math.max(0, (noteData.vibratoFade || 0) / 1000)
+    const fullDepth = Math.max(0, Math.min(1, noteData.vibratoDepth / 100))
+    vibrato.depth.setValueAtTime(0, start)
+    vibrato.depth.linearRampToValueAtTime(fullDepth, start + depthDelay + Math.max(0.001, depthFade))
+    nodes.push(vibrato)
+  }
+
+  if (noteData?.tremoloDepth) {
+    // Offline the LFO has to be started at the note's own time; live it is created as the note plays.
+    nodes.push(new Tone.Tremolo({
+      frequency: noteData.tremoloRate || 5,
+      depth: noteData.tremoloDepth,
+      type: noteData.tremoloWave || 'sine'
+    }).start(start))
+  }
+
+  if (noteData?.filterStart) {
+    const filter = new Tone.Filter(noteData.filterStart, 'lowpass')
+    nodes.push(filter)
+    if (noteData.filterEnd) {
+      // No sweep time means the lane spans the whole note, which is what the native voice does.
+      const sweepTime = noteData.filterSweepTime ? noteData.filterSweepTime / ticksPerSecond : durationSeconds
+      filter.frequency.setValueAtTime(noteData.filterStart, start)
+      filter.frequency.rampTo(noteData.filterEnd, sweepTime, start)
+    }
+  }
+
+  return nodes
+}
+
 export interface RenderOptions {
   trackId?: string;
   trackIds?: string[];
@@ -606,6 +656,8 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
         ? buildCurveLut(playNoteData.pitchSlideRamp, playNoteData.pitchSlideCustomCurve || 't * t')
         : undefined
       const hasExpressionOut = fadeInSec > 0 || fadeOutSec > 0 || autoGain !== 1 || notePan !== 0
+      const noteDetune = playNoteData.detune ?? 0
+      const hasModulation = !!playNoteData.vibratoDepth || !!playNoteData.tremoloDepth || !!playNoteData.filterStart
 
       const isVocal = note.instrumentOverride === 'vocal' || (track.synthPreset === 'vocal' && !note.instrumentOverride)
       if (isVocal) {
@@ -613,7 +665,7 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
           const rawCtx = Tone.getContext().rawContext
           const voice = new VocalModelVoice(trackInput.input as GainNode, rawCtx)
           const baseFreq = Tone.Frequency(playback.pitch + totalTranspose, 'midi').toFrequency()
-          const freq = note.detune ? baseFreq * Math.pow(2, note.detune / 1200) : baseFreq
+          const freq = playNoteData.detune ? baseFreq * Math.pow(2, playNoteData.detune / 1200) : baseFreq
           const endFreq = glideSemis
             ? freq * Math.pow(2, glideSemis / 12)
             : (note.pitchEnd !== undefined ? Tone.Frequency(note.pitchEnd + totalTranspose, 'midi').toFrequency() : undefined)
@@ -656,7 +708,7 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
           const rawCtx = Tone.getContext().rawContext
           const voice = new PhysicalModelVoice(trackInput.input as GainNode, rawCtx)
           const baseFreq = Tone.Frequency(playback.pitch + totalTranspose, 'midi').toFrequency()
-          const freq = note.detune ? baseFreq * Math.pow(2, note.detune / 1200) : baseFreq
+          const freq = playNoteData.detune ? baseFreq * Math.pow(2, playNoteData.detune / 1200) : baseFreq
           voice.trigger(freq, duration, start, velocity, track, {
             targetFrequency: glideSemis ? freq * Math.pow(2, glideSemis / 12) : undefined,
             glideSeconds: glideSemis ? glideSeconds : undefined,
@@ -677,9 +729,9 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
         ? note.instrumentOverride as SynthPreset
         : undefined
 
-      // A glide, morph fade or per-note pan/gain needs its own voice: the shared poly
-      // synth's output cannot be ramped or panned for a single note.
-      if (glideSemis || hasExpressionOut) {
+      // A glide, morph fade, per-note pan/gain or modulation needs its own voice: the shared poly
+      // synth's output cannot be ramped, panned or voice-shaped for a single note.
+      if (glideSemis || hasExpressionOut || hasModulation) {
         let ephem: Tone.PolySynth
         if (!overridePreset && track.synthPreset === 'custom' && track.customMuxins) {
           ephem = createSynthFromMuzins(track.customMuxins)
@@ -689,6 +741,10 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
         }
 
         let out: Tone.ToneAudioNode = ephem
+        buildModulationNodes(playNoteData, start, duration, noteTicksPerSecond).forEach(node => {
+          out.chain(node)
+          out = node
+        })
         if (hasExpressionOut) {
           const g = new Tone.Gain(1)
           g.gain.setValueAtTime(fadeInSec > 0 ? 0 : autoGain, start)
@@ -706,8 +762,11 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
 
         const raw = playback.pitch + totalTranspose
         const isMicro = Math.abs(raw % 1) > 0.0001
-        let voicePitch: any = isMicro
-          ? Tone.Frequency(raw, 'midi').toFrequency()
+        // A detuned note goes out as a frequency, the same way the live preview resolves it, so
+        // the cents offset is not lost to the note-name round trip.
+        const rawHz = Tone.Frequency(raw, 'midi').toFrequency() * (noteDetune ? Math.pow(2, noteDetune / 1200) : 1)
+        let voicePitch: any = isMicro || noteDetune
+          ? rawHz
           : Tone.Frequency(Math.round(raw), 'midi').toNote()
         if (typeof voicePitch === 'number' && voicePitch > 0 && voicePitch < 35) {
           while (voicePitch < 35) voicePitch *= 2
@@ -752,8 +811,9 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
       }
 
       const isMicrotonal = (playback.pitch % 1 !== 0) || (track?.edoDivision !== undefined && track.edoDivision !== 12)
-      let noteFreq: any = isMicrotonal
-        ? Tone.Frequency(playback.pitch + totalTranspose, 'midi').toFrequency()
+      const noteHz = Tone.Frequency(playback.pitch + totalTranspose, 'midi').toFrequency() * (noteDetune ? Math.pow(2, noteDetune / 1200) : 1)
+      let noteFreq: any = isMicrotonal || noteDetune
+        ? noteHz
         : Tone.Frequency(playback.pitch + totalTranspose, 'midi').toNote()
       if (typeof noteFreq === 'number' && noteFreq > 0 && noteFreq < 35) {
         while (noteFreq < 35) noteFreq *= 2

@@ -272,31 +272,6 @@ export function laneIsActive(points: AutomationPoint[] | undefined, lane: Automa
   return lane?.source === 'formula' || (points?.length ?? 0) > 0
 }
 
-/**
- * The one call a scheduler makes for an expression lane: sample the lane at the note and return
- * the note with that parameter replaced. Non-expression targets get the same note object back.
- */
-export function noteWithExpressionLane(
-  note: Note,
-  target: AutomationTarget | undefined,
-  lane: AutomationLane | undefined,
-  points: AutomationPoint[] | undefined,
-  bpm: number,
-): Note {
-  const parsed = parseAutomationTarget(target)
-  if (!parsed || parsed.kind !== 'expr') return note
-
-  const value = getLaneValueAtTick({
-    points,
-    lane,
-    target,
-    tick: note.time + note.duration / 2,
-    fallback: exprLaneNeutralValue(parsed.id, note),
-    bpm,
-  })
-  return applyExpressionLaneToNote(note, target, value, { lane, points, bpm })
-}
-
 /** Normalised 0..1 shape of a lane across one note, matching the native 33-point curve slots. */
 export const LANE_CURVE_POINTS = 33
 
@@ -336,7 +311,6 @@ export function laneNoteExtent(
 ): { start: number; end: number; curve: number[] } | null {
   const parsed = parseAutomationTarget(target)
   if (parsed?.kind !== 'expr') return null
-  const range = EXPRESSION_LANE_RANGES[parsed.id]
   const fallback = exprLaneNeutralValue(parsed.id, note)
   const sample = (tick: number) => laneValueToExprParam(parsed.id, getLaneValueAtTick({
     points, lane, target, tick, fallback, bpm,

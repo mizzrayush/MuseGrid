@@ -2190,14 +2190,12 @@ Nothing existing regressed — the drawn path is bit-identical to the old spline
    glide are read once per note, at the note's centre, in both engines — that is the per-note field
    they write, and the native voice has no per-sample slot for them. Cutoff is the exception because
    the 33-point `filterCurve` already exists.
-2. **A Tone-engine export applies no per-note expression at all**, so an expression lane is silent
-   in that one path. This is pre-existing, not introduced here: [audioRender.ts:628](src/utils/audioRender.ts#L628)
-   holds a single hardcoded `vibratoDepth: 35` and the file contains no filter or tremolo wiring.
-   Proven by A/B offline render — a note with explicit `vibratoDepth: 200, vibratoRate: 8` and one
-   with `filterStart: 100 → filterEnd: 20000` both differ from a plain note by RMS **0.0**, while a
-   velocity lane differs by 0.114, so the lane machinery itself does reach this renderer.
-   Live preview (Tone and native) and the native bounce all apply the lanes; the product's default
-   export takes the native path via `canUseNativeBounce()`.
+2. ~~**A Tone-engine export applies no per-note expression at all**~~ — **closed on 2026-10-26 in
+   §22.** It was true when §21 was written (the file held only a hardcoded `vibratoDepth: 35` and no
+   filter or tremolo wiring, and an A/B render proved explicit vibrato, tremolo, filter and detune
+   each differed from a plain note by RMS exactly 0.0). The offline renderer now chains the same
+   modulation nodes the live preview does, so expression lanes and per-note expression are audible in
+   a Tone export. Live preview (Tone and native), the native bounce and the Tone bounce now agree.
 3. **One lane per track.** The descriptor is keyed by track id, so a track cannot run a velocity
    lane and a cutoff lane at the same time.
 4. **Drawn points are still whole lane steps.** `getAutomationValueAtTick` clamps through
@@ -2227,3 +2225,103 @@ label ternary (whose VST3 branch is preserved verbatim), and 3 comment lines rew
 what the code now does. No field, branch, style rule or call site disappeared without a
 replacement; `App.tsx`'s serialization line still emits `clips`, `groups` and `drumSteps`.
 
+---
+
+## 22. TONE OFFLINE RENDERER NOW APPLIES PER-NOTE EXPRESSION — 2026-10-26
+
+§21.4 limit 2. The Tone bounce (`renderProjectAudio`) built a synth voice and triggered it with
+nothing but pitch, duration and velocity: vibrato, tremolo, filter sweeps, per-note detune and every
+`expr:` lane were read by the live preview and by the native bounce but ignored by export. This pass
+wires them, mirroring the live chain instead of inventing behaviour, so the three paths agree.
+
+### 22.1 What was wired
+
+| What | Where | Mirrors |
+| --- | --- | --- |
+| `buildModulationNodes(…)` — vibrato → tremolo → filter, same fields, same order | [audioRender.ts:446](src/utils/audioRender.ts#L446) | [AudioEngine.ts:5755](src/engine/AudioEngine.ts#L5755)-5784 |
+| `noteDetune` / `hasModulation` computed from the lane-updated note | [audioRender.ts:659](src/utils/audioRender.ts#L659) | `isMPE` at [AudioEngine.ts:5748](src/engine/AudioEngine.ts#L5748) |
+| A modulated note now gets its own voice | [audioRender.ts:734](src/utils/audioRender.ts#L734) | the live ephemeral-synth branch |
+| Nodes chained before the existing gain → panner stage | [audioRender.ts:744](src/utils/audioRender.ts#L744) | `ephemeralSynth.chain(...mpeNodes, rack.input)` |
+| Detune applied as a frequency in both pitch paths | [audioRender.ts:767](src/utils/audioRender.ts#L767), [:814](src/utils/audioRender.ts#L814) | `finalPitch` at [AudioEngine.ts:5857](src/engine/AudioEngine.ts#L5857) |
+| Vocal and physical voices read `playNoteData.detune` | [audioRender.ts:668](src/utils/audioRender.ts#L668), [:711](src/utils/audioRender.ts#L711) | [AudioEngine.ts:5657](src/engine/AudioEngine.ts#L5657), :5717 |
+
+Node order, `depth: 0 → linearRamp` vibrato envelope, `vibratoDepth / 100` clamped to 1, the
+`filterSweepTime`-or-whole-note fallback and the `frequency: x || 5` defaults are copied from the
+live path line by line. The one deliberate difference is `Tremolo.start(start)`: live starts the LFO
+when the node is created at the note, offline has to schedule it at the note's own time.
+
+### 22.2 Proof (A/B offline render, same state, HEAD version vs working version)
+
+`git show HEAD:src/utils/audioRender.ts` was loaded beside the working file in the same page, so the
+two renderers ran against each other on identical input (one `warm` synth track, one C5 note, 960
+ticks, velocity 100, 44.1 kHz, 145,250 samples per channel, `normalize: false, autoFade: false`).
+
+| Case | HEAD render | Working render | maxAbsDiff | diffRms |
+| --- | --- | --- | --- | --- |
+| plain note (regression anchor) | rms 0.201859121951 | rms 0.201859121951 | **0** | **0** |
+| `vibratoDepth: 200, vibratoRate: 8` | = plain (ignored) | rms 0.201737909219 | 1.113 | 0.2522 |
+| `tremoloDepth: 0.8, tremoloRate: 6` | = plain (ignored) | rms 0.116092847691, peak 0.711→0.551 | 0.551 | 0.1161 |
+| `filterStart: 100 → filterEnd: 20000` | = plain (ignored) | rms 0.196933437331, peak 0.711→0.391 | 0.802 | 0.1475 |
+| `detune: 1200` | = plain (dropped) | rms 0.201862319716 | 1.070 | 0.2855 |
+| `expr:vibratoDepth` lane, points 100→20 | = plain (ignored) | rms 0.201738852760 | 0.874 | 0.2508 |
+| `expr:filterCutoff` lane, points 20→127 | — | rms 0.188023619343, peak 0.391 | — | 0.1546 vs plain |
+| `expr:detune` lane held at 107.5 (= 831.5 cents) | — | rms 0.201861210561 | — | 0.2855 vs plain |
+| `expr:tremoloDepth` formula lane `64 + 63 * sin(t * 6.28)`, no points | — | rms 0.123738336561, peak 0.565 | — | 0.1237 vs plain |
+
+Three checks beyond the A/B:
+
+- **Detune is exact.** `detune: 1200` on C5 rendered **bit-identical** (maxAbsDiff 0) to the same
+  note written as `pitch: 72`, so the cents offset lands on the right frequency rather than being
+  rounded away by the note-name round trip.
+- **The lane is not simply an octave.** The `expr:detune` lane at 831.5 cents differs from the +12
+  semitone render by 0.2854 — it is a real 831-cent bend, not a coerced interval.
+- **Nothing broke.** Every one of the 8 buffers had 0 non-finite samples, and the same 8 numbers
+  were reproduced after the final source edits (145,250 samples each), so the measurements are of
+  the shipped code.
+
+`npx tsc --noEmit` exits 0, `npx eslint src/utils/audioRender.ts src/utils/automation.ts` reports
+0 errors, `npx vite build` succeeds (3,419 modules, `index-Bur9zCe5.js`, 4.65s) and the bundle was
+copied into `bin/dist`, whose `index.html` now references the same hash. No C++ changed, so the
+native engine was not rebuilt.
+
+### 22.3 What this does *not* cover
+
+1. **Drum steps still get no vibrato/tremolo/filter in the Tone path** — and deliberately so,
+   because the live drum voice at [AudioEngine.ts:6014](src/engine/AudioEngine.ts#L6014) carries only
+   pan, gain, fades, octaves, resonance and decay. A modulation lane on a drum track stays silent in
+   the browser engine and in live preview alike; the native engine applies it. Adding modulation only
+   to the offline drum path would make export disagree with preview, which is the opposite of parity.
+   Drum pitch offset, pitch slide and velocity lanes do work in both, via the lane sample and
+   `applyExpressionLaneToNote` at [audioRender.ts:844](src/utils/audioRender.ts#L844)-856 feeding
+   `laneNote.pitchOffset`/`laneNote.detune` at :873.
+2. **Vibrato depth above 100 still clamps to full scale** in both engines (`min(1, depth/100)`), so a
+   300-lane-value vibrato is not three times a 100-value one; the clamp is Tone's own depth ceiling.
+3. **The native bounce is still the default export** for a plain WAV via `canUseNativeBounce()`, so
+   most users will never run this path; it is what MP3, multi-region, procedural-FX and web-mode
+   exports use.
+
+### 22.4 accounting
+
+2 files, **69 insertions(+), 35 deletions(-)**. `audioRender.ts` is +69/−9: the 9 removed lines are
+the ephemeral-branch `if` condition (re-emitted with `|| hasModulation`), the two `voicePitch` /
+`noteFreq` assignments (re-emitted with the detune factor and the `|| noteDetune` guard), the two
+`note.detune` reads for vocal and physical (re-emitted as `playNoteData.detune`, a superset because
+`playback.note` carries every note field), and 3 comment lines rewritten. No branch, guard or
+argument was dropped.
+
+`automation.ts` is +0/−26, all of it dead code found while verifying: 24 lines that formed the
+unused export `noteWithExpressionLane` (4 doc-comment, 19 code, 1 internal blank) — repo-wide grep
+found no caller and no wildcard re-export, because the live scheduler already inlines the same three
+steps at [Scheduler.ts:69](src/engine/Scheduler.ts#L69)-89 and the renderer at
+[audioRender.ts:634](src/utils/audioRender.ts#L634); one blank separator; and one dead local
+`const range = EXPRESSION_LANE_RANGES[parsed.id]` inside `laneNoteExtent` at
+[automation.ts:305](src/utils/automation.ts#L305), flagged by eslint. That local is provably inert:
+`laneNoteExtent` returns only `start`, `end` and `curve`, all three produced by `sample()`, and
+`range` appears nowhere in the returned object, whose three fields come from `sample()` and
+`buildLaneCurve()`, so deleting it cannot change any curve. Its helpers survive —
+`exprLaneNeutralValue` has 3 remaining call sites (:262, :287, :315) and
+`EXPRESSION_LANE_RANGES` is still imported at [automation.ts:2](src/utils/automation.ts#L2), so the
+build is unaffected.
+
+A scratch copy of the HEAD renderer was used for the A/B and deleted afterwards; `git status` showed
+only `audioRender.ts`, `automation.ts`, `conditions.md` and the pre-existing `JUCE` submodule.

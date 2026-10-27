@@ -224,12 +224,39 @@ public:
             // Load UI via resource provider root or local file
             browserComponent->goToURL(browserComponent->getResourceProviderRoot());
 
+            bridgeRef.setOnForceQuit([this]() {
+                forceQuitAllowed = true;
+                if (auto* app = juce::JUCEApplication::getInstance())
+                    app->systemRequestedQuit();
+            });
+
             setVisible(true);
         }
 
         void closeButtonPressed() override
         {
-            JUCEApplication::getInstance()->systemRequestedQuit();
+            if (forceQuitAllowed)
+            {
+                if (auto* app = juce::JUCEApplication::getInstance())
+                    app->systemRequestedQuit();
+                return;
+            }
+
+            if (browserComponent != nullptr)
+            {
+                browserComponent->evaluateJavascript(
+                    "if (typeof window.__handleAppCloseRequest === 'function') { "
+                    "    window.__handleAppCloseRequest(); "
+                    "} else { "
+                    "    window.dispatchEvent(new CustomEvent('app-request-close')); "
+                    "}"
+                );
+            }
+            else
+            {
+                if (auto* app = juce::JUCEApplication::getInstance())
+                    app->systemRequestedQuit();
+            }
         }
 
         void resized() override
@@ -246,6 +273,7 @@ public:
         JuceBridge& bridgeRef;
         juce::File distDir;
         std::unique_ptr<CustomWebBrowserComponent> browserComponent;
+        bool forceQuitAllowed = false;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainWindow)
     };

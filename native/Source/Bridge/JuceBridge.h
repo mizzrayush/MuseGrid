@@ -3,6 +3,7 @@
 #include <juce_events/juce_events.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 #include <atomic>
+#include <functional>
 #include "Audio/AudioEngine.h"
 
 class JuceBridge
@@ -14,10 +15,12 @@ public:
     juce::WebBrowserComponent::Options setupOptions(juce::WebBrowserComponent::Options options);
 
     void setMainWindow(juce::DocumentWindow* win) { mainWindow = win; }
+    void setOnForceQuit(std::function<void()> cb) { onForceQuit = std::move(cb); }
 
 private:
     AudioEngine& audioEngine;
     juce::DocumentWindow* mainWindow = nullptr;
+    std::function<void()> onForceQuit;
 
     // Offline bounces run here (one at a time) so the WebView and audio device never block.
     // The destructor waits for the job, and audioEngine outlives this bridge.

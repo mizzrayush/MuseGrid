@@ -408,3 +408,13 @@ input[type=number] {
 .fade-in-content {
   animation: contentFadeIn 0.25s cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }
+
+@keyframes menuPopIn {
+  from { transform: scale(0.94) translateY(-4px); opacity: 0; }
+  to { transform: scale(1) translateY(0); opacity: 1; }
+}
+
+.animate-pop-in {
+  animation: menuPopIn 0.16s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  transform-origin: top left;
+}

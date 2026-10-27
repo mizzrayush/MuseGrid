@@ -18,7 +18,7 @@ import { scheduler } from './engine/Scheduler'
 import { useStore, saveRecentProject } from './engine/store'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET } from './utils/instruments'
 import { saveFileWithDialog } from './utils/fileExport'
-import { IconTrash, IconDownload, IconSave, IconPlay, IconStop, IconMidi, IconAlign, IconSkipBack, IconChevronDown, IconMaximize, IconMusic, IconStretch, IconChevronLeft, IconChevronRight, IconSync, IconHelp, IconTarget, IconSliders, IconLayers } from './ui/Icons'
+import { IconTrash, IconDownload, IconSave, IconPlay, IconStop, IconMidi, IconAlign, IconSkipBack, IconChevronDown, IconMaximize, IconMusic, IconStretch, IconChevronLeft, IconChevronRight, IconSync, IconHelp, IconTarget, IconSliders, IconLayers, IconAlertTriangle } from './ui/Icons'
 
 function TransportTimeDisplay() {
   const playheadPosition = useStore(s => s.playheadPosition)
@@ -92,7 +92,7 @@ function ToastContainer() {
   if (!toast) return null
   return (
     <div style={{
-      position: 'fixed', bottom: '24px', right: '24px', zIndex: 100000,
+      position: 'fixed', bottom: '24px', right: '24px', zIndex: 999999,
       background: toast.type === 'error' ? '#ff3366' : toast.type === 'success' ? '#69db7c' : '#333',
       color: toast.type === 'info' ? 'white' : '#111',
       padding: '12px 24px', borderRadius: '8px',
@@ -140,10 +140,15 @@ function App() {
   const setIsScorePreviewVisible = useStore(s => s.setIsScorePreviewVisible)
   const [showNewProjectConfirm, setShowNewProjectConfirm] = useState(false)
   const [newProjectClosing, setNewProjectClosing] = useState(false)
+  const [showSaveCloseConfirm, setShowSaveCloseConfirm] = useState(false)
+  const [saveCloseClosing, setSaveCloseClosing] = useState(false)
+  const [isSavingAndClosing, setIsSavingAndClosing] = useState(false)
   const [showSaveMenu, setShowSaveMenu] = useState(false)
   const [isInitialLaunch, setIsInitialLaunch] = useState(() => {
     return localStorage.getItem('musegrid_show_start_screen') !== 'false'
   })
+  const isStartScreenOpen = useStore(s => s.isStartScreenOpen)
+  const isStartScreenCovering = isStartScreenOpen && isInitialLaunch
 
   const projectName = useStore(s => s.projectName)
   const isDirty = useStore(s => s.isDirty)
@@ -236,7 +241,7 @@ function App() {
     document.title = `MuseGrid - ${projectName || 'Untitled'}${isDirty ? '*' : ''}`
   }, [projectName, isDirty])
 
-  const handleSaveProject = async () => {
+  const handleSaveProject = async (): Promise<boolean> => {
     const ipc = (window as any).ipcRenderer
     const state = useStore.getState()
     if (ipc) {
@@ -251,8 +256,11 @@ function App() {
             bpm: state.bpm,
             trackCount: state.tracks.length
           })
+          return true
+        } else {
+          state.showToast('Failed to save project', 'error')
+          return false
         }
-        else { state.showToast('Failed to save project', 'error') }
       } else {
         const filePath = await ipc.invoke('save-project', getProjectDataString())
         if (filePath) {
@@ -266,7 +274,9 @@ function App() {
             bpm: state.bpm,
             trackCount: state.tracks.length
           })
+          return true
         }
+        return false // cancelled
       }
     } else {
       const blob = new Blob([getProjectDataString()], { type: 'application/json' })
@@ -275,7 +285,31 @@ function App() {
         title: 'Save Project',
         filters: [{ name: 'MuseGrid Project', extensions: ['muz', 'muse'] }]
       })
-      if (saved) state.setIsDirty(false)
+      if (saved) {
+        state.setIsDirty(false)
+        return true
+      }
+      return false
+    }
+  }
+
+  const forceQuitApp = () => {
+    const ipc = (window as any).ipcRenderer
+    if (ipc && typeof ipc.invoke === 'function') {
+      ipc.invoke('force-quit-app').catch(() => ipc.invoke('quit-app')).catch(() => window.close())
+    } else {
+      window.close()
+    }
+  }
+
+  const requestAppClose = () => {
+    const state = useStore.getState()
+    const hasNotes = state.notes.length > 0
+    const isDirty = state.isDirty
+    if (isDirty || (hasNotes && !state.projectFilePath)) {
+      setShowSaveCloseConfirm(true)
+    } else {
+      forceQuitApp()
     }
   }
 
@@ -570,6 +604,12 @@ function App() {
         projectName: null,
         projectFilePath: null,
         bpm: 120,
+        scaleLock: {
+          enabled: false,
+          root: 0,
+          mode: 'major',
+          accidental: 'sharp'
+        },
         gridSplitOrder: 'synth-first',
         gridPaneMode: 'split',
         tracks: [
@@ -750,11 +790,56 @@ function App() {
     }
   }, [])
 
+  useEffect(() => {
+    ;(window as any).__handleAppCloseRequest = () => {
+      requestAppClose()
+    }
+
+    const handleCustomCloseEvent = () => {
+      requestAppClose()
+    }
+    window.addEventListener('app-request-close', handleCustomCloseEvent)
+
+    const ipc = (window as any).ipcRenderer
+    if (ipc && typeof ipc.on === 'function') {
+      ipc.on('app-request-close', handleCustomCloseEvent)
+    }
+
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      const state = useStore.getState()
+      if (state.isDirty || (state.notes.length > 0 && !state.projectFilePath)) {
+        e.preventDefault()
+        e.returnValue = ''
+        requestAppClose()
+        return ''
+      }
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload)
+
+    return () => {
+      delete (window as any).__handleAppCloseRequest
+      window.removeEventListener('app-request-close', handleCustomCloseEvent)
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+      if (ipc && typeof ipc.off === 'function') {
+        ipc.off('app-request-close', handleCustomCloseEvent)
+      }
+    }
+  }, [])
+
   return (
-    <div style={{ display: 'flex', width: '100vw', height: '100vh', flexDirection: 'column' }}>
+    <div style={{ display: 'flex', width: '100vw', height: '100vh', flexDirection: 'column', background: '#0a0a0f', overflow: 'hidden' }}>
       <ToastContainer />
-      {/* Top Header / Studio Pro Transport Deck */}
-      <div className="glass-panel" style={{ height: '54px', display: 'flex', alignItems: 'center', padding: '0 16px', gap: '14px', borderBottom: '1px solid rgba(255, 255, 255, 0.06)', zIndex: 10 }}>
+      {/* Studio Workspace Container (hidden on initial start screen to prevent flash) */}
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        width: '100%',
+        height: '100%',
+        overflow: 'hidden',
+        visibility: isStartScreenCovering ? 'hidden' : 'visible'
+      }}>
+        {/* Top Header / Studio Pro Transport Deck */}
+        <div className="glass-panel" style={{ height: '54px', display: 'flex', alignItems: 'center', padding: '0 16px', gap: '14px', borderBottom: '1px solid rgba(255, 255, 255, 0.06)', zIndex: 10 }}>
         
         {/* Brand & Project Identity */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
@@ -1745,6 +1830,7 @@ function App() {
         </div>
         <RightPane />
       </div>
+      </div>
 
       {isScorePreviewVisible && (
         <ScorePreviewModal onClose={() => setIsScorePreviewVisible(false)} />
@@ -1799,6 +1885,169 @@ function App() {
                 }}
               >
                 Yes, Start New
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showSaveCloseConfirm && (
+        <div
+          className={saveCloseClosing ? "animate-modal-bg-exit" : "animate-modal-bg"}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(8, 9, 14, 0.82)',
+            backdropFilter: 'blur(12px)',
+            WebkitBackdropFilter: 'blur(12px)',
+            zIndex: 1000000,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '20px'
+          }}
+        >
+          <div
+            className={saveCloseClosing ? "animate-modal-card-exit" : "animate-modal-card"}
+            style={{
+              width: '100%',
+              maxWidth: '430px',
+              display: 'flex',
+              flexDirection: 'column',
+              border: '1px solid rgba(255, 255, 255, 0.1)',
+              borderRadius: '24px',
+              boxShadow: '0 30px 80px rgba(0, 0, 0, 0.9)',
+              overflow: 'hidden',
+              background: '#12131a'
+            }}
+          >
+            <div style={{ padding: '28px 24px 20px', textAlign: 'center' }}>
+              <div style={{
+                width: '56px',
+                height: '56px',
+                borderRadius: '50%',
+                background: 'rgba(255, 146, 43, 0.15)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                margin: '0 auto 16px auto',
+                border: '1px solid rgba(255, 146, 43, 0.35)'
+              }}>
+                <IconAlertTriangle size={26} style={{ color: '#ff922b' }} />
+              </div>
+              <h3 style={{ margin: '0 0 8px 0', fontSize: '18px', color: 'white', fontWeight: 800, letterSpacing: '-0.5px' }}>
+                Save Changes Before Closing?
+              </h3>
+              <p style={{ margin: 0, fontSize: '13px', color: '#999', lineHeight: 1.5, fontWeight: 500 }}>
+                You have unsaved changes in <strong style={{ color: '#fff' }}>"{projectName || 'Untitled Project'}"</strong>. Do you want to save them before quitting?
+              </p>
+            </div>
+
+            <div style={{
+              padding: '16px 20px',
+              background: 'rgba(0, 0, 0, 0.25)',
+              borderTop: '1px solid rgba(255, 255, 255, 0.05)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'flex-end',
+              gap: '10px'
+            }}>
+              <button
+                onClick={() => {
+                  setSaveCloseClosing(true)
+                  setTimeout(() => {
+                    setShowSaveCloseConfirm(false)
+                    setSaveCloseClosing(false)
+                  }, 180)
+                }}
+                disabled={isSavingAndClosing}
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: '10px',
+                  border: '1px solid rgba(255, 255, 255, 0.08)',
+                  background: 'transparent',
+                  color: '#aaa',
+                  fontSize: '12.5px',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  transition: 'all 0.15s'
+                }}
+                onMouseEnter={e => { e.currentTarget.style.color = '#fff'; e.currentTarget.style.background = 'rgba(255,255,255,0.05)' }}
+                onMouseLeave={e => { e.currentTarget.style.color = '#aaa'; e.currentTarget.style.background = 'transparent' }}
+              >
+                Cancel
+              </button>
+
+              <button
+                onClick={() => {
+                  setSaveCloseClosing(true)
+                  setTimeout(() => {
+                    setShowSaveCloseConfirm(false)
+                    setSaveCloseClosing(false)
+                    forceQuitApp()
+                  }, 120)
+                }}
+                disabled={isSavingAndClosing}
+                style={{
+                  padding: '10px 16px',
+                  borderRadius: '10px',
+                  border: '1px solid rgba(255, 75, 75, 0.25)',
+                  background: 'rgba(255, 75, 75, 0.12)',
+                  color: '#ff6b6b',
+                  fontSize: '12.5px',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  transition: 'all 0.15s'
+                }}
+                onMouseEnter={e => { e.currentTarget.style.background = '#e03131'; e.currentTarget.style.color = '#fff' }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255, 75, 75, 0.12)'; e.currentTarget.style.color = '#ff6b6b' }}
+              >
+                Don't Save
+              </button>
+
+              <button
+                onClick={async () => {
+                  setIsSavingAndClosing(true)
+                  try {
+                    const saved = await handleSaveProject()
+                    if (saved) {
+                      setSaveCloseClosing(true)
+                      setTimeout(() => {
+                        setShowSaveCloseConfirm(false)
+                        setSaveCloseClosing(false)
+                        forceQuitApp()
+                      }, 120)
+                    } else {
+                      setIsSavingAndClosing(false)
+                    }
+                  } catch (e) {
+                    setIsSavingAndClosing(false)
+                  }
+                }}
+                disabled={isSavingAndClosing}
+                style={{
+                  padding: '10px 18px',
+                  borderRadius: '10px',
+                  border: '1px solid rgba(40, 199, 111, 0.3)',
+                  background: 'rgba(40, 199, 111, 0.14)',
+                  color: '#2ecc71',
+                  fontSize: '12.5px',
+                  fontWeight: 600,
+                  cursor: isSavingAndClosing ? 'wait' : 'pointer',
+                  transition: 'all 0.15s'
+                }}
+                onMouseEnter={e => {
+                  if (isSavingAndClosing) return
+                  e.currentTarget.style.background = '#2b8a3e'
+                  e.currentTarget.style.color = '#fff'
+                }}
+                onMouseLeave={e => {
+                  if (isSavingAndClosing) return
+                  e.currentTarget.style.background = 'rgba(40, 199, 111, 0.14)'
+                  e.currentTarget.style.color = '#2ecc71'
+                }}
+              >
+                {isSavingAndClosing ? 'Saving...' : 'Save & Close'}
               </button>
             </div>
           </div>

@@ -3,7 +3,7 @@ import type { Track, Note, ScaleLock } from '../engine/store'
 export interface DawTemplate {
   id: string
   title: string
-  category: 'Electronic' | 'Hip-Hop' | 'Dance' | 'Ambient' | 'World' | 'Acoustic' | 'Experimental'
+  category: 'Electronic' | 'Hip-Hop' | 'Dance' | 'Ambient' | 'World' | 'Acoustic' | 'Experimental' | 'Custom' | string
   description: string
   bpm: number
   keyName: string
@@ -13,10 +13,11 @@ export interface DawTemplate {
   tracks: Track[]
   notes: Note[]
   // Mini representation for SVG grid thumbnail
-  previewPattern: {
+  previewPattern?: {
     synth: Array<{ t: number; p: number; len: number }>
     drum: Array<{ t: number; r: number }>
   }
+  isUserTemplate?: boolean
 }
 
 export const DAW_TEMPLATES: DawTemplate[] = [
@@ -942,3 +943,69 @@ export const DAW_TEMPLATES: DawTemplate[] = [
     }
   }
 ]
+
+export function getUserTemplates(): DawTemplate[] {
+  try {
+    const raw = localStorage.getItem('musegrid_user_templates')
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed)) return parsed
+    }
+  } catch (e) {}
+  return []
+}
+
+export function saveUserTemplate(template: DawTemplate): DawTemplate[] {
+  try {
+    const current = getUserTemplates().filter(t => t.id !== template.id)
+    const updated = [template, ...current]
+    localStorage.setItem('musegrid_user_templates', JSON.stringify(updated))
+    return updated
+  } catch (e) {
+    return []
+  }
+}
+
+export function deleteUserTemplate(id: string): DawTemplate[] {
+  try {
+    const updated = getUserTemplates().filter(t => t.id !== id)
+    localStorage.setItem('musegrid_user_templates', JSON.stringify(updated))
+    return updated
+  } catch (e) {
+    return []
+  }
+}
+
+export function buildPreviewPattern(notes: Note[]): {
+  synth: Array<{ t: number; p: number; len: number }>
+  drum: Array<{ t: number; r: number }>
+} {
+  const synth: Array<{ t: number; p: number; len: number }> = []
+  const drum: Array<{ t: number; r: number }> = []
+
+  if (!notes || notes.length === 0) {
+    return {
+      synth: [{ t: 0, p: 3, len: 2 }, { t: 4, p: 5, len: 2 }, { t: 8, p: 4, len: 2 }, { t: 12, p: 2, len: 2 }],
+      drum: [{ t: 0, r: 0 }, { t: 4, r: 1 }, { t: 8, r: 0 }, { t: 12, r: 1 }]
+    }
+  }
+
+  const maxTime = Math.max(768, ...notes.map(n => n.time + (n.duration || 48)))
+  const synthNotes = notes.filter(n => !(n.trackId && n.trackId.toLowerCase().includes('drum')))
+  const drumNotes = notes.filter(n => Boolean(n.trackId && n.trackId.toLowerCase().includes('drum')))
+
+  synthNotes.slice(0, 24).forEach(n => {
+    const t = Math.min(15, Math.max(0, Math.floor((n.time / maxTime) * 16)))
+    const p = Math.max(0, Math.min(7, Math.floor(((n.pitch % 24) / 24) * 8)))
+    const len = Math.max(1, Math.min(4, Math.round(((n.duration || 48) / maxTime) * 16)))
+    synth.push({ t, p, len })
+  })
+
+  drumNotes.slice(0, 24).forEach(n => {
+    const t = Math.min(15, Math.max(0, Math.floor((n.time / maxTime) * 16)))
+    const r = Math.max(0, Math.min(4, n.pitch % 5))
+    drum.push({ t, r })
+  })
+
+  return { synth, drum }
+}

@@ -256,8 +256,17 @@ juce::WebBrowserComponent::Options JuceBridge::setupOptions(juce::WebBrowserComp
                 juce::SystemClipboard::copyTextToClipboard(args[0].toString());
             comp(true);
         })
-        .withNativeFunction("quit-app", [](const auto&, auto comp) {
-            if (auto* app = juce::JUCEApplication::getInstance())
+        .withNativeFunction("quit-app", [this](const auto&, auto comp) {
+            if (onForceQuit)
+                onForceQuit();
+            else if (auto* app = juce::JUCEApplication::getInstance())
+                app->systemRequestedQuit();
+            comp(true);
+        })
+        .withNativeFunction("force-quit-app", [this](const auto&, auto comp) {
+            if (onForceQuit)
+                onForceQuit();
+            else if (auto* app = juce::JUCEApplication::getInstance())
                 app->systemRequestedQuit();
             comp(true);
         });
@@ -282,7 +291,7 @@ void JuceBridge::handleSaveProject(const juce::Array<juce::var>& args, juce::Web
 
         // Write with GZIP compression matching Electron's zlib.gzipSync
         juce::MemoryOutputStream rawStream;
-        rawStream.writeString(projectData);
+        rawStream.write(projectData.toRawUTF8(), projectData.getNumBytesAsUTF8());
 
         if (file.exists()) file.deleteFile();
         auto outStream = file.createOutputStream();
@@ -307,7 +316,7 @@ void JuceBridge::handleSaveProjectPath(const juce::Array<juce::var>& args, juce:
     const juce::File file(args[1].toString());
 
     juce::MemoryOutputStream rawStream;
-    rawStream.writeString(projectData);
+    rawStream.write(projectData.toRawUTF8(), projectData.getNumBytesAsUTF8());
 
     if (file.exists()) file.deleteFile();
     auto outStream = file.createOutputStream();
@@ -729,6 +738,10 @@ void JuceBridge::handleShowOpenDialog(const juce::Array<juce::var>& args, juce::
                         }
                     }
                 }
+                // If specific extension patterns exist alongside "*.*", drop "*.*" so it filters strictly
+                if (patternList.size() > 1 && patternList.contains("*.*"))
+                    patternList.removeString("*.*");
+
                 if (!patternList.isEmpty())
                     patterns = patternList.joinIntoString(";");
             }

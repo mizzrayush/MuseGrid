@@ -1520,6 +1520,17 @@ export const useStore = create<AppState>((originalSet, get, api) => {
     }
   }
 
+  const getInitialStartScreenOpen = () => {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        return localStorage.getItem('musegrid_show_start_screen') !== 'false'
+      }
+    } catch {
+      // fallback
+    }
+    return true
+  }
+
   return {
     projectId: Math.random().toString(36).substring(2, 9),
     projectName: null,
@@ -1562,7 +1573,7 @@ export const useStore = create<AppState>((originalSet, get, api) => {
     noteInspectorEnabled: false,
     isRightPaneVisible: false,
     isHelpPaneVisible: false,
-    isStartScreenOpen: false,
+    isStartScreenOpen: getInitialStartScreenOpen(),
     deduplicateEnabled: true,
     deduplicateOverlapThreshold: 0.5,
     deduplicateProximityTolerance: 12,

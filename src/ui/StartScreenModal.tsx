@@ -1,11 +1,13 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useStore, getRecentProjects, saveRecentProject, removeRecentProject, clearAllRecentProjects, type RecentProjectItem, type ScaleLock } from '../engine/store'
-import { DAW_TEMPLATES, type DawTemplate } from '../utils/dawTemplates'
+import { DAW_TEMPLATES, getUserTemplates, saveUserTemplate, deleteUserTemplate, buildPreviewPattern, type DawTemplate } from '../utils/dawTemplates'
+import { selectAndReadFile, parseProjectPayload } from '../utils/fileDialog'
+import { AppSlider } from './AppSlider'
 import { generateAiMelody, generateAiDrums, generateAutoHarmony } from '../utils/aiLab'
 import { audioEngine } from '../engine/AudioEngine'
 import {
   IconMuseLogo, IconNewFile, IconOpen, IconSparkles, IconMusic, IconDrum,
-  IconX, IconSearch, IconZap, IconLayers, IconTrash, IconAlertTriangle
+  IconX, IconSearch, IconZap, IconLayers, IconTrash, IconAlertTriangle, IconPlus
 } from './Icons'
 
 interface StartScreenModalProps {
@@ -50,6 +52,27 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
   const [templateCategory, setTemplateCategory] = useState<string>('All')
   const [searchQuery, setSearchQuery] = useState('')
   const [recentList, setRecentList] = useState<RecentProjectItem[]>([])
+  const [userTemplates, setUserTemplates] = useState<DawTemplate[]>(() => getUserTemplates())
+  const [newTemplateModal, setNewTemplateModal] = useState<{
+    isOpen: boolean
+    title: string
+    category: string
+    tagsString: string
+    description: string
+    bpm: number
+    keyName: string
+    scaleLock: ScaleLock
+    tracks: any[]
+    notes: any[]
+    previewPattern: {
+      synth: Array<{ t: number; p: number; len: number }>
+      drum: Array<{ t: number; r: number }>
+    }
+  } | null>(null)
+
+  const allTemplates = useMemo(() => {
+    return [...userTemplates, ...DAW_TEMPLATES]
+  }, [userTemplates])
 
   // Startup checkbox preference
   const [showOnStartup, setShowOnStartup] = useState<boolean>(() => {
@@ -79,6 +102,9 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
     type: 'clear-all' | 'delete' | 'permanent-delete'
     item?: RecentProjectItem
   } | null>(null)
+  const [confirmModalClosing, setConfirmModalClosing] = useState(false)
+  const [newTemplateClosing, setNewTemplateClosing] = useState(false)
+  const [animatingDeleteIds, setAnimatingDeleteIds] = useState<Set<string>>(new Set())
 
   // Dismiss context menu on outside click or escape
   useEffect(() => {
@@ -97,11 +123,35 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
     }
   }, [contextMenu])
 
+  const handleCloseConfirmModal = () => {
+    setConfirmModalClosing(true)
+    setTimeout(() => {
+      setConfirmModal(null)
+      setConfirmModalClosing(false)
+    }, 180)
+  }
+
+  const handleCloseNewTemplateModal = () => {
+    setNewTemplateClosing(true)
+    setTimeout(() => {
+      setNewTemplateModal(null)
+      setNewTemplateClosing(false)
+    }, 180)
+  }
+
   const handleRemoveFromRecent = (item: RecentProjectItem) => {
     setContextMenu(null)
-    const updated = removeRecentProject(item.id)
-    setRecentList(updated)
-    showToast(`Removed "${item.name}" from recents`, 'info')
+    setAnimatingDeleteIds(prev => new Set(prev).add(item.id))
+    setTimeout(() => {
+      const updated = removeRecentProject(item.id)
+      setRecentList(updated)
+      setAnimatingDeleteIds(prev => {
+        const next = new Set(prev)
+        next.delete(item.id)
+        return next
+      })
+      showToast(`Removed "${item.name}" from recents`, 'info')
+    }, 220)
   }
 
   const handleClearAllRecents = () => {
@@ -109,14 +159,21 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
   }
 
   const handleExecuteClearAll = () => {
-    clearAllRecentProjects()
-    setRecentList([])
-    setConfirmModal(null)
-    showToast('Cleared all recent projects', 'info')
+    handleCloseConfirmModal()
+    const allIds = new Set(recentList.map(r => r.id))
+    setAnimatingDeleteIds(allIds)
+    setTimeout(() => {
+      clearAllRecentProjects()
+      setRecentList([])
+      setAnimatingDeleteIds(new Set())
+      showToast('Cleared all recent projects', 'info')
+    }, 240)
   }
 
   const handleExecuteDelete = async (item: RecentProjectItem, permanent: boolean) => {
-    setConfirmModal(null)
+    handleCloseConfirmModal()
+    setAnimatingDeleteIds(prev => new Set(prev).add(item.id))
+
     if (item.filePath) {
       const ipc = (window as any).ipcRenderer
       if (ipc && typeof ipc.invoke === 'function') {
@@ -124,19 +181,141 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
           const channel = permanent ? 'permanent-delete-file' : 'delete-file'
           const ok = await ipc.invoke(channel, item.filePath)
           if (!ok) {
+            setAnimatingDeleteIds(prev => {
+              const next = new Set(prev)
+              next.delete(item.id)
+              return next
+            })
             showToast(permanent ? 'Could not delete file permanently from disk' : 'Could not move file to Recycle Bin', 'error')
             return
           }
         } catch (err) {
           console.error('Failed to delete file from disk:', err)
+          setAnimatingDeleteIds(prev => {
+            const next = new Set(prev)
+            next.delete(item.id)
+            return next
+          })
           showToast('Failed to delete file from disk', 'error')
           return
         }
       }
     }
-    const updated = removeRecentProject(item.id)
-    setRecentList(updated)
-    showToast(permanent ? `Permanently deleted "${item.name}"` : `Moved "${item.name}" to Recycle Bin`, 'success')
+
+    setTimeout(() => {
+      const updated = removeRecentProject(item.id)
+      setRecentList(updated)
+      setAnimatingDeleteIds(prev => {
+        const next = new Set(prev)
+        next.delete(item.id)
+        return next
+      })
+      showToast(permanent ? `Permanently deleted "${item.name}"` : `Moved "${item.name}" to Recycle Bin`, 'success')
+    }, 220)
+  }
+
+  const handleStartAddTemplate = async () => {
+    try {
+      const file = await selectAndReadFile({
+        title: 'Select .muz Project File as Template',
+        accept: '.muz,.muztrack',
+        extensions: ['muz', 'muztrack'],
+        fileTypeName: 'MuseGrid Project (*.muz, *.muztrack)'
+      })
+      if (!file) return
+
+      let parsed: any
+      try {
+        parsed = await parseProjectPayload(file)
+      } catch (err) {
+        console.error('Failed to parse project file:', err)
+        showToast('Corrupted or invalid JSON format in project file', 'error')
+        return
+      }
+
+      if (!parsed || typeof parsed !== 'object' || (!Array.isArray(parsed.tracks) && !Array.isArray(parsed.notes) && parsed.format !== 'muztrack')) {
+        showToast('Invalid project: missing tracks or notes', 'error')
+        return
+      }
+
+      const defaultTitle = file.name.replace(/\.(muz|muztrack)$/i, '')
+      const bpm = parsed.bpm || 120
+      const notes = Array.isArray(parsed.notes) ? parsed.notes : []
+      const tracks = Array.isArray(parsed.tracks) ? parsed.tracks : []
+      const rawScale = parsed.scaleLock || {}
+      const rawMode = rawScale.mode ? String(rawScale.mode).toLowerCase() : 'major'
+      const scaleMode = rawMode === 'minor' ? 'minor' : 'major'
+      const scaleLock: ScaleLock = {
+        enabled: Boolean(rawScale.enabled),
+        root: typeof rawScale.root === 'number' ? rawScale.root : 0,
+        mode: scaleMode,
+        accidental: rawScale.accidental === 'flat' ? 'flat' : 'sharp'
+      }
+      const rootObj = SCALE_ROOTS.find(r => r.value === scaleLock.root)
+      const rootLabel = rootObj ? rootObj.label : 'C'
+      const modeLabel = scaleLock.mode === 'minor' ? 'Minor' : 'Major'
+      const keyName = scaleLock.enabled ? `${rootLabel} ${modeLabel}` : 'Chromatic Free'
+      const previewPattern = buildPreviewPattern(notes)
+
+      setNewTemplateModal({
+        isOpen: true,
+        title: defaultTitle,
+        category: 'Custom',
+        tagsString: 'Custom, User Project',
+        description: `${tracks.length} tracks • ${notes.length} notes`,
+        bpm,
+        keyName,
+        scaleLock,
+        tracks,
+        notes,
+        previewPattern
+      })
+    } catch (err) {
+      console.error('Failed to import template:', err)
+      showToast('Could not import template file', 'error')
+    }
+  }
+
+  const handleSaveNewTemplate = () => {
+    if (!newTemplateModal) return
+    const title = newTemplateModal.title.trim()
+    if (!title) {
+      showToast('Please enter a name for the template', 'error')
+      return
+    }
+    const tags = newTemplateModal.tagsString
+      .split(',')
+      .map(t => t.trim())
+      .filter(Boolean)
+    if (tags.length === 0) tags.push('Custom')
+
+    const newTmpl: DawTemplate = {
+      id: `user_tmpl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      title,
+      category: newTemplateModal.category || 'Custom',
+      description: newTemplateModal.description.trim() || 'Custom user template',
+      bpm: newTemplateModal.bpm || 120,
+      keyName: newTemplateModal.keyName || 'C Major',
+      badgeColor: '#ff922b',
+      tags,
+      scaleLock: newTemplateModal.scaleLock,
+      tracks: newTemplateModal.tracks,
+      notes: newTemplateModal.notes,
+      previewPattern: newTemplateModal.previewPattern,
+      isUserTemplate: true
+    }
+
+    const updated = saveUserTemplate(newTmpl)
+    setUserTemplates(updated)
+    handleCloseNewTemplateModal()
+    showToast(`Added template "${title}"`, 'success')
+  }
+
+  const handleDeleteUserTemplate = (tmplId: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    const updated = deleteUserTemplate(tmplId)
+    setUserTemplates(updated)
+    showToast('Removed custom template', 'info')
   }
 
   const handleToggleStartup = (enabled: boolean) => {
@@ -148,12 +327,16 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
     if (hasActiveSession) {
       setIsStartScreenOpen(false)
     } else {
-      // Clean quit on initial launch without session
-      const ipc = (window as any).ipcRenderer
-      if (ipc && typeof ipc.invoke === 'function') {
-        ipc.invoke('quit-app').catch(() => window.close())
+      // Clean quit on initial launch without session via centralized close request handler
+      if (typeof (window as any).__handleAppCloseRequest === 'function') {
+        (window as any).__handleAppCloseRequest()
       } else {
-        window.close()
+        const ipc = (window as any).ipcRenderer
+        if (ipc && typeof ipc.invoke === 'function') {
+          ipc.invoke('quit-app').catch(() => window.close())
+        } else {
+          window.close()
+        }
       }
     }
   }
@@ -272,8 +455,8 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
       }
     }
 
-    // 2. If it matches a production template
-    const tmpl = DAW_TEMPLATES.find(
+    // 2. If it matches a production or user template
+    const tmpl = allTemplates.find(
       t => t.title.toLowerCase() === item.name.toLowerCase() ||
            t.id.toLowerCase() === item.id.toLowerCase()
     )
@@ -477,7 +660,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
 
   // Filter templates
   const filteredTemplates = useMemo(() => {
-    return DAW_TEMPLATES.filter(tmpl => {
+    return allTemplates.filter(tmpl => {
       const matchesCat = templateCategory === 'All' || tmpl.category === templateCategory
       const q = searchQuery.trim().toLowerCase()
       if (!q) return matchesCat
@@ -487,13 +670,13 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
         tmpl.tags.some(tag => tag.toLowerCase().includes(q))
       return matchesCat && matchesText
     })
-  }, [templateCategory, searchQuery])
+  }, [allTemplates, templateCategory, searchQuery])
 
   if (!isStartScreenOpen) return null
 
   return (
     <div
-      className="animate-modal-bg"
+      className={hasActiveSession ? "animate-modal-bg" : undefined}
       style={{
         position: 'fixed',
         inset: 0,
@@ -611,7 +794,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                 padding: '2px 6px',
                 borderRadius: '10px'
               }}>
-                {DAW_TEMPLATES.length}
+                {allTemplates.length}
               </span>
             </button>
 
@@ -638,18 +821,6 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
             >
               <IconSparkles size={16} color={activeTab === 'ai' ? '#da77f2' : '#888'} />
               <span>MuseAI Studio</span>
-              <span style={{
-                marginLeft: 'auto',
-                fontSize: '9px',
-                fontWeight: 800,
-                background: 'linear-gradient(135deg, #da77f2, #7950f2)',
-                color: '#fff',
-                padding: '2px 6px',
-                borderRadius: '10px',
-                letterSpacing: '0.5px'
-              }}>
-                AI
-              </span>
             </button>
           </div>
 
@@ -777,6 +948,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px', marginBottom: '28px' }}>
                 <div
                   onClick={() => {
+                    useStore.getState().setScaleLock({ enabled: false, root: 0, mode: 'major', accidental: 'sharp' })
                     onNewProject()
                     setIsStartScreenOpen(false)
                     enterDawFullscreen()
@@ -954,11 +1126,13 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                         t => t.title.toLowerCase() === item.name.toLowerCase() ||
                              t.id.toLowerCase() === item.id.toLowerCase()
                       )
+                      const isDeleting = animatingDeleteIds.has(item.id)
                       return (
                         <div
                           key={item.id}
-                          onClick={() => handleOpenRecent(item)}
+                          onClick={() => !isDeleting && handleOpenRecent(item)}
                           onContextMenu={e => {
+                            if (isDeleting) return
                             e.preventDefault()
                             e.stopPropagation()
                             setContextMenu({
@@ -972,19 +1146,27 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'space-between',
-                            padding: '12px 16px',
+                            padding: isDeleting ? '0px 16px' : '12px 16px',
+                            maxHeight: isDeleting ? '0px' : '72px',
+                            opacity: isDeleting ? 0 : 1,
+                            transform: isDeleting ? 'scale(0.92) translateX(30px)' : 'scale(1) translateX(0)',
+                            marginBottom: isDeleting ? '-8px' : '0px',
+                            overflow: 'hidden',
                             background: 'rgba(255, 255, 255, 0.025)',
-                            border: '1px solid rgba(255, 255, 255, 0.06)',
+                            border: isDeleting ? '0px solid transparent' : '1px solid rgba(255, 255, 255, 0.06)',
                             borderRadius: '10px',
-                            cursor: 'pointer',
-                            transition: 'all 0.15s'
+                            cursor: isDeleting ? 'default' : 'pointer',
+                            pointerEvents: isDeleting ? 'none' : 'auto',
+                            transition: 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)'
                           }}
                           onMouseEnter={e => {
+                            if (isDeleting) return
                             e.currentTarget.style.background = 'rgba(77, 171, 247, 0.08)'
                             e.currentTarget.style.borderColor = 'rgba(77, 171, 247, 0.35)'
                             e.currentTarget.style.transform = 'translateY(-1px)'
                           }}
                           onMouseLeave={e => {
+                            if (isDeleting) return
                             e.currentTarget.style.background = 'rgba(255, 255, 255, 0.025)'
                             e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.06)'
                             e.currentTarget.style.transform = 'translateY(0)'
@@ -1069,7 +1251,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                 flexWrap: 'wrap'
               }}>
                 <div style={{ display: 'flex', gap: '6px', overflowX: 'auto', paddingBottom: '2px' }}>
-                  {['All', 'Electronic', 'Hip-Hop', 'Dance', 'Ambient', 'World', 'Acoustic', 'Experimental'].map(cat => (
+                  {['All', 'Custom', 'Electronic', 'Hip-Hop', 'Dance', 'Ambient', 'World', 'Acoustic', 'Experimental'].map(cat => (
                     <button
                       key={cat}
                       onClick={() => setTemplateCategory(cat)}
@@ -1092,29 +1274,62 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                   ))}
                 </div>
 
-                <div style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  background: 'rgba(0,0,0,0.3)',
-                  border: '1px solid rgba(255,255,255,0.08)',
-                  borderRadius: '20px',
-                  padding: '4px 12px',
-                  width: '180px'
-                }}>
-                  <IconSearch size={12} color="#666" />
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={e => setSearchQuery(e.target.value)}
-                    placeholder="Search templates..."
-                    style={{ background: 'transparent', border: 'none', outline: 'none', color: '#fff', fontSize: '11px', width: '100%' }}
-                  />
-                  {searchQuery && (
-                    <button onClick={() => setSearchQuery('')} style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', padding: 0 }}>
-                      <IconX size={11} />
-                    </button>
-                  )}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    background: 'rgba(0,0,0,0.3)',
+                    border: '1px solid rgba(255,255,255,0.08)',
+                    borderRadius: '20px',
+                    padding: '4px 12px',
+                    width: '160px'
+                  }}>
+                    <IconSearch size={12} color="#666" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={e => setSearchQuery(e.target.value)}
+                      placeholder="Search templates..."
+                      style={{ background: 'transparent', border: 'none', outline: 'none', color: '#fff', fontSize: '11px', width: '100%' }}
+                    />
+                    {searchQuery && (
+                      <button onClick={() => setSearchQuery('')} style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', padding: 0 }}>
+                        <IconX size={11} />
+                      </button>
+                    )}
+                  </div>
+
+                  <button
+                    onClick={handleStartAddTemplate}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      background: 'rgba(255, 146, 43, 0.12)',
+                      border: '1px solid rgba(255, 146, 43, 0.3)',
+                      borderRadius: '20px',
+                      padding: '5px 12px',
+                      color: '#ff922b',
+                      fontSize: '11px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      whiteSpace: 'nowrap',
+                      transition: 'all 0.15s'
+                    }}
+                    onMouseEnter={e => {
+                      e.currentTarget.style.background = 'rgba(255, 146, 43, 0.22)'
+                      e.currentTarget.style.color = '#fff'
+                    }}
+                    onMouseLeave={e => {
+                      e.currentTarget.style.background = 'rgba(255, 146, 43, 0.12)'
+                      e.currentTarget.style.color = '#ff922b'
+                    }}
+                    title="Choose a .muz file to add as a custom template"
+                  >
+                    <IconPlus size={12} />
+                    <span>Add Template</span>
+                  </button>
                 </div>
               </div>
 
@@ -1171,7 +1386,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                           <line x1="120" y1="0" x2="120" y2="60" stroke="rgba(255,255,255,0.03)" strokeWidth="0.5" />
 
                           {/* Render preview notes */}
-                          {tmpl.previewPattern.synth.map((item, idx) => {
+                          {(tmpl.previewPattern?.synth || []).map((item, idx) => {
                             const x = (item.t / 8) * 160
                             const y = 45 - (item.p / 9) * 40
                             const width = (item.len / 8) * 160 - 2
@@ -1190,7 +1405,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                           })}
 
                           {/* Render preview drums */}
-                          {tmpl.previewPattern.drum.map((item, idx) => {
+                          {(tmpl.previewPattern?.drum || []).map((item, idx) => {
                             const x = (item.t / 8) * 160 + 2
                             const y = 50 + item.r * 2.5
                             return (
@@ -1225,9 +1440,33 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                       {/* Title & Key */}
                       <div>
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '4px' }}>
-                          <h4 style={{ margin: 0, fontSize: '13px', fontWeight: 700, color: '#fff', whiteIndex: 1 } as any}>
+                          <h4 style={{ margin: 0, fontSize: '13px', fontWeight: 700, color: '#fff' }}>
                             {tmpl.title}
                           </h4>
+                          {tmpl.isUserTemplate && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                              <span style={{ fontSize: '9px', fontWeight: 700, padding: '1px 5px', borderRadius: '4px', background: 'rgba(255, 146, 43, 0.2)', color: '#ff922b' }}>
+                                Custom
+                              </span>
+                              <button
+                                onClick={(e) => handleDeleteUserTemplate(tmpl.id, e)}
+                                style={{
+                                  background: 'transparent',
+                                  border: 'none',
+                                  color: '#777',
+                                  cursor: 'pointer',
+                                  padding: '2px',
+                                  display: 'flex',
+                                  alignItems: 'center'
+                                }}
+                                onMouseEnter={e => e.currentTarget.style.color = '#ff6b8b'}
+                                onMouseLeave={e => e.currentTarget.style.color = '#777'}
+                                title="Delete this custom template"
+                              >
+                                <IconTrash size={12} />
+                              </button>
+                            </div>
+                          )}
                         </div>
                         <div style={{ fontSize: '10px', color: tmpl.badgeColor, fontWeight: 700, marginTop: '2px' }}>
                           {tmpl.keyName}
@@ -1269,8 +1508,8 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
               <div style={{ maxWidth: '680px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '20px' }}>
                 {/* Mode Selector */}
                 <div>
-                  <label style={{ fontSize: '11px', fontWeight: 700, color: '#888', textTransform: 'uppercase', letterSpacing: '0.6px', display: 'block', marginBottom: '8px' }}>
-                    1. Generation Mode
+                  <label style={{ fontSize: '11.5px', fontWeight: 600, color: '#999', letterSpacing: '0.2px', display: 'block', marginBottom: '8px' }}>
+                    1. Generation mode
                   </label>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px' }}>
                     {[
@@ -1308,8 +1547,8 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
 
                 {/* Mood Presets */}
                 <div>
-                  <label style={{ fontSize: '11px', fontWeight: 700, color: '#888', textTransform: 'uppercase', letterSpacing: '0.6px', display: 'block', marginBottom: '8px' }}>
-                    2. Genre & Mood Vibe
+                  <label style={{ fontSize: '11.5px', fontWeight: 600, color: '#999', letterSpacing: '0.2px', display: 'block', marginBottom: '8px' }}>
+                    2. Genre & mood
                   </label>
                   <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
                     {[
@@ -1448,38 +1687,36 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                   </div>
 
                   <div>
-                    <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '6px' }}>
+                    <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '8px' }}>
                       Creativity: <strong style={{ color: '#fff' }}>{aiTemperature.toFixed(2)}</strong>
                     </label>
-                    <input
-                      type="range"
+                    <AppSlider
                       min={0.4}
                       max={1.4}
                       step={0.05}
                       value={aiTemperature}
-                      onChange={e => setAiTemperature(Number(e.target.value))}
-                      style={{ width: '100%', accentColor: '#da77f2', cursor: 'pointer' }}
+                      onChange={setAiTemperature}
+                      color="#da77f2"
                     />
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', color: '#666', marginTop: '2px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', color: '#666', marginTop: '4px' }}>
                       <span>Tight</span>
                       <span>Wild</span>
                     </div>
                   </div>
 
                   <div>
-                    <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '6px' }}>
+                    <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '8px' }}>
                       Density: <strong style={{ color: '#fff' }}>{Math.round(aiDensity * 100)}%</strong>
                     </label>
-                    <input
-                      type="range"
+                    <AppSlider
                       min={0.3}
                       max={1.0}
                       step={0.05}
                       value={aiDensity}
-                      onChange={e => setAiDensity(Number(e.target.value))}
-                      style={{ width: '100%', accentColor: '#da77f2', cursor: 'pointer' }}
+                      onChange={setAiDensity}
+                      color="#da77f2"
                     />
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', color: '#666', marginTop: '2px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', color: '#666', marginTop: '4px' }}>
                       <span>Sparse</span>
                       <span>Intense</span>
                     </div>
@@ -1492,27 +1729,37 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                   onClick={handleGenerateAiProject}
                   style={{
                     width: '100%',
-                    padding: '14px',
-                    borderRadius: '12px',
-                    border: 'none',
-                    background: 'linear-gradient(135deg, #da77f2 0%, #7950f2 100%)',
+                    padding: '12px',
+                    borderRadius: '10px',
+                    border: '1px solid #6741d9',
+                    background: '#4c2889',
                     color: '#fff',
-                    fontSize: '14px',
-                    fontWeight: 800,
+                    fontSize: '13px',
+                    fontWeight: 600,
                     cursor: aiGenerating ? 'not-allowed' : 'pointer',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    gap: '10px',
-                    boxShadow: '0 8px 25px rgba(218, 119, 242, 0.35)',
-                    transition: 'all 0.2s',
-                    opacity: aiGenerating ? 0.7 : 1
+                    gap: '8px',
+                    boxShadow: 'none',
+                    transition: 'all 0.15s',
+                    opacity: aiGenerating ? 0.6 : 1
                   }}
-                  onMouseEnter={e => { if (!aiGenerating) e.currentTarget.style.transform = 'translateY(-1px)' }}
-                  onMouseLeave={e => { if (!aiGenerating) e.currentTarget.style.transform = 'translateY(0)' }}
+                  onMouseEnter={e => {
+                    if (!aiGenerating) {
+                      e.currentTarget.style.background = '#5c3dbd'
+                      e.currentTarget.style.borderColor = '#7950f2'
+                    }
+                  }}
+                  onMouseLeave={e => {
+                    if (!aiGenerating) {
+                      e.currentTarget.style.background = '#4c2889'
+                      e.currentTarget.style.borderColor = '#6741d9'
+                    }
+                  }}
                 >
-                  <IconSparkles size={18} />
-                  <span>{aiGenerating ? (aiStatusText || 'Generating Composition...') : '✨ Generate & Launch Project'}</span>
+                  <IconMusic size={15} color="#fff" />
+                  <span>{aiGenerating ? (aiStatusText || 'Generating template...') : 'Generate template'}</span>
                 </button>
               </div>
             </div>
@@ -1523,6 +1770,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
       {/* Recent Project Context Menu */}
       {contextMenu && (
         <div
+          className="animate-pop-in"
           style={{
             position: 'fixed',
             left: Math.max(10, Math.min(contextMenu.x, window.innerWidth - 220)),
@@ -1690,6 +1938,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
       {/* Confirmation Dialog */}
       {confirmModal && (
         <div
+          className={confirmModalClosing ? 'animate-modal-bg-exit' : 'animate-modal-bg'}
           style={{
             position: 'fixed',
             inset: 0,
@@ -1702,9 +1951,10 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
             justifyContent: 'center',
             padding: '20px'
           }}
-          onClick={() => setConfirmModal(null)}
+          onClick={handleCloseConfirmModal}
         >
           <div
+            className={confirmModalClosing ? 'animate-modal-card-exit' : 'animate-modal-card'}
             style={{
               width: '100%',
               maxWidth: '420px',
@@ -1782,7 +2032,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
 
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '10px', marginTop: '6px' }}>
               <button
-                onClick={() => setConfirmModal(null)}
+                onClick={handleCloseConfirmModal}
                 style={{
                   padding: '8px 16px',
                   borderRadius: '8px',
@@ -1845,6 +2095,329 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                   {confirmModal.type === 'permanent-delete' ? 'Permanently Delete' : 'Move to Trash'}
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Custom Template Modal */}
+      {newTemplateModal && (
+        <div
+          className={newTemplateClosing ? 'animate-modal-bg-exit' : 'animate-modal-bg'}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.75)',
+            backdropFilter: 'blur(8px)',
+            WebkitBackdropFilter: 'blur(8px)',
+            zIndex: 100015,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '20px'
+          }}
+          onClick={handleCloseNewTemplateModal}
+        >
+          <div
+            className={newTemplateClosing ? 'animate-modal-card-exit' : 'animate-modal-card'}
+            style={{
+              width: '100%',
+              maxWidth: '520px',
+              background: '#151722',
+              border: '1px solid rgba(255, 146, 43, 0.3)',
+              borderRadius: '16px',
+              padding: '24px',
+              boxShadow: '0 25px 60px rgba(0, 0, 0, 0.9), 0 0 30px rgba(255, 146, 43, 0.08)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '16px'
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <div style={{
+                  width: '32px',
+                  height: '32px',
+                  borderRadius: '8px',
+                  background: 'rgba(255, 146, 43, 0.16)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}>
+                  <IconLayers size={16} color="#ff922b" />
+                </div>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 700, color: '#fff' }}>
+                    Add Custom Template
+                  </h3>
+                  <p style={{ margin: '2px 0 0', fontSize: '11px', color: '#777' }}>
+                    Configure metadata and preview your new template card.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={handleCloseNewTemplateModal}
+                style={{ background: 'transparent', border: 'none', color: '#888', cursor: 'pointer', padding: '4px' }}
+              >
+                <IconX size={16} />
+              </button>
+            </div>
+
+            {/* Template Fields */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {/* Row 1: Name */}
+              <div>
+                <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '4px' }}>
+                  Template Name
+                </label>
+                <input
+                  type="text"
+                  value={newTemplateModal.title}
+                  onChange={e => setNewTemplateModal({ ...newTemplateModal, title: e.target.value })}
+                  placeholder="e.g. My Cyberpunk Synth"
+                  style={{
+                    width: '100%',
+                    padding: '8px 12px',
+                    background: '#1a1c28',
+                    border: '1px solid rgba(255, 255, 255, 0.1)',
+                    borderRadius: '8px',
+                    color: '#fff',
+                    fontSize: '12px',
+                    outline: 'none'
+                  }}
+                />
+              </div>
+
+              {/* Row 2: Category & BPM */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                <div>
+                  <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '4px' }}>
+                    Category
+                  </label>
+                  <select
+                    value={newTemplateModal.category}
+                    onChange={e => setNewTemplateModal({ ...newTemplateModal, category: e.target.value })}
+                    style={{
+                      width: '100%',
+                      padding: '8px 10px',
+                      background: '#1a1c28',
+                      border: '1px solid rgba(255, 255, 255, 0.1)',
+                      borderRadius: '8px',
+                      color: '#fff',
+                      fontSize: '12px',
+                      outline: 'none'
+                    }}
+                  >
+                    {['Custom', 'Electronic', 'Hip-Hop', 'Dance', 'Ambient', 'World', 'Acoustic', 'Experimental'].map(cat => (
+                      <option key={cat} value={cat}>{cat}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '4px' }}>
+                    BPM (Tempo)
+                  </label>
+                  <input
+                    type="number"
+                    min={40}
+                    max={240}
+                    value={newTemplateModal.bpm}
+                    onChange={e => setNewTemplateModal({ ...newTemplateModal, bpm: Number(e.target.value) })}
+                    style={{
+                      width: '100%',
+                      padding: '8px 10px',
+                      background: '#1a1c28',
+                      border: '1px solid rgba(255, 255, 255, 0.1)',
+                      borderRadius: '8px',
+                      color: '#fff',
+                      fontSize: '12px',
+                      outline: 'none'
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Row 3: Tags */}
+              <div>
+                <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '4px' }}>
+                  Tags (comma-separated)
+                </label>
+                <input
+                  type="text"
+                  value={newTemplateModal.tagsString}
+                  onChange={e => setNewTemplateModal({ ...newTemplateModal, tagsString: e.target.value })}
+                  placeholder="e.g. Synth, Lead, Fast Beats, 808"
+                  style={{
+                    width: '100%',
+                    padding: '8px 12px',
+                    background: '#1a1c28',
+                    border: '1px solid rgba(255, 255, 255, 0.1)',
+                    borderRadius: '8px',
+                    color: '#fff',
+                    fontSize: '12px',
+                    outline: 'none'
+                  }}
+                />
+              </div>
+
+              {/* Row 4: Description */}
+              <div>
+                <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '4px' }}>
+                  Description (optional)
+                </label>
+                <input
+                  type="text"
+                  value={newTemplateModal.description}
+                  onChange={e => setNewTemplateModal({ ...newTemplateModal, description: e.target.value })}
+                  placeholder="Short description of this template..."
+                  style={{
+                    width: '100%',
+                    padding: '8px 12px',
+                    background: '#1a1c28',
+                    border: '1px solid rgba(255, 255, 255, 0.1)',
+                    borderRadius: '8px',
+                    color: '#fff',
+                    fontSize: '12px',
+                    outline: 'none'
+                  }}
+                />
+              </div>
+
+              {/* Thumbnail Card Preview */}
+              <div>
+                <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '6px' }}>
+                  Live Thumbnail & Card Preview:
+                </label>
+                <div style={{
+                  background: 'rgba(255, 255, 255, 0.025)',
+                  border: '1px solid rgba(255, 146, 43, 0.3)',
+                  borderRadius: '12px',
+                  padding: '12px',
+                  display: 'flex',
+                  gap: '12px',
+                  alignItems: 'center'
+                }}>
+                  {/* SVG mini thumbnail */}
+                  <div style={{
+                    width: '130px',
+                    height: '64px',
+                    background: '#0d0e14',
+                    borderRadius: '8px',
+                    border: '1px solid rgba(255, 255, 255, 0.05)',
+                    overflow: 'hidden',
+                    position: 'relative',
+                    flexShrink: 0
+                  }}>
+                    <svg width="100%" height="100%" viewBox="0 0 160 60" preserveAspectRatio="none">
+                      <line x1="0" y1="15" x2="160" y2="15" stroke="rgba(255,255,255,0.03)" strokeWidth="0.5" />
+                      <line x1="0" y1="30" x2="160" y2="30" stroke="rgba(255,255,255,0.03)" strokeWidth="0.5" />
+                      <line x1="0" y1="45" x2="160" y2="45" stroke="rgba(255,255,255,0.03)" strokeWidth="0.5" />
+                      {(newTemplateModal.previewPattern?.synth || []).map((item, idx) => {
+                        const x = (item.t / 8) * 160
+                        const y = 45 - (item.p / 9) * 40
+                        const width = (item.len / 8) * 160 - 2
+                        return (
+                          <rect
+                            key={`pre_syn_${idx}`}
+                            x={x}
+                            y={y}
+                            width={Math.max(4, width)}
+                            height="4.5"
+                            rx="1.5"
+                            fill="#ff922b"
+                            opacity="0.9"
+                          />
+                        )
+                      })}
+                      {(newTemplateModal.previewPattern?.drum || []).map((item, idx) => {
+                        const x = (item.t / 8) * 160 + 2
+                        const y = 50 + item.r * 2.5
+                        return (
+                          <circle
+                            key={`pre_drm_${idx}`}
+                            cx={x}
+                            cy={Math.min(56, y)}
+                            r="2"
+                            fill="#ffd43b"
+                            opacity="0.85"
+                          />
+                        )
+                      })}
+                    </svg>
+                    <div style={{
+                      position: 'absolute',
+                      top: '4px',
+                      right: '4px',
+                      background: 'rgba(0,0,0,0.6)',
+                      padding: '1px 5px',
+                      borderRadius: '3px',
+                      fontSize: '8.5px',
+                      fontWeight: 700,
+                      color: '#fff'
+                    }}>
+                      {newTemplateModal.bpm} BPM
+                    </div>
+                  </div>
+
+                  {/* Card info */}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{ fontSize: '13px', fontWeight: 700, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {newTemplateModal.title || 'Untitled Template'}
+                      </span>
+                      <span style={{ fontSize: '9px', fontWeight: 700, color: '#ff922b', background: 'rgba(255,146,43,0.18)', padding: '1px 5px', borderRadius: '4px' }}>
+                        {newTemplateModal.category}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '10px', color: '#ff922b', fontWeight: 600, marginTop: '2px' }}>
+                      {newTemplateModal.keyName}
+                    </div>
+                    <div style={{ fontSize: '10.5px', color: '#777', marginTop: '2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {newTemplateModal.description || 'Custom user template'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '10px', marginTop: '6px' }}>
+              <button
+                onClick={handleCloseNewTemplateModal}
+                style={{
+                  padding: '8px 16px',
+                  borderRadius: '8px',
+                  background: 'rgba(255, 255, 255, 0.06)',
+                  border: '1px solid rgba(255, 255, 255, 0.1)',
+                  color: '#ccc',
+                  fontSize: '12px',
+                  fontWeight: 600,
+                  cursor: 'pointer'
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveNewTemplate}
+                style={{
+                  padding: '8px 18px',
+                  borderRadius: '8px',
+                  background: 'rgba(255, 146, 43, 0.2)',
+                  border: '1px solid #ff922b',
+                  color: '#ff922b',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  transition: 'all 0.15s'
+                }}
+                onMouseEnter={e => { e.currentTarget.style.background = '#ff922b'; e.currentTarget.style.color = '#fff' }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255, 146, 43, 0.2)'; e.currentTarget.style.color = '#ff922b' }}
+              >
+                Add as Template
+              </button>
             </div>
           </div>
         </div>

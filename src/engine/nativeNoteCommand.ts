@@ -117,7 +117,7 @@ export function buildNativeNoteOnCommand(src: NoteCommandSource): NativeNoteOnCo
   const totalPitchOffset = (noteData?.pitchOffset ?? 0) + padPitchOffset + (detune ? detune / 100 : 0)
     + (padDetuneCents / 100) + (track?.transpose ?? 0) + (src.extraPitchOffset ?? 0)
 
-  const rawOverride = noteData?.instrumentOverride
+  const rawOverride = noteData?.instrumentOverride ?? (isDrumVoice ? (track?.drumKit || 'classic') : undefined)
   let overrideKind: 'preset' | 'kit' | 'vst3' | undefined
   let overrideValue: string | undefined
   if (typeof rawOverride === 'string' && rawOverride.length > 0) {

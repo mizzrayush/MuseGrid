@@ -2523,7 +2523,7 @@ if (firstTrack) {
         return { ...note, time: newTime, velocity: newVelocity }
       })
 
-      set({ notes: updatedNotes, projectRevision: state.projectRevision + 1 })
+      set({ notes: updatedNotes })
     },
 
     extractGroove: (noteIds, name) => {

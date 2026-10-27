@@ -191,9 +191,9 @@ export function applyFlam(notes: Note[], options: FlamOptions = {}): Note[] {
 
 /**
  * Glue / Merge Notes (Ctrl+G)
- * Merges adjacent or overlapping notes of the same pitch into single sustained notes.
+ * Merges adjacent, overlapping, or consecutively selected notes of the same pitch into single sustained notes.
  */
-export function applyGlue(notes: Note[], proximityTolerance = 6): Note[] {
+export function applyGlue(notes: Note[], proximityTolerance = 6, bridgeGaps = true): Note[] {
   if (notes.length <= 1) return notes.map(n => ({ ...n }))
 
   // Group by pitch and trackId
@@ -214,12 +214,12 @@ export function applyGlue(notes: Note[], proximityTolerance = 6): Note[] {
       const next = pitchNotes[i]
       const currentEnd = current.time + current.duration
 
-      // Check if overlapping or adjacent within tolerance
-      if (next.time <= currentEnd + proximityTolerance) {
+      // Check if overlapping, adjacent within tolerance, or explicitly bridging gaps across selected notes
+      if (bridgeGaps || next.time <= currentEnd + proximityTolerance) {
         // Merge into current
         const newEnd = Math.max(currentEnd, next.time + next.duration)
         current.duration = newEnd - current.time
-        // Weighted velocity
+        // Average velocity
         current.velocity = Math.round((current.velocity + next.velocity) / 2)
       } else {
         mergedNotes.push(current)

@@ -9,7 +9,7 @@
 class DrumEngine
 {
 public:
-    enum class KitType { Default, Tight, EightOhEight, Electro, Tabla };
+    enum class KitType { Classic, Acoustic, Tight, EightOhEight, Electro, Tabla };
 
     /**
      * Note-level modulation one hit receives. Everything defaults to "nothing asked for", so a
@@ -32,6 +32,7 @@ public:
     {
         bool active = false;
         int drumPad = 0; // 0 to 15
+        KitType kit = KitType::Classic;
         float velocity = 1.0f;
         float elapsedSeconds = 0.0f;
         float durationSeconds = 0.5f;
@@ -85,6 +86,20 @@ public:
 
     void setKit(KitType kit) { currentKit = kit; }
     void setKitByName(const juce::String& kitName);
+    KitType getKit() const { return currentKit; }
+    juce::String getCurrentKitName() const
+    {
+        switch (currentKit)
+        {
+            case KitType::Acoustic:     return "acoustic";
+            case KitType::Tight:        return "tight";
+            case KitType::EightOhEight: return "eightOhEight";
+            case KitType::Electro:      return "electro";
+            case KitType::Tabla:        return "tabla";
+            case KitType::Classic:
+            default:                    return "classic";
+        }
+    }
 
     void setPadCurveLut(int pad, const float* data, int count)
     {
@@ -113,7 +128,7 @@ public:
 
 private:
     double currentSampleRate = 44100.0;
-    KitType currentKit = KitType::Default;
+    KitType currentKit = KitType::Classic;
 
     static constexpr int MAX_DRUM_VOICES = 32;
     std::vector<DrumVoice> voices;

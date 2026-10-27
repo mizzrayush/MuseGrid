@@ -6,7 +6,7 @@ import {
   IconLayers, IconArrowUp, IconArrowDown, IconSparkles, IconShuffle, IconList, IconAlign
 } from '../ui/Icons'
 import { useContextMenuDismissal } from '../ui/useContextMenuDismissal'
-import { useStore, DEFAULT_DRUM_ROWS, EXPRESSION_LANE_TARGETS, expressionLaneLabel, parseAutomationTarget, getTrackAutomationPoints, type ExpressionLaneTarget } from '../engine/store'
+import { useStore, DEFAULT_DRUM_ROWS, EXPRESSION_LANE_TARGETS, expressionLaneLabel, parseAutomationTarget, getTrackAutomationPoints, type ExpressionLaneTarget, type Note } from '../engine/store'
 import { audioEngine } from '../engine/AudioEngine'
 import type { Vst3ParameterInfo } from '../engine/AudioEngine'
 import { isInScale, snapToScale, snapTick, NOTE_NAMES_SHARP, NOTE_NAMES_FLAT, CHORD_STAMPS, getDiatonicChord, detectScaleDegree } from '../utils/musicTheory'
@@ -109,15 +109,9 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   const isInitialDrum = instrument === 'drum'
   const initialPanCenteredRef = useRef(false)
 
-  const [pan, setPan] = useState({ x: 0, y: isInitialDrum ? 0 : -1150 })
+  const [pan, setPan] = useState({ x: 0, y: isInitialDrum ? 0 : -1278 })
+  const projectId = useStore(state => state.projectId)
   const projectRevision = useStore(state => state.projectRevision)
-  const [prevRevision, setPrevRevision] = useState(projectRevision)
-
-  if (projectRevision !== prevRevision) {
-    setPrevRevision(projectRevision)
-    initialPanCenteredRef.current = false
-    setPan({ x: 0, y: isInitialDrum ? 0 : -1150 })
-  }
   const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 })
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -182,7 +176,8 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   const isHorizScrollLocked = horizScrollLockEnabled && isActiveGrid
   const isVertScrollLocked = vertScrollLockEnabled && isActiveGrid
 
-  const isReadOnly = bothGridActive ? readOnlyMode : ((currentTrack ? currentTrack.instrument !== instrument : false) || readOnlyMode)
+  const activeTrack = tracks.find(t => t.id === activeTrackId)
+  const isReadOnly = readOnlyMode || (!bothGridActive && (activeTrack ? activeTrack.instrument !== instrument : false))
   const isDrum = instrument === 'drum'
 
   const synthLowerOctave = useStore(state => state.synthLowerOctave)
@@ -262,34 +257,62 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
     if (pitchY < 0 && effectiveRowOrder && effectiveRowOrder.length > 0) {
       pitchY = Math.floor(effectiveRowOrder.length / 2) * gridSizeY
     }
-    const vHeight = canvasSize.height
-    if (vHeight <= 0) return -1150
+    const vHeight = canvasSize.height > 0 ? canvasSize.height : 340
     const worldY = (TIMELINE_HEIGHT + pitchY + gridSizeY / 2) * zoom
     const targetY = -(worldY - vHeight / 2)
     return Math.min(0, Math.max(maxPanY, targetY))
   }, [isDrum, getPitchY, effectiveRowOrder, canvasSize.height, gridSizeY, zoom, maxPanY])
 
-  const prevTrackConfigRef = useRef<{ trackId: string; edoDivision?: number; edoPreset?: string }>({
+  const prevTrackConfigRef = useRef<{
+    trackId: string
+    edoDivision?: number
+    edoPreset?: string
+    projectId: string
+    projectRevision: number
+  }>({
     trackId: currentTrack?.id || '',
     edoDivision: currentTrack?.edoDivision,
-    edoPreset: currentTrack?.edoPreset
+    edoPreset: currentTrack?.edoPreset,
+    projectId,
+    projectRevision
   })
 
-  // Center on Middle C on initial mount or when tuning style / track changes
+  // Center on Middle C on initial mount, on new/loaded project, or when tuning style / track changes
   useEffect(() => {
-    if (isDrum || !currentTrack) return
+    if (!currentTrack) return
     const prev = prevTrackConfigRef.current
+    const changedProject = prev.projectId !== projectId || prev.projectRevision !== projectRevision
     const changedEdo = prev.edoDivision !== currentTrack.edoDivision || prev.edoPreset !== currentTrack.edoPreset
     const changedTrack = prev.trackId !== currentTrack.id
 
-    if (!initialPanCenteredRef.current && canvasSize.height > 0) {
+    if (changedProject) {
+      prevTrackConfigRef.current = {
+        trackId: currentTrack.id,
+        edoDivision: currentTrack.edoDivision,
+        edoPreset: currentTrack.edoPreset,
+        projectId,
+        projectRevision
+      }
       initialPanCenteredRef.current = true
-      setPan(p => ({ ...p, y: getCenterPanYForPitch(60) }))
+      setPan({
+        x: 0,
+        y: isDrum ? 0 : getCenterPanYForPitch(60)
+      })
       return
     }
 
-    if (changedEdo || changedTrack) {
+    if (!initialPanCenteredRef.current && canvasSize.height > 0) {
+      initialPanCenteredRef.current = true
+      setPan(p => ({
+        ...p,
+        y: isDrum ? 0 : getCenterPanYForPitch(60)
+      }))
+      return
+    }
+
+    if (!isDrum && (changedEdo || changedTrack)) {
       prevTrackConfigRef.current = {
+        ...prevTrackConfigRef.current,
         trackId: currentTrack.id,
         edoDivision: currentTrack.edoDivision,
         edoPreset: currentTrack.edoPreset
@@ -298,7 +321,16 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         setPan(p => ({ ...p, y: getCenterPanYForPitch(60) }))
       }
     }
-  }, [currentTrack?.id, currentTrack?.edoDivision, currentTrack?.edoPreset, isDrum, canvasSize.height, getCenterPanYForPitch])
+  }, [
+    currentTrack?.id,
+    currentTrack?.edoDivision,
+    currentTrack?.edoPreset,
+    projectId,
+    projectRevision,
+    isDrum,
+    canvasSize.height,
+    getCenterPanYForPitch
+  ])
 
   // Prevent pan.y from being stranded out-of-bounds when totalHeight shrinks
   useEffect(() => {
@@ -372,7 +404,8 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   const vst3TargetIndex = automationTarget.startsWith('vst3:') ? Number(automationTarget.slice(5)) : -1
   const vst3TargetParam = vst3TargetIndex >= 0 ? vst3Params.find(p => p.index === vst3TargetIndex) : undefined
   const [dragVelocityNoteId, setDragVelocityNoteId] = useState<string | null>(null)
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tick: number; mode: 'main' | 'subtrack_parent' | 'glide' | 'timeline_range' } | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tick: number; mode: 'main' | 'subtrack_parent' | 'glide' | 'timeline_range'; clickedNoteId?: string } | null>(null)
+  const oneShotSliceToolRef = useRef<'draw' | 'erase' | 'select' | 'stretch' | null>(null)
   const [glideMenu, setGlideMenu] = useState<GlideChainOptions>({
     order: 'time',
     curve: 'cubicInOut',
@@ -989,8 +1022,24 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         return
       }
 
-      // Deselect (Escape)
+      // One-Shot Knife Tool (Alt+C)
+      if (e.altKey && e.key.toLowerCase() === 'c') {
+        e.preventDefault()
+        const curTool = store.activeTool
+        oneShotSliceToolRef.current = curTool === 'slice' ? 'draw' : curTool
+        store.setActiveTool('slice')
+        store.showToast('Knife Tool armed: Click a note to split (auto-reverts)', 'info')
+        return
+      }
+
+      // Deselect (Escape) / Disarm Knife Tool
       if (e.key === 'Escape') {
+        if (oneShotSliceToolRef.current) {
+          store.setActiveTool(oneShotSliceToolRef.current)
+          oneShotSliceToolRef.current = null
+          store.showToast('Knife disarmed', 'info')
+          return
+        }
         if (selectedNoteIds.length > 0) {
           setSelectedNoteIds([])
           store.showToast('Cleared note selection', 'info')
@@ -2460,6 +2509,45 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   const allSelectedNotesMuted = useMemo(() => selectedNotesList.length > 0 && mutedCount === selectedNotesList.length, [selectedNotesList, mutedCount])
   const hasMixedMuteState = useMemo(() => mutedCount > 0 && mutedCount < selectedNotesList.length, [mutedCount, selectedNotesList])
 
+  // Check if multiple notes of the same pitch are selected and can be merged into a longer note
+  const isMergeEligible = useMemo(() => {
+    if (selectedNotesList.length < 2) return false
+    const pitchMap = new Map<string, number>()
+    for (const note of selectedNotesList) {
+      const key = `${note.trackId}_${note.pitch}`
+      pitchMap.set(key, (pitchMap.get(key) || 0) + 1)
+      if (pitchMap.get(key)! >= 2) return true
+    }
+    return false
+  }, [selectedNotesList])
+
+  const clickedContextMenuNote = useMemo(() => {
+    if (!contextMenu?.clickedNoteId) return null
+    return allNotes.find(n => n.id === contextMenu.clickedNoteId) ?? null
+  }, [contextMenu?.clickedNoteId, allNotes])
+
+  const handleSplitNoteAtTick = (note: Note, tick: number) => {
+    if (isReadOnly) return
+    const splitAt = Math.max(note.time + 1, Math.min(note.time + note.duration - 1, tick))
+    if (splitAt <= note.time || splitAt >= note.time + note.duration) return
+    const id1 = Math.random().toString(36).substr(2, 9)
+    const id2 = Math.random().toString(36).substr(2, 9)
+    useStore.getState().commitHistory()
+    removeNote(note.id)
+    addNote({ ...note, id: id1, duration: splitAt - note.time })
+    addNote({ ...note, id: id2, time: splitAt, duration: note.time + note.duration - splitAt })
+    setSelectedNoteIds([id1, id2])
+    useStore.getState().showToast('Note split at cursor', 'info')
+  }
+
+  const handleActivateOneShotKnife = () => {
+    const curTool = useStore.getState().activeTool
+    oneShotSliceToolRef.current = curTool === 'slice' ? 'draw' : curTool
+    useStore.getState().setActiveTool('slice')
+    useStore.getState().showToast('Knife Tool armed: Click a note to split (auto-reverts)', 'info')
+    setContextMenu(null)
+  }
+
   const handleMuteSelectedNotes = (targetMute: boolean) => {
     if (selectedNoteIds.length === 0) return
     useStore.getState().commitHistory()
@@ -3346,7 +3434,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         if (!selectedNoteIds.includes(clickedNote.id)) {
           setSelectedNoteIds([clickedNote.id])
         }
-        setContextMenu({ x: e.clientX, y: e.clientY, tick: clickTick, mode: 'main' })
+        setContextMenu({ x: e.clientX, y: e.clientY, tick: clickTick, mode: 'main', clickedNoteId: clickedNote.id })
       } else {
         setSelectedNoteIds([])
         setContextMenu({ x: e.clientX, y: e.clientY, tick: clickTick, mode: 'main' })
@@ -3419,6 +3507,11 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         removeNote(clickedNote.id)
         addNote({ ...clickedNote, id: id1, duration: splitAt - clickedNote.time })
         addNote({ ...clickedNote, id: id2, time: splitAt, duration: clickedNote.time + clickedNote.duration - splitAt })
+        setSelectedNoteIds([id1, id2])
+        if (oneShotSliceToolRef.current) {
+          useStore.getState().setActiveTool(oneShotSliceToolRef.current)
+          oneShotSliceToolRef.current = null
+        }
         return
       }
 
@@ -3568,7 +3661,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         e.currentTarget.style.cursor = 'ew-resize'
       } else {
         const activeTool = useStore.getState().activeTool
-        e.currentTarget.style.cursor = isReadOnly ? 'default' : (activeTool === 'draw' ? 'crosshair' : (activeTool === 'erase' ? 'cell' : 'default'))
+        e.currentTarget.style.cursor = isReadOnly ? 'default' : (activeTool === 'slice' ? 'crosshair' : (activeTool === 'draw' ? 'crosshair' : (activeTool === 'erase' ? 'cell' : 'default')))
       }
       return
     }
@@ -3869,7 +3962,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
     setDragTargetCol(null)
 
     const activeTool = useStore.getState().activeTool
-    e.currentTarget.style.cursor = isReadOnly ? 'default' : (activeTool === 'draw' ? 'crosshair' : (activeTool === 'erase' ? 'cell' : 'default'))
+    e.currentTarget.style.cursor = isReadOnly ? 'default' : (activeTool === 'slice' ? 'crosshair' : (activeTool === 'draw' ? 'crosshair' : (activeTool === 'erase' ? 'cell' : 'default')))
   }
 
   // --- Custom Scrollbar Calculations & Handlers ---
@@ -4563,6 +4656,70 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                     <span style={{ fontSize: '10px', color: '#888', fontWeight: 600 }}>M</span>
                   </button>
 
+                  {isMergeEligible && (
+                    <button
+                      style={{
+                        width: '100%',
+                        padding: '7px 12px',
+                        background: 'rgba(255, 146, 43, 0.12)',
+                        border: '1px solid rgba(255, 146, 43, 0.35)',
+                        borderRadius: '4px',
+                        color: '#ff922b',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                        fontSize: '11px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        fontWeight: 700,
+                        margin: '3px 0'
+                      }}
+                      onClick={handleGlueSelectedNotes}
+                      onMouseEnter={e => e.currentTarget.style.background = 'rgba(255, 146, 43, 0.22)'}
+                      onMouseLeave={e => e.currentTarget.style.background = 'rgba(255, 146, 43, 0.12)'}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <IconLayers size={13} style={{ color: '#ff922b' }} /> Merge Consecutive Notes
+                      </div>
+                      <span style={{ fontSize: '10px', color: '#ff922b', fontWeight: 600 }}>Ctrl+G</span>
+                    </button>
+                  )}
+
+                  <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />
+
+                  {/* Split & Knife Section */}
+                  <div style={{ padding: '3px 12px 2px', fontSize: '8.5px', textTransform: 'uppercase', color: '#555', fontWeight: 800, letterSpacing: '0.6px' }}>
+                    Split & Knife
+                  </div>
+
+                  {clickedContextMenuNote && (
+                    <button
+                      style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                      onClick={() => {
+                        handleSplitNoteAtTick(clickedContextMenuNote, contextMenu.tick)
+                        setContextMenu(null)
+                      }}
+                      onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                      onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <IconScissors size={13} style={{ color: '#fa5252' }} /> Split Note at Cursor
+                      </div>
+                    </button>
+                  )}
+
+                  <button
+                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={handleActivateOneShotKnife}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconScissors size={13} style={{ color: '#ffd43b' }} /> Knife Tool (Split on Click)
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Alt+C</span>
+                  </button>
+
                   <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />
 
                   {/* Clipboard Section */}
@@ -4935,6 +5092,19 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                 </>
               ) : (
                 <>
+                  <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />
+                  <button
+                    style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                    onClick={handleActivateOneShotKnife}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconScissors size={13} style={{ color: '#ffd43b' }} /> Knife Tool (Split on Click)
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Alt+C</span>
+                  </button>
+
                   {useStore.getState().clipboard.length > 0 && (
                     <>
                       <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />

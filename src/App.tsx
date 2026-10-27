@@ -552,6 +552,7 @@ function App() {
         loopStart: 0,
         loopEnd: 768,
         columnWidths: {},
+        sharedPanX: 0,
         gridBlockTicks: 48,
         gridShadeEvery: 4,
         gridColumnCount: 200,

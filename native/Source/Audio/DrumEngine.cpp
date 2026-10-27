@@ -41,11 +41,12 @@ void DrumEngine::reset()
 static DrumEngine::KitType parseKitName(const juce::String& kitName)
 {
     auto lower = kitName.toLowerCase();
+    if (lower.contains("acoustic"))     return DrumEngine::KitType::Acoustic;
     if (lower.contains("tight"))        return DrumEngine::KitType::Tight;
     if (lower.contains("808") || lower.contains("eightoh")) return DrumEngine::KitType::EightOhEight;
-    if (lower.contains("electro"))      return DrumEngine::KitType::Electro;
+    if (lower.contains("electro") || lower.contains("electric")) return DrumEngine::KitType::Electro;
     if (lower.contains("tabla"))        return DrumEngine::KitType::Tabla;
-    return DrumEngine::KitType::Default;
+    return DrumEngine::KitType::Classic;
 }
 
 void DrumEngine::setKitByName(const juce::String& kitName)
@@ -111,6 +112,7 @@ void DrumEngine::triggerHit(int drumPad, float velocity, float pitchOffsetSemito
 
     auto& v = voices[bestIndex];
     v.active = true;
+    v.kit = kit;
     v.fxChainId = fxChainId;
     v.drumPad = normalizeDrumPad(drumPad);
     v.velocity = juce::jlimit(0.0f, 1.0f, velocity);
@@ -140,18 +142,28 @@ void DrumEngine::triggerHit(int drumPad, float velocity, float pitchOffsetSemito
                 v.startFreq = 160.0f * pitchMultiplier;
                 v.endFreq = 38.0f * pitchMultiplier;
                 v.pitchDecay = 0.09f;
-                v.durationSeconds = 0.8f;
+                v.durationSeconds = 0.85f;
             } else if (kit == KitType::Tight) {
                 v.startFreq = 180.0f * pitchMultiplier;
                 v.endFreq = 55.0f * pitchMultiplier;
-                v.pitchDecay = 0.03f;
-                v.durationSeconds = 0.25f;
+                v.pitchDecay = 0.025f;
+                v.durationSeconds = 0.22f;
+            } else if (kit == KitType::Electro) {
+                v.startFreq = 220.0f * pitchMultiplier;
+                v.endFreq = 42.0f * pitchMultiplier;
+                v.pitchDecay = 0.05f;
+                v.durationSeconds = 0.45f;
+            } else if (kit == KitType::Acoustic) {
+                v.startFreq = 135.0f * pitchMultiplier;
+                v.endFreq = 52.0f * pitchMultiplier;
+                v.pitchDecay = 0.04f;
+                v.durationSeconds = 0.38f;
             } else if (kit == KitType::Tabla) { // Bayan (Bass Ghe)
                 v.startFreq = 70.0f * pitchMultiplier;
                 v.endFreq = 95.0f * pitchMultiplier; // Upward pitch modulation
                 v.pitchDecay = 0.2f;
                 v.durationSeconds = 0.7f;
-            } else {
+            } else { // Classic
                 v.startFreq = 150.0f * pitchMultiplier;
                 v.endFreq = 48.0f * pitchMultiplier;
                 v.pitchDecay = 0.045f;
@@ -160,50 +172,105 @@ void DrumEngine::triggerHit(int drumPad, float velocity, float pitchOffsetSemito
             break;
 
         case 1: // Snare
-            v.durationSeconds = (kit == KitType::Tight) ? 0.15f : 0.3f;
-            v.startFreq = 220.0f * pitchMultiplier;
-            v.endFreq = 140.0f * pitchMultiplier;
-            v.pitchDecay = 0.03f;
+            if (kit == KitType::EightOhEight) {
+                v.durationSeconds = 0.28f;
+                v.startFreq = 180.0f * pitchMultiplier;
+                v.endFreq = 110.0f * pitchMultiplier;
+                v.pitchDecay = 0.04f;
+            } else if (kit == KitType::Tight) {
+                v.durationSeconds = 0.12f;
+                v.startFreq = 260.0f * pitchMultiplier;
+                v.endFreq = 165.0f * pitchMultiplier;
+                v.pitchDecay = 0.02f;
+            } else if (kit == KitType::Electro) {
+                v.durationSeconds = 0.35f;
+                v.startFreq = 240.0f * pitchMultiplier;
+                v.endFreq = 120.0f * pitchMultiplier;
+                v.pitchDecay = 0.05f;
+            } else if (kit == KitType::Acoustic) {
+                v.durationSeconds = 0.25f;
+                v.startFreq = 210.0f * pitchMultiplier;
+                v.endFreq = 145.0f * pitchMultiplier;
+                v.pitchDecay = 0.035f;
+            } else if (kit == KitType::Tabla) { // Dayan (Chanti/Tin)
+                v.durationSeconds = 0.18f;
+                v.startFreq = 340.0f * pitchMultiplier;
+                v.endFreq = 300.0f * pitchMultiplier;
+                v.pitchDecay = 0.02f;
+            } else { // Classic
+                v.durationSeconds = 0.3f;
+                v.startFreq = 220.0f * pitchMultiplier;
+                v.endFreq = 140.0f * pitchMultiplier;
+                v.pitchDecay = 0.03f;
+            }
             break;
 
         case 2: // Closed Hi-Hat
-            v.durationSeconds = (kit == KitType::Tight) ? 0.04f : 0.07f;
-            v.startFreq = 8000.0f * pitchMultiplier;
+            if (kit == KitType::Tight) {
+                v.durationSeconds = 0.035f;
+                v.startFreq = 9500.0f * pitchMultiplier;
+            } else if (kit == KitType::EightOhEight) {
+                v.durationSeconds = 0.08f;
+                v.startFreq = 7200.0f * pitchMultiplier;
+            } else if (kit == KitType::Electro) {
+                v.durationSeconds = 0.06f;
+                v.startFreq = 8800.0f * pitchMultiplier;
+            } else if (kit == KitType::Acoustic) {
+                v.durationSeconds = 0.055f;
+                v.startFreq = 8200.0f * pitchMultiplier;
+            } else {
+                v.durationSeconds = 0.07f;
+                v.startFreq = 8000.0f * pitchMultiplier;
+            }
             break;
 
         case 3: // Open Hi-Hat
-            v.durationSeconds = (kit == KitType::EightOhEight) ? 0.65f : 0.4f;
-            v.startFreq = 7500.0f * pitchMultiplier;
+            if (kit == KitType::EightOhEight) {
+                v.durationSeconds = 0.75f;
+                v.startFreq = 7000.0f * pitchMultiplier;
+            } else if (kit == KitType::Tight) {
+                v.durationSeconds = 0.22f;
+                v.startFreq = 8500.0f * pitchMultiplier;
+            } else if (kit == KitType::Electro) {
+                v.durationSeconds = 0.5f;
+                v.startFreq = 7600.0f * pitchMultiplier;
+            } else if (kit == KitType::Acoustic) {
+                v.durationSeconds = 0.35f;
+                v.startFreq = 7800.0f * pitchMultiplier;
+            } else {
+                v.durationSeconds = 0.4f;
+                v.startFreq = 7500.0f * pitchMultiplier;
+            }
             break;
 
         case 4: // Hand Clap
-            v.durationSeconds = 0.25f;
+            v.durationSeconds = (kit == KitType::EightOhEight) ? 0.32f : (kit == KitType::Tight ? 0.15f : 0.25f);
             v.startFreq = 1200.0f * pitchMultiplier;
             break;
 
         case 5: // Low Tom
-            v.durationSeconds = 0.4f;
-            v.startFreq = 110.0f * pitchMultiplier;
-            v.endFreq = 65.0f * pitchMultiplier;
+            v.durationSeconds = (kit == KitType::EightOhEight) ? 0.7f : 0.4f;
+            v.startFreq = (kit == KitType::EightOhEight ? 90.0f : 110.0f) * pitchMultiplier;
+            v.endFreq = (kit == KitType::EightOhEight ? 45.0f : 65.0f) * pitchMultiplier;
             v.pitchDecay = 0.1f;
             break;
 
         case 6: // Mid Tom
-            v.durationSeconds = 0.35f;
-            v.startFreq = 150.0f * pitchMultiplier;
-            v.endFreq = 95.0f * pitchMultiplier;
+            v.durationSeconds = (kit == KitType::EightOhEight) ? 0.6f : 0.35f;
+            v.startFreq = (kit == KitType::EightOhEight ? 125.0f : 150.0f) * pitchMultiplier;
+            v.endFreq = (kit == KitType::EightOhEight ? 68.0f : 95.0f) * pitchMultiplier;
             v.pitchDecay = 0.08f;
             break;
 
         case 7: // High Tom
-            v.durationSeconds = 0.3f;
-            v.startFreq = 210.0f * pitchMultiplier;
-            v.endFreq = 135.0f * pitchMultiplier;
+            v.durationSeconds = (kit == KitType::EightOhEight) ? 0.5f : 0.3f;
+            v.startFreq = (kit == KitType::EightOhEight ? 175.0f : 210.0f) * pitchMultiplier;
+            v.endFreq = (kit == KitType::EightOhEight ? 95.0f : 135.0f) * pitchMultiplier;
             v.pitchDecay = 0.06f;
             break;
 
         case 8: // Crash Cymbal
-            v.durationSeconds = 1.6f;
+            v.durationSeconds = (kit == KitType::Tight) ? 0.8f : 1.6f;
             v.startFreq = 300.0f * pitchMultiplier;
             break;
 
@@ -359,9 +426,53 @@ void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
                     const float pitchEnv = std::exp(-t / v.pitchDecay);
                     const float freq = (v.endFreq + (v.startFreq - v.endFreq) * pitchEnv) * slideMultiplier * vibRatio;
                     v.phase += 2.0 * juce::MathConstants<double>::pi * freq * sampleTime;
-                    sample = (float)std::sin(v.phase) * padAmp;
-                    // Add subtle click transient
-                    if (t < 0.005f) sample += nextNoise(v.noiseSeed) * (1.0f - t / 0.005f) * 0.3f;
+
+                    if (v.kit == KitType::EightOhEight)
+                    {
+                        // Pure, massive sub-bass 808 boom with long sustained decay and tape saturation
+                        const float amp808 = std::exp(-t / 0.65f);
+                        float s = (float)std::sin(v.phase) * amp808;
+                        sample = std::tanh(s * 1.8f) * 0.95f;
+                        if (t < 0.003f) sample += nextNoise(v.noiseSeed) * 0.2f;
+                    }
+                    else if (v.kit == KitType::Electro)
+                    {
+                        // Crunchy bit-reduced French electro / techno punch!
+                        const float fm = (float)std::sin(v.phase * 2.5) * 0.35f;
+                        float raw = (float)std::sin(v.phase + fm) * padAmp;
+                        if (t < 0.008f) raw += ((nextNoise(v.noiseSeed) > 0.0f ? 0.4f : -0.4f) * (1.0f - t / 0.008f));
+                        sample = (std::floor(raw * 14.0f) / 14.0f);
+                    }
+                    else if (v.kit == KitType::Tight)
+                    {
+                        // Dry, punchy, ultra-fast transient disco/funk kick (zero mud, zero boom)
+                        const float tightAmp = std::exp(-t / 0.075f);
+                        float s = (float)std::sin(v.phase) * tightAmp;
+                        if (t < 0.004f) s += (nextNoise(v.noiseSeed) * 0.4f) * (1.0f - t / 0.004f);
+                        sample = s * 1.1f;
+                    }
+                    else if (v.kit == KitType::Acoustic)
+                    {
+                        // Natural resonant maple/birch acoustic kick with dual-skin resonance
+                        v.phase2 += 2.0 * juce::MathConstants<double>::pi * (freq * 1.95f) * sampleTime;
+                        const float head = (float)std::sin(v.phase);
+                        const float shell = (float)std::sin(v.phase2) * 0.3f * std::exp(-t / 0.12f);
+                        float acoustic = (head * 0.75f + shell) * padAmp;
+                        if (t < 0.006f) acoustic += (nextNoise(v.noiseSeed) * 0.25f) * (1.0f - t / 0.006f);
+                        sample = acoustic;
+                    }
+                    else if (v.kit == KitType::Tabla)
+                    {
+                        // Authentic Bayan (Bass Ghe): deep bending skin resonance with harmonics
+                        v.phase2 += 2.0 * juce::MathConstants<double>::pi * (freq * 2.0f) * sampleTime;
+                        const float bayan = (float)std::sin(v.phase) * 0.8f + (float)std::sin(v.phase2) * 0.25f;
+                        sample = bayan * padAmp;
+                    }
+                    else // Classic (909 analog)
+                    {
+                        sample = (float)std::sin(v.phase) * padAmp;
+                        if (t < 0.005f) sample += nextNoise(v.noiseSeed) * (1.0f - t / 0.005f) * 0.3f;
+                    }
                     break;
                 }
 
@@ -369,9 +480,50 @@ void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
                 {
                     const float bodyPitch = (v.endFreq + (v.startFreq - v.endFreq) * std::exp(-t / v.pitchDecay)) * slideMultiplier * vibRatio;
                     v.phase += 2.0 * juce::MathConstants<double>::pi * bodyPitch * sampleTime;
-                    const float body = (float)std::sin(v.phase) * padAmp * 0.6f;
-                    const float noise = nextNoise(v.noiseSeed) * padAmp * 0.7f;
-                    sample = body + noise;
+
+                    if (v.kit == KitType::EightOhEight)
+                    {
+                        // 808 snappy snare: low pop + high sizzle noise tail
+                        const float body = (float)std::sin(v.phase) * std::exp(-t / 0.04f) * 0.5f;
+                        const float noise = nextNoise(v.noiseSeed) * std::exp(-t / 0.18f) * 0.85f;
+                        sample = body + noise;
+                    }
+                    else if (v.kit == KitType::Electro)
+                    {
+                        // Crunchy distorted FM snare with bit reduction
+                        float noise = nextNoise(v.noiseSeed);
+                        float body = (float)std::sin(v.phase + (noise * 0.5f)) * std::exp(-t / 0.06f);
+                        float raw = (body * 0.6f + noise * 0.7f) * padAmp;
+                        sample = (std::floor(raw * 10.0f) / 10.0f);
+                    }
+                    else if (v.kit == KitType::Tight)
+                    {
+                        // High-pitched piccolo crack snare: 60ms tight decay, very dry
+                        const float body = (float)std::sin(v.phase) * std::exp(-t / 0.025f) * 0.7f;
+                        const float noise = nextNoise(v.noiseSeed) * std::exp(-t / 0.055f) * 0.65f;
+                        sample = (body + noise) * 1.1f;
+                    }
+                    else if (v.kit == KitType::Acoustic)
+                    {
+                        // Organic wooden snare: primary head ring + secondary shell overtone + snare wire rattle
+                        v.phase2 += 2.0 * juce::MathConstants<double>::pi * (bodyPitch * 1.68f) * sampleTime;
+                        const float shell = ((float)std::sin(v.phase) * 0.55f + (float)std::sin(v.phase2) * 0.25f) * std::exp(-t / 0.08f);
+                        const float wires = nextNoise(v.noiseSeed) * std::exp(-t / 0.22f) * 0.65f;
+                        sample = (shell + wires) * padAmp;
+                    }
+                    else if (v.kit == KitType::Tabla)
+                    {
+                        // High Dayan (Tin / Tun) tuned bell-like resonance
+                        v.phase2 += 2.0 * juce::MathConstants<double>::pi * (bodyPitch * 2.0f) * sampleTime;
+                        const float bell = ((float)std::sin(v.phase) * 0.7f + (float)std::sin(v.phase2) * 0.4f) * std::exp(-t / 0.15f);
+                        sample = bell * padAmp;
+                    }
+                    else // Classic
+                    {
+                        const float body = (float)std::sin(v.phase) * padAmp * 0.6f;
+                        const float noise = nextNoise(v.noiseSeed) * padAmp * 0.7f;
+                        sample = body + noise;
+                    }
                     break;
                 }
 
@@ -380,20 +532,62 @@ void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
                 case 8: // Crash Cymbal
                 case 9: // Ride Cymbal
                 {
-                    static const float metalRatios[6] = { 1.0f, 1.483f, 1.932f, 2.546f, 2.630f, 3.897f };
-                    float metalSum = 0.0f;
-                    for (int k = 0; k < 6; ++k)
+                    if (v.kit == KitType::EightOhEight)
                     {
-                        const float baseF = v.startFreq * slideMultiplier;
-                        v.metalPhases[k] += 2.0 * juce::MathConstants<double>::pi * (baseF * metalRatios[k]) * sampleTime;
-                        if (v.metalPhases[k] >= 2.0 * juce::MathConstants<double>::pi)
-                            v.metalPhases[k] -= 2.0 * juce::MathConstants<double>::pi;
-                        metalSum += (std::sin(v.metalPhases[k]) > 0.0 ? 0.35f : -0.35f);
+                        // Authentic TR-808 6 Schmitt-trigger square wave generator
+                        static const float tr808Freqs[6] = { 240.0f, 380.0f, 540.0f, 630.0f, 800.0f, 1000.0f };
+                        float metalSum = 0.0f;
+                        for (int k = 0; k < 6; ++k)
+                        {
+                            v.metalPhases[k] += 2.0 * juce::MathConstants<double>::pi * (double)(tr808Freqs[k] * slideMultiplier) * sampleTime;
+                            if (v.metalPhases[k] >= 2.0 * juce::MathConstants<double>::pi)
+                                v.metalPhases[k] -= 2.0 * juce::MathConstants<double>::pi;
+                            metalSum += (std::sin(v.metalPhases[k]) > 0.0 ? 0.25f : -0.25f);
+                        }
+                        v.filterState += cutoffAlpha * (metalSum - v.filterState);
+                        sample = (metalSum - v.filterState) * padAmp * 1.2f;
                     }
-                    const float noise = nextNoise(v.noiseSeed) * 0.4f;
-                    const float combined = metalSum + noise;
-                    v.filterState += cutoffAlpha * (combined - v.filterState);
-                    sample = (combined - v.filterState) * padAmp * 0.85f;
+                    else if (v.kit == KitType::Electro)
+                    {
+                        // Sizzly bit-crushed electronic high-frequency noise
+                        const float noise = nextNoise(v.noiseSeed);
+                        v.filterState += cutoffAlpha * (noise - v.filterState);
+                        float raw = (noise - v.filterState) * padAmp * 0.9f;
+                        sample = std::floor(raw * 12.0f) / 12.0f;
+                    }
+                    else if (v.kit == KitType::Tight)
+                    {
+                        // Ultra-short, dry 25ms tick hat
+                        const float noise = nextNoise(v.noiseSeed);
+                        v.filterState += cutoffAlpha * (noise - v.filterState);
+                        const float tightDecay = std::exp(-t / (v.drumPad == 2 ? 0.025f : 0.12f));
+                        sample = (noise - v.filterState) * tightDecay * 1.1f;
+                    }
+                    else if (v.kit == KitType::Tabla)
+                    {
+                        // Metallic rim sound / Chanti tap
+                        const float noise = nextNoise(v.noiseSeed) * 0.3f;
+                        v.phase += 2.0 * juce::MathConstants<double>::pi * 1400.0 * sampleTime;
+                        const float ring = (float)std::sin(v.phase) * 0.7f;
+                        sample = (ring + noise) * padAmp;
+                    }
+                    else // Acoustic / Classic
+                    {
+                        static const float metalRatios[6] = { 1.0f, 1.483f, 1.932f, 2.546f, 2.630f, 3.897f };
+                        float metalSum = 0.0f;
+                        for (int k = 0; k < 6; ++k)
+                        {
+                            const float baseF = v.startFreq * slideMultiplier;
+                            v.metalPhases[k] += 2.0 * juce::MathConstants<double>::pi * (baseF * metalRatios[k]) * sampleTime;
+                            if (v.metalPhases[k] >= 2.0 * juce::MathConstants<double>::pi)
+                                v.metalPhases[k] -= 2.0 * juce::MathConstants<double>::pi;
+                            metalSum += (std::sin(v.metalPhases[k]) > 0.0 ? 0.35f : -0.35f);
+                        }
+                        const float noise = nextNoise(v.noiseSeed) * 0.4f;
+                        const float combined = metalSum + noise;
+                        v.filterState += cutoffAlpha * (combined - v.filterState);
+                        sample = (combined - v.filterState) * padAmp * 0.85f;
+                    }
                     break;
                 }
 
@@ -424,12 +618,23 @@ void DrumEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
 
                 case 10: // Cowbell
                 {
-                    // Dual pulse waves with dynamically transposed and slid frequencies
-                    v.phase += 2.0 * juce::MathConstants<double>::pi * (double)(v.startFreq * slideMultiplier * vibRatio) * sampleTime;
-                    v.phase2 += 2.0 * juce::MathConstants<double>::pi * (double)(v.endFreq * slideMultiplier * vibRatio) * sampleTime;
-                    const float sq1 = std::sin(v.phase) > 0.0 ? 1.0f : -1.0f;
-                    const float sq2 = std::sin(v.phase2) > 0.0 ? 1.0f : -1.0f;
-                    sample = (sq1 + sq2) * 0.4f * padAmp;
+                    if (v.kit == KitType::EightOhEight)
+                    {
+                        // Classic TR-808 cowbell: 540Hz and 800Hz dual square waves
+                        v.phase += 2.0 * juce::MathConstants<double>::pi * 540.0 * sampleTime;
+                        v.phase2 += 2.0 * juce::MathConstants<double>::pi * 800.0 * sampleTime;
+                        const float sq1 = std::sin(v.phase) > 0.0 ? 1.0f : -1.0f;
+                        const float sq2 = std::sin(v.phase2) > 0.0 ? 1.0f : -1.0f;
+                        sample = (sq1 + sq2) * 0.45f * padAmp;
+                    }
+                    else
+                    {
+                        v.phase += 2.0 * juce::MathConstants<double>::pi * (double)(v.startFreq * slideMultiplier * vibRatio) * sampleTime;
+                        v.phase2 += 2.0 * juce::MathConstants<double>::pi * (double)(v.endFreq * slideMultiplier * vibRatio) * sampleTime;
+                        const float sq1 = std::sin(v.phase) > 0.0 ? 1.0f : -1.0f;
+                        const float sq2 = std::sin(v.phase2) > 0.0 ? 1.0f : -1.0f;
+                        sample = (sq1 + sq2) * 0.4f * padAmp;
+                    }
                     break;
                 }
 

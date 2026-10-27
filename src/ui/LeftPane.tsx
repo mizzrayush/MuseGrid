@@ -10271,6 +10271,7 @@ for (let channel = 0; channel < input.length; channel++) {
                                     input.click()
                                   } else {
                                     updateTrack(track.id, { drumKit: val as DrumKit })
+                                    audioEngine.setTrackDrumKit(track.id, val as DrumKit)
                                   }
                                 }}
                                 style={{ width: '100%', background: '#12141c', color: '#ff6b6b', border: '1px solid rgba(255, 107, 107, 0.25)', borderRadius: '4px', padding: '5px', fontSize: '11px', outline: 'none' }}

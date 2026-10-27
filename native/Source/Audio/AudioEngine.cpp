@@ -1669,7 +1669,10 @@ void AudioEngine::playNote(const juce::String& trackId,
     }
     else if (inst == "drum")
     {
-        targetTrack->drumEngine.triggerHit((int)pitchMidi, velocity, pitchOffsetSemitones, drumDecay, slideSemitones, slideTimeSeconds, punchOctaves, resonanceHz, {}, expression.fxChainId, expression, drumModulation);
+        const juce::String kitToUse = (expression.overrideKind == "kit" && expression.overrideValue.isNotEmpty())
+            ? expression.overrideValue
+            : targetTrack->drumEngine.getCurrentKitName();
+        targetTrack->drumEngine.triggerHit((int)pitchMidi, velocity, pitchOffsetSemitones, drumDecay, slideSemitones, slideTimeSeconds, punchOctaves, resonanceHz, kitToUse, expression.fxChainId, expression, drumModulation);
     }
     else if (inst == "physical")
     {

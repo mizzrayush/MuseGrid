@@ -607,6 +607,12 @@ class DrumMachine {
     }
   }
 
+  setKit(kit: DrumKit, customMuxins?: any) {
+    this.kit = kit
+    if (customMuxins) this.customMuxins = customMuxins
+    this.applyKit(kit, this.customMuxins)
+  }
+
   private applyKit(kit: DrumKit, customMuxins?: any) {
     const tight = kit === 'tight'
     const electro = kit === 'electro'
@@ -4674,6 +4680,20 @@ class AudioEngine {
     state.updateTrack(trackId, {
       drumPadModes: { ...existingModes, [pitch]: mode }
     })
+  }
+
+  setTrackDrumKit(trackId: string, kit: DrumKit) {
+    const drum = this.drums.get(trackId)
+    if (drum) {
+      drum.setKit(kit)
+    }
+    if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
+      (window as any).juceAudioBridge.postCommand({
+        type: 'setTrackKit',
+        trackId,
+        kitName: kit
+      });
+    }
   }
 
   private applyMetronomeSettings(settings: MetronomeSettings) {

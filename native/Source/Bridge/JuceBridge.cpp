@@ -228,13 +228,17 @@ juce::WebBrowserComponent::Options JuceBridge::setupOptions(juce::WebBrowserComp
         .withNativeFunction("save-project", [this](auto& args, auto comp) { handleSaveProject(args, comp); })
         .withNativeFunction("save-project-path", [this](auto& args, auto comp) { handleSaveProjectPath(args, comp); })
         .withNativeFunction("open-project", [this](auto& args, auto comp) { handleOpenProject(args, comp); })
+        .withNativeFunction("open-project-path", [this](auto& args, auto comp) { handleOpenProjectPath(args, comp); })
         .withNativeFunction("save-midi", [this](auto& args, auto comp) { handleSaveMidi(args, comp); })
         .withNativeFunction("save-file", [this](auto& args, auto comp) { handleSaveFile(args, comp); })
         .withNativeFunction("render-audio", [this](auto& args, auto comp) { handleRenderAudio(args, comp); })
         .withNativeFunction("render-audio-temp", [this](auto& args, auto comp) { handleRenderAudioTemp(args, comp); })
         .withNativeFunction("release-native-render", [this](auto& args, auto comp) { handleReleaseNativeRender(args, comp); })
         .withNativeFunction("show-open-dialog", [this](auto& args, auto comp) { handleShowOpenDialog(args, comp); })
+        .withNativeFunction("delete-file", [this](auto& args, auto comp) { handleDeleteFile(args, comp); })
+        .withNativeFunction("permanent-delete-file", [this](auto& args, auto comp) { handlePermanentDeleteFile(args, comp); })
         .withNativeFunction("toggle-fullscreen", [this](auto& args, auto comp) { handleToggleFullscreen(args, comp); })
+        .withNativeFunction("set-fullscreen", [this](auto& args, auto comp) { handleSetFullscreen(args, comp); })
         .withNativeFunction("is-fullscreen", [this](auto& args, auto comp) { handleIsFullscreen(args, comp); })
         .withNativeFunction("audioCommand", [this](auto& args, auto comp) { handleAudioCommand(args, comp); })
         .withNativeFunction("vst3-scan", [this](auto& args, auto comp) { handleVst3Scan(args, comp); })
@@ -250,6 +254,11 @@ juce::WebBrowserComponent::Options JuceBridge::setupOptions(juce::WebBrowserComp
         .withNativeFunction("set-clipboard-text", [](const auto& args, auto comp) {
             if (!args.isEmpty())
                 juce::SystemClipboard::copyTextToClipboard(args[0].toString());
+            comp(true);
+        })
+        .withNativeFunction("quit-app", [](const auto&, auto comp) {
+            if (auto* app = juce::JUCEApplication::getInstance())
+                app->systemRequestedQuit();
             comp(true);
         });
 }
@@ -317,12 +326,22 @@ void JuceBridge::handleSaveProjectPath(const juce::Array<juce::var>& args, juce:
 
 void JuceBridge::handleOpenProject(const juce::Array<juce::var>& /*args*/, juce::WebBrowserComponent::NativeFunctionCompletion complete)
 {
-    auto chooser = std::make_shared<juce::FileChooser>("Open MuseGrid Project", juce::File::getSpecialLocation(juce::File::userDocumentsDirectory), "*.muz;*.muztrack;*.*");
+    auto chooser = std::make_shared<juce::FileChooser>("Open MuseGrid Project", juce::File::getSpecialLocation(juce::File::userDocumentsDirectory), "*.muz;*.muztrack;*.json");
     chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles, [chooser, complete](const juce::FileChooser& fc) {
         auto file = fc.getResult();
         if (!file.existsAsFile())
         {
             complete(juce::var());
+            return;
+        }
+
+        const juce::String ext = file.getFileExtension().toLowerCase();
+        if (ext == ".mid" || ext == ".midi")
+        {
+            juce::DynamicObject::Ptr errObj = new juce::DynamicObject();
+            errObj->setProperty("error", "Standard MIDI files (.mid) require channel mapping. Please open a .muz or .muztrack project.");
+            errObj->setProperty("filePath", file.getFullPathName());
+            complete(juce::var(errObj.get()));
             return;
         }
 
@@ -351,6 +370,57 @@ void JuceBridge::handleOpenProject(const juce::Array<juce::var>& /*args*/, juce:
 
         complete(juce::var(resultObj.get()));
     });
+}
+
+void JuceBridge::handleOpenProjectPath(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete)
+{
+    if (args.isEmpty())
+    {
+        complete(juce::var());
+        return;
+    }
+
+    const juce::File file(args[0].toString());
+    if (!file.existsAsFile())
+    {
+        juce::DynamicObject::Ptr errObj = new juce::DynamicObject();
+        errObj->setProperty("error", "Project file does not exist on disk.");
+        complete(juce::var(errObj.get()));
+        return;
+    }
+
+    const juce::String ext = file.getFileExtension().toLowerCase();
+    if (ext == ".mid" || ext == ".midi")
+    {
+        juce::DynamicObject::Ptr errObj = new juce::DynamicObject();
+        errObj->setProperty("error", "Standard MIDI files (.mid) require channel mapping. Please open a .muz or .muztrack project.");
+        errObj->setProperty("filePath", file.getFullPathName());
+        complete(juce::var(errObj.get()));
+        return;
+    }
+
+    juce::String content;
+    auto inStream = file.createInputStream();
+    if (inStream)
+    {
+        try
+        {
+            juce::GZIPDecompressorInputStream gzipStream(inStream.get(), false);
+            content = gzipStream.readEntireStreamAsString();
+        }
+        catch (...)
+        {
+            inStream->setPosition(0);
+            content = inStream->readEntireStreamAsString();
+        }
+        inStream.release();
+    }
+
+    juce::DynamicObject::Ptr resultObj = new juce::DynamicObject();
+    resultObj->setProperty("data", content);
+    resultObj->setProperty("filePath", file.getFullPathName());
+
+    complete(juce::var(resultObj.get()));
 }
 
 void JuceBridge::handleSaveMidi(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete)
@@ -631,6 +701,38 @@ void JuceBridge::handleShowOpenDialog(const juce::Array<juce::var>& args, juce::
     {
         auto* obj = args[0].getDynamicObject();
         if (obj->hasProperty("title")) title = obj->getProperty("title").toString();
+        if (obj->hasProperty("filters"))
+        {
+            auto filtersVar = obj->getProperty("filters");
+            if (auto* arr = filtersVar.getArray())
+            {
+                juce::StringArray patternList;
+                for (const auto& item : *arr)
+                {
+                    if (item.isObject())
+                    {
+                        auto* itemObj = item.getDynamicObject();
+                        if (itemObj->hasProperty("extensions"))
+                        {
+                            auto extVar = itemObj->getProperty("extensions");
+                            if (auto* extArr = extVar.getArray())
+                            {
+                                for (const auto& ext : *extArr)
+                                {
+                                    juce::String e = ext.toString().trim();
+                                    if (e == "*") patternList.add("*.*");
+                                    else if (e.startsWith("*.")) patternList.add(e);
+                                    else if (e.startsWith(".")) patternList.add("*" + e);
+                                    else patternList.add("*." + e);
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!patternList.isEmpty())
+                    patterns = patternList.joinIntoString(";");
+            }
+        }
     }
 
     auto chooser = std::make_shared<juce::FileChooser>(title, juce::File::getSpecialLocation(juce::File::userDocumentsDirectory), patterns);
@@ -648,10 +750,42 @@ void JuceBridge::handleShowOpenDialog(const juce::Array<juce::var>& args, juce::
         juce::DynamicObject::Ptr res = new juce::DynamicObject();
         res->setProperty("name", file.getFileName());
         res->setProperty("filePath", file.getFullPathName());
-        res->setProperty("data", juce::var(memBlock));
+        res->setProperty("data", juce::Base64::toBase64(memBlock.getData(), memBlock.getSize()));
+        res->setProperty("isBase64", true);
 
         complete(juce::var(res.get()));
     });
+}
+
+void JuceBridge::handleDeleteFile(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete)
+{
+    if (args.isEmpty()) { complete(false); return; }
+    const juce::File file(args[0].toString());
+    if (!file.existsAsFile())
+    {
+        complete(true);
+        return;
+    }
+    // Attempt move to Recycle Bin / Trash first for safe deletion
+    bool ok = file.moveToTrash();
+    if (!ok)
+    {
+        ok = file.deleteFile();
+    }
+    complete(ok);
+}
+
+void JuceBridge::handlePermanentDeleteFile(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete)
+{
+    if (args.isEmpty()) { complete(false); return; }
+    const juce::File file(args[0].toString());
+    if (!file.existsAsFile())
+    {
+        complete(true);
+        return;
+    }
+    bool ok = file.deleteFile();
+    complete(ok);
 }
 
 void JuceBridge::handleToggleFullscreen(const juce::Array<juce::var>& /*args*/, juce::WebBrowserComponent::NativeFunctionCompletion complete)
@@ -661,6 +795,22 @@ void JuceBridge::handleToggleFullscreen(const juce::Array<juce::var>& /*args*/, 
         bool isFull = mainWindow->isFullScreen();
         mainWindow->setFullScreen(!isFull);
         complete(!isFull);
+        return;
+    }
+    complete(false);
+}
+
+void JuceBridge::handleSetFullscreen(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete)
+{
+    if (mainWindow != nullptr)
+    {
+        bool wantFull = true;
+        if (!args.isEmpty())
+        {
+            wantFull = (bool)args[0];
+        }
+        mainWindow->setFullScreen(wantFull);
+        complete(mainWindow->isFullScreen());
         return;
     }
     complete(false);

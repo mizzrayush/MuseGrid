@@ -28,13 +28,17 @@ private:
     void handleSaveProject(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
     void handleSaveProjectPath(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
     void handleOpenProject(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
+    void handleOpenProjectPath(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
     void handleSaveMidi(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
     void handleSaveFile(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
     void handleRenderAudio(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
     void handleRenderAudioTemp(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
     void handleReleaseNativeRender(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
     void handleShowOpenDialog(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
+    void handleDeleteFile(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
+    void handlePermanentDeleteFile(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
     void handleToggleFullscreen(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
+    void handleSetFullscreen(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
     void handleIsFullscreen(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
 
     // Real-time audio command dispatch

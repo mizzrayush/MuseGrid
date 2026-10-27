@@ -8,16 +8,17 @@ import ScorePreviewModal from './ui/ScorePreviewModal'
 import ImportAudioModal from './ui/ImportAudioModal'
 import { RightPane } from './ui/RightPane'
 import HelpPane from './ui/HelpPane'
+import StartScreenModal from './ui/StartScreenModal'
 import { ScriptingModal } from './ui/ScriptingModal'
 import { SynthStudioModal } from './ui/SynthStudioModal'
 import { DrumDesignerModal } from './ui/DrumDesignerModal'
 import { audioEngine } from './engine/AudioEngine'
 import { recordingEngine } from './engine/RecordingEngine'
 import { scheduler } from './engine/Scheduler'
-import { useStore } from './engine/store'
+import { useStore, saveRecentProject } from './engine/store'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET } from './utils/instruments'
 import { saveFileWithDialog } from './utils/fileExport'
-import { IconTrash, IconDownload, IconSave, IconOpen, IconPlay, IconStop, IconMidi, IconAlign, IconSkipBack, IconChevronDown, IconMaximize, IconMusic, IconStretch, IconChevronLeft, IconChevronRight, IconSync, IconNewFile, IconHelp, IconTarget, IconSliders } from './ui/Icons'
+import { IconTrash, IconDownload, IconSave, IconPlay, IconStop, IconMidi, IconAlign, IconSkipBack, IconChevronDown, IconMaximize, IconMusic, IconStretch, IconChevronLeft, IconChevronRight, IconSync, IconHelp, IconTarget, IconSliders, IconLayers } from './ui/Icons'
 
 function TransportTimeDisplay() {
   const playheadPosition = useStore(s => s.playheadPosition)
@@ -140,6 +141,9 @@ function App() {
   const [showNewProjectConfirm, setShowNewProjectConfirm] = useState(false)
   const [newProjectClosing, setNewProjectClosing] = useState(false)
   const [showSaveMenu, setShowSaveMenu] = useState(false)
+  const [isInitialLaunch, setIsInitialLaunch] = useState(() => {
+    return localStorage.getItem('musegrid_show_start_screen') !== 'false'
+  })
 
   const projectName = useStore(s => s.projectName)
   const isDirty = useStore(s => s.isDirty)
@@ -238,14 +242,30 @@ function App() {
     if (ipc) {
       if (state.projectFilePath) {
         const success = await ipc.invoke('save-project-path', getProjectDataString(), state.projectFilePath)
-        if (success) { state.setIsDirty(false); state.showToast('Project saved', 'success') }
+        if (success) {
+          state.setIsDirty(false)
+          state.showToast('Project saved', 'success')
+          saveRecentProject({
+            name: state.projectName || 'Untitled Project',
+            filePath: state.projectFilePath || undefined,
+            bpm: state.bpm,
+            trackCount: state.tracks.length
+          })
+        }
         else { state.showToast('Failed to save project', 'error') }
       } else {
         const filePath = await ipc.invoke('save-project', getProjectDataString())
         if (filePath) {
-          state.setProjectInfo({ projectFilePath: filePath, projectName: filePath.split(/[\\/]/).pop()?.replace('.muz', '') || 'Project' })
+          const pName = filePath.split(/[\\/]/).pop()?.replace('.muz', '') || 'Project'
+          state.setProjectInfo({ projectFilePath: filePath, projectName: pName })
           state.setIsDirty(false)
           state.showToast('Project saved', 'success')
+          saveRecentProject({
+            name: pName,
+            filePath: filePath,
+            bpm: state.bpm,
+            trackCount: state.tracks.length
+          })
         }
       }
     } else {
@@ -265,7 +285,28 @@ function App() {
       try {
         const res = await ipc.invoke('open-project')
         if (!res) return
-        const parsed = JSON.parse(res.data)
+        if (res.error) {
+          useStore.getState().showToast(res.error, 'error')
+          return
+        }
+        if (res.filePath && (res.filePath.toLowerCase().endsWith('.mid') || res.filePath.toLowerCase().endsWith('.midi'))) {
+          useStore.getState().showToast('Standard MIDI files (.mid) require channel mapping. Please open a .muz project.', 'info')
+          return
+        }
+
+        let parsed: any
+        try {
+          parsed = JSON.parse(res.data)
+        } catch {
+          useStore.getState().showToast('File is corrupted or not a valid JSON/MUZ project.', 'error')
+          return
+        }
+
+        if (!parsed || typeof parsed !== 'object' || (!Array.isArray(parsed.tracks) && !Array.isArray(parsed.notes) && parsed.format !== 'muztrack')) {
+          useStore.getState().showToast('Invalid project file: missing valid track/note structures.', 'error')
+          return
+        }
+
         if (parsed.format === 'muztrack') {
           const data = parsed
           useStore.getState().loadState({
@@ -275,7 +316,7 @@ function App() {
             automationLanes: {},
             bpm: data.bpm || 120,
             timeSignature: data.timeSignature || '4/4',
-            tracks: data.tracks.map((t: any) => ({
+            tracks: (data.tracks || []).map((t: any) => ({
               ...t,
               instrument: t.instrument || 'synth',
               volume: t.volume ?? 0.8,
@@ -283,7 +324,7 @@ function App() {
               muted: false,
               soloed: false
             })),
-            notes: data.notes.map((n: any) => ({
+            notes: (data.notes || []).map((n: any) => ({
               id: n.id || `n_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
               trackId: n.trackId,
               pitch: n.pitch,
@@ -297,16 +338,30 @@ function App() {
           useStore.getState().tracks.forEach(track => { audioEngine.createInstrument(track.id, track.instrument || 'synth') })
           const state = useStore.getState()
           if (state.tracks.length > 0) state.setActiveTrackId(state.tracks[0].id)
+          state.setIsStartScreenOpen(false)
+          ipc.invoke('set-fullscreen', true).catch(() => {})
           useStore.getState().showToast(`Opened .muztrack project (${data.tracks.length} tracks)`, 'success')
           return
         }
-        useStore.getState().loadState({ ...parsed, automationTargets: parsed.automationTargets ?? {}, automationLanes: parsed.automationLanes ?? {}, projectFilePath: res.filePath, projectName: res.filePath.split(/[\\/]/).pop().replace('.muz', '') })
+        useStore.getState().loadState({ ...parsed, automationTargets: parsed.automationTargets ?? {}, automationLanes: parsed.automationLanes ?? {}, projectFilePath: res.filePath, projectName: res.filePath.split(/[\\/]/).pop().replace(/\.(muz|muztrack)$/i, '') })
         audioEngine.setBpm(parsed.bpm || 120)
         useStore.getState().tracks.forEach(track => { audioEngine.createInstrument(track.id, track.instrument || 'synth') })
         const state = useStore.getState()
         const activeExists = state.tracks.some(t => t.id === state.activeTrackId)
         if (!activeExists && state.tracks.length > 0) state.setActiveTrackId(state.tracks[0].id)
-      } catch (err) { console.error(err); useStore.getState().showToast('Failed to load project', 'error') }
+        state.setIsStartScreenOpen(false)
+        ipc.invoke('set-fullscreen', true).catch(() => {})
+        saveRecentProject({
+          name: res.filePath.split(/[\\/]/).pop().replace(/\.(muz|muztrack)$/i, ''),
+          filePath: res.filePath,
+          bpm: parsed.bpm || 120,
+          trackCount: (parsed.tracks || []).length
+        })
+        useStore.getState().showToast(`Opened ${res.filePath.split(/[\\/]/).pop()}`, 'success')
+      } catch (err) {
+        console.error(err)
+        useStore.getState().showToast('Failed to load project: Corrupted or unreadable file', 'error')
+      }
     } else {
       const input = document.createElement('input')
       input.type = 'file'; input.accept = '.muz,.muztrack'
@@ -637,11 +692,23 @@ function App() {
       } catch (e) {
         console.error('Failed to load default preferences on new project', e)
       }
+
+      // Switch window to fullscreen for workspace
+      const ipc = (window as any).ipcRenderer
+      if (ipc && typeof ipc.invoke === 'function') {
+        ipc.invoke('set-fullscreen', true).catch(() => {})
+      }
     }, 200)
   }
 
   const handleNewProject = () => {
-    setShowNewProjectConfirm(true)
+    const notes = useStore.getState().notes
+    const isDirty = useStore.getState().isDirty
+    if (notes.length === 0 && !isDirty) {
+      confirmNewProject()
+    } else {
+      setShowNewProjectConfirm(true)
+    }
   }
 
   useEffect(() => {
@@ -670,6 +737,17 @@ function App() {
         state.setActiveTrackId(state.tracks[0].id)
       }
     }
+
+    // Auto-open Start Hub on startup if enabled
+    const showStartup = localStorage.getItem('musegrid_show_start_screen') !== 'false'
+    if (showStartup) {
+      useStore.getState().setIsStartScreenOpen(true)
+    } else {
+      const ipc = (window as any).ipcRenderer
+      if (ipc && typeof ipc.invoke === 'function') {
+        ipc.invoke('set-fullscreen', true).catch(() => {})
+      }
+    }
   }, [])
 
   return (
@@ -679,13 +757,7 @@ function App() {
       <div className="glass-panel" style={{ height: '54px', display: 'flex', alignItems: 'center', padding: '0 16px', gap: '14px', borderBottom: '1px solid rgba(255, 255, 255, 0.06)', zIndex: 10 }}>
         
         {/* Brand & Project Identity */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexShrink: 0 }}>
-          <div style={{ userSelect: 'none', cursor: 'default' }}>
-            <span style={{ fontWeight: 900, fontSize: '16px', letterSpacing: '0.12em', color: '#f0f3fa', fontFamily: "'Inter', sans-serif" }}>
-              MUSE<span style={{ color: '#00e6ff' }}>GRID</span>
-            </span>
-          </div>
-
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
           {/* Project File Chip */}
           <div style={{
             display: 'flex',
@@ -887,15 +959,38 @@ function App() {
 
         {/* Right Workspace Controls */}
         <div style={{ display: 'flex', gap: '7px', marginLeft: 'auto', alignItems: 'center', flexShrink: 0 }}>
-          {/* New Project */}
+          {/* Start Hub */}
           <button
-            style={{ display: 'flex', alignItems: 'center', gap: '5px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#d0d5e2', borderRadius: '6px', padding: '5px 10px', cursor: 'pointer', fontSize: '11px', fontWeight: 600, transition: 'all 0.12s' }}
-            onClick={handleNewProject}
-            title="Start New Project"
-            onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.1)'; e.currentTarget.style.color = '#fff' }}
-            onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = '#d0d5e2' }}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              background: 'linear-gradient(135deg, rgba(77, 171, 247, 0.16) 0%, rgba(139, 92, 246, 0.16) 100%)',
+              border: '1px solid rgba(139, 92, 246, 0.35)',
+              color: '#fff',
+              borderRadius: '6px',
+              padding: '5px 11px',
+              cursor: 'pointer',
+              fontSize: '11px',
+              fontWeight: 700,
+              boxShadow: '0 2px 8px rgba(77, 171, 247, 0.12)',
+              transition: 'all 0.15s ease'
+            }}
+            onClick={() => {
+              setIsInitialLaunch(false)
+              useStore.getState().setIsStartScreenOpen(true)
+            }}
+            title="Open Studio Start Hub (Templates, AI & Library)"
+            onMouseEnter={e => {
+              e.currentTarget.style.background = 'linear-gradient(135deg, rgba(77, 171, 247, 0.28) 0%, rgba(139, 92, 246, 0.28) 100%)'
+              e.currentTarget.style.borderColor = 'rgba(139, 92, 246, 0.55)'
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.background = 'linear-gradient(135deg, rgba(77, 171, 247, 0.16) 0%, rgba(139, 92, 246, 0.16) 100%)'
+              e.currentTarget.style.borderColor = 'rgba(139, 92, 246, 0.35)'
+            }}
           >
-            <IconNewFile size={13} /> New
+            <IconLayers size={13} style={{ color: '#4dabf7' }} /> Start Hub
           </button>
 
           {/* Save */}
@@ -941,9 +1036,16 @@ function App() {
                       const projectData = getProjectDataString()
                       const filePath = await ipc.invoke('save-project', projectData)
                       if (filePath) {
-                        state.setProjectInfo({ projectFilePath: filePath, projectName: filePath.split(/[\\/]/).pop().replace('.muz', '') })
+                        const pName = filePath.split(/[\\/]/).pop().replace('.muz', '')
+                        state.setProjectInfo({ projectFilePath: filePath, projectName: pName })
                         state.setIsDirty(false)
                         state.showToast('Project saved as new file', 'success')
+                        saveRecentProject({
+                          name: pName,
+                          filePath: filePath,
+                          bpm: state.bpm,
+                          trackCount: state.tracks.length
+                        })
                       }
                     }
                   }
@@ -961,17 +1063,6 @@ function App() {
               </div>
             )}
           </div>
-
-          {/* Open */}
-          <button
-            style={{ display: 'flex', alignItems: 'center', gap: '5px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#d0d5e2', borderRadius: '6px', padding: '5px 10px', cursor: 'pointer', fontSize: '11px', fontWeight: 600, transition: 'all 0.12s' }}
-            title="Open Project or .muztrack Grid (Ctrl+O)"
-            onClick={handleOpenProject}
-            onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.1)'; e.currentTarget.style.color = '#fff' }}
-            onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = '#d0d5e2' }}
-          >
-            <IconOpen size={13} /> Open
-          </button>
 
           {/* Score View */}
           <button
@@ -1716,6 +1807,17 @@ function App() {
 
       <ImportAudioModal />
       <HelpPane />
+      <StartScreenModal
+        onNewProject={() => {
+          setIsInitialLaunch(false)
+          handleNewProject()
+        }}
+        onOpenProject={() => {
+          setIsInitialLaunch(false)
+          handleOpenProject()
+        }}
+        isInitialLaunch={isInitialLaunch}
+      />
       <ScriptingModal />
       <SynthStudioModal />
       <DrumDesignerModal />

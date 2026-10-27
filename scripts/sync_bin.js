@@ -11,3 +11,9 @@ if (fs.existsSync(distDir)) {
   }
   fs.cpSync(distDir, binDistDir, { recursive: true })
 }
+
+const rootIcon = path.join(projectRoot, 'icon.ico')
+const binIcon = path.join(projectRoot, 'bin', 'icon.ico')
+if (fs.existsSync(rootIcon)) {
+  fs.copyFileSync(rootIcon, binIcon)
+}

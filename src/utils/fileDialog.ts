@@ -23,9 +23,32 @@ export const selectAndReadFile = async (options: {
         ]
       })
       if (!res) return null
+
+      let arrayBuffer: ArrayBuffer
+      if (typeof res.data === 'string') {
+        let base64 = res.data
+        if (base64.startsWith('data:') && base64.includes(';base64,')) {
+          base64 = base64.split(';base64,')[1]
+        }
+        const binaryString = atob(base64)
+        const bytes = new Uint8Array(binaryString.length)
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i)
+        }
+        arrayBuffer = bytes.buffer
+      } else if (res.data instanceof ArrayBuffer) {
+        arrayBuffer = res.data
+      } else if (Array.isArray(res.data)) {
+        arrayBuffer = new Uint8Array(res.data).buffer
+      } else if (res.data && typeof res.data === 'object' && res.data.buffer instanceof ArrayBuffer) {
+        arrayBuffer = res.data.buffer
+      } else {
+        arrayBuffer = new ArrayBuffer(0)
+      }
+
       return {
-        name: res.name,
-        data: res.data
+        name: res.name || 'file',
+        data: arrayBuffer
       }
     } catch (err) {
       console.warn('IPC show-open-dialog failed, falling back to input element:', err)

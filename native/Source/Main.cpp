@@ -214,9 +214,9 @@ public:
             setContentNonOwned(browserComponent.get(), false);
 
             setResizable(true, true);
-            setResizeLimits(1024, 600, 3840, 2160);
-            setSize(1420, 800);
-            centreWithSize(1420, 800);
+            setResizeLimits(960, 580, 3840, 2160);
+            setSize(1080, 700);
+            centreWithSize(1080, 700);
 
             juce::Logger::writeToLog("distDir: " + distDir.getFullPathName() + " (exists: " + juce::String(distDir.exists() ? "YES" : "NO") + ")");
             juce::Logger::writeToLog("Navigating to: " + browserComponent->getResourceProviderRoot());
@@ -225,7 +225,6 @@ public:
             browserComponent->goToURL(browserComponent->getResourceProviderRoot());
 
             setVisible(true);
-            setFullScreen(true);
         }
 
         void closeButtonPressed() override

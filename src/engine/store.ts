@@ -1295,6 +1295,8 @@ export interface AppState {
   setIsRightPaneVisible: (v: boolean) => void
   isHelpPaneVisible: boolean
   setIsHelpPaneVisible: (v: boolean) => void
+  isStartScreenOpen: boolean
+  setIsStartScreenOpen: (v: boolean) => void
 
   // Undo/Redo
   commitHistory: () => void
@@ -1560,6 +1562,7 @@ export const useStore = create<AppState>((originalSet, get, api) => {
     noteInspectorEnabled: false,
     isRightPaneVisible: false,
     isHelpPaneVisible: false,
+    isStartScreenOpen: false,
     deduplicateEnabled: true,
     deduplicateOverlapThreshold: 0.5,
     deduplicateProximityTolerance: 12,
@@ -2443,6 +2446,7 @@ if (firstTrack) {
     setNoteInspectorEnabled: (v) => set({ noteInspectorEnabled: v }),
     setIsRightPaneVisible: (v) => set({ isRightPaneVisible: v }),
     setIsHelpPaneVisible: (v) => set({ isHelpPaneVisible: v }),
+    setIsStartScreenOpen: (v) => set({ isStartScreenOpen: v }),
     setSnapResolution: (v) => set({ snapResolution: v }),
     setGridBlockTicks: (v) => set({ gridBlockTicks: Math.max(12, Math.min(768, Math.round(v))) }),
     setGridShadeEvery: (v) => set({ gridShadeEvery: Math.max(1, Math.min(32, Math.round(v))) }),
@@ -3442,3 +3446,63 @@ useStore.subscribe((state, prevState) => {
     }
   }
 })
+
+export interface RecentProjectItem {
+  id: string
+  name: string
+  filePath?: string
+  lastModified: number
+  bpm?: number
+  trackCount?: number
+  previewSnippet?: string
+}
+
+export function getRecentProjects(): RecentProjectItem[] {
+  try {
+    const raw = localStorage.getItem('musegrid_recent_projects')
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed)) return parsed
+    }
+  } catch (e) {}
+  return []
+}
+
+export function saveRecentProject(item: Omit<RecentProjectItem, 'id' | 'lastModified'> & { id?: string }): void {
+  try {
+    const list = getRecentProjects()
+    const id = item.id || (item.filePath ? item.filePath : 'proj_' + Date.now())
+    const filtered = list.filter(p => (item.filePath ? p.filePath !== item.filePath : p.name !== item.name))
+    const updated: RecentProjectItem[] = [
+      {
+        id,
+        name: item.name || 'Untitled Project',
+        filePath: item.filePath,
+        lastModified: Date.now(),
+        bpm: item.bpm,
+        trackCount: item.trackCount,
+        previewSnippet: item.previewSnippet
+      },
+      ...filtered
+    ].slice(0, 12)
+    localStorage.setItem('musegrid_recent_projects', JSON.stringify(updated))
+  } catch (e) {}
+}
+
+export function removeRecentProject(idOrPath: string): RecentProjectItem[] {
+  try {
+    const list = getRecentProjects()
+    const updated = list.filter(p => p.id !== idOrPath && p.filePath !== idOrPath)
+    localStorage.setItem('musegrid_recent_projects', JSON.stringify(updated))
+    return updated
+  } catch (e) {
+    return []
+  }
+}
+
+export function clearAllRecentProjects(): void {
+  try {
+    localStorage.removeItem('musegrid_recent_projects')
+  } catch (e) {}
+}
+

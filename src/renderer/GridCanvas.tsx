@@ -32,6 +32,31 @@ import { getEdoStepInfo } from '../utils/edoNomenclature'
 const TRACK_COLORS = ['#4dabf7', '#ff9900', '#69db7c', '#da77f2', '#ff6b6b', '#00e6ff', '#ffd43b']
 const newId = () => Math.random().toString(36).substr(2, 9)
 
+export function normalizeDrumPitch(pad: number): number {
+  if (pad >= 35 && pad <= 81) {
+    switch (pad) {
+      case 35: case 36: return 0  // Kick Drum
+      case 38: case 40: return 1  // Snare Drum
+      case 37:          return 15 // Rimshot
+      case 39:          return 4  // Hand Clap
+      case 41: case 43: case 45: return 5 // Low Tom
+      case 47: case 48: return 6  // Mid Tom
+      case 50:          return 7  // High Tom
+      case 42: case 44: return 2  // Closed Hi-Hat
+      case 46:          return 3  // Open Hi-Hat
+      case 49: case 52: case 55: case 57: return 8  // Crash
+      case 51: case 53: case 59: return 9  // Ride
+      case 56:          return 10 // Cowbell
+      case 54:          return 11 // Tambourine
+      case 64:          return 12 // Lo-Conga
+      case 63:          return 13 // Hi-Conga
+      case 75:          return 14 // Claves
+      default:          return ((pad % 16) + 16) % 16
+    }
+  }
+  return pad
+}
+
 function getComplementaryColor(hex: string, isSelected: boolean): string {
   if (isSelected) {
     return '#151820'
@@ -222,16 +247,17 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   const maxPanY = -Math.max(0, totalHeight - canvasSize.height)
 
   const getPitchY = useCallback((p: number) => {
+    const effP = isDrum ? normalizeDrumPitch(Math.round(p)) : p
     if (effectiveRowOrder) {
-      const idx = effectiveRowOrder.indexOf(String(Math.round(p)))
+      const idx = effectiveRowOrder.indexOf(String(Math.round(effP)))
       if (idx !== -1) {
-        const frac = p - Math.round(p)
+        const frac = effP - Math.round(effP)
         return idx * gridSizeY - frac * gridSizeY
       }
       return -1000 // hide
     }
-    return ((highestPitch - p) / stepSize) * gridSizeY
-  }, [effectiveRowOrder, highestPitch, stepSize, gridSizeY])
+    return ((highestPitch - effP) / stepSize) * gridSizeY
+  }, [isDrum, effectiveRowOrder, highestPitch, stepSize, gridSizeY])
 
   const getYPitch = useCallback((y: number) => {
     if (effectiveRowOrder) {
@@ -252,7 +278,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   }, [effectiveRowOrder, highestPitch, stepSize])
 
   const getCenterPanYForPitch = useCallback((targetPitch: number = 60) => {
-    if (isDrum) return 0
+    if (isDrum) return maxPanY
     let pitchY = getPitchY(targetPitch)
     if (pitchY < 0 && effectiveRowOrder && effectiveRowOrder.length > 0) {
       pitchY = Math.floor(effectiveRowOrder.length / 2) * gridSizeY
@@ -261,7 +287,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
     const worldY = (TIMELINE_HEIGHT + pitchY + gridSizeY / 2) * zoom
     const targetY = -(worldY - vHeight / 2)
     return Math.min(0, Math.max(maxPanY, targetY))
-  }, [isDrum, getPitchY, effectiveRowOrder, canvasSize.height, gridSizeY, zoom, maxPanY])
+  }, [isDrum, maxPanY, getPitchY, effectiveRowOrder, canvasSize.height, gridSizeY, zoom])
 
   const prevTrackConfigRef = useRef<{
     trackId: string
@@ -296,7 +322,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
       initialPanCenteredRef.current = true
       setPan({
         x: 0,
-        y: isDrum ? 0 : getCenterPanYForPitch(60)
+        y: isDrum ? maxPanY : getCenterPanYForPitch(60)
       })
       return
     }
@@ -305,12 +331,12 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
       initialPanCenteredRef.current = true
       setPan(p => ({
         ...p,
-        y: isDrum ? 0 : getCenterPanYForPitch(60)
+        y: isDrum ? maxPanY : getCenterPanYForPitch(60)
       }))
       return
     }
 
-    if (!isDrum && (changedEdo || changedTrack)) {
+    if (changedEdo || changedTrack) {
       prevTrackConfigRef.current = {
         ...prevTrackConfigRef.current,
         trackId: currentTrack.id,
@@ -318,7 +344,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         edoPreset: currentTrack.edoPreset
       }
       if (canvasSize.height > 0) {
-        setPan(p => ({ ...p, y: getCenterPanYForPitch(60) }))
+        setPan(p => ({ ...p, y: isDrum ? maxPanY : getCenterPanYForPitch(60) }))
       }
     }
   }, [

@@ -3309,7 +3309,8 @@ export default function LeftPane() {
       })
       if (!file) return
 
-      const midi = new Midi(file.data)
+      const midiBytes = file.data instanceof Uint8Array ? file.data : new Uint8Array(file.data)
+      const midi = new Midi(midiBytes)
       setMidiImportData({
         midi,
         trackId,
@@ -3321,8 +3322,8 @@ export default function LeftPane() {
         inheritTempo: false
       })
     } catch (err) {
-      console.error(err)
-      useStore.getState().showToast('Failed to parse MIDI file', 'error')
+      console.error('Failed to parse MIDI file:', err)
+      useStore.getState().showToast('Failed to parse MIDI file: invalid MIDI data', 'error')
     }
   }
 

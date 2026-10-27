@@ -100,6 +100,7 @@ export default function HelpPane() {
     { id: 'drum_designer', label: 'Drum Designer Synthesis', icon: <IconDrum size={14} /> },
     { id: 'audio_recording', label: 'Audio Recording & Inputs', icon: <IconMic size={14} /> },
     { id: 'microtonal_edo', label: 'Microtonal Tuning & Scala', icon: <IconMusic size={14} /> },
+    { id: 'custom_dsp_guide', label: 'Custom DSP & AudioWorklet', icon: <IconTerminal size={14} /> },
     { id: 'system_console', label: 'System Console & Diagnostics', icon: <IconTerminal size={14} /> },
   ];
 
@@ -1705,6 +1706,113 @@ console.log('Scale degree Roman numeral:', degree); // 'I'`}
                 <p style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
                   When exporting projects composed in non-12-EDO tunings, MuseGrid generates standard Huygens-Fokker <code>.scl</code> tuning files alongside the MIDI data. Loading the companion <code>.scl</code> file into compatible synthesizers (e.g., Vital, Surge XT, Pianoteq, Serum) retunes their voice engines to match the exact project intonation.
                 </p>
+              </div>
+            )}
+
+            {activeSection === 'custom_dsp_guide' && (
+              <div>
+                <h1 style={{ margin: '0 0 20px', color: '#fff' }}>Custom DSP & AudioWorklet Coding</h1>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>
+                  MuseGrid features a real-time, sample-accurate <strong>AudioWorklet DSP Engine</strong>. You can write custom audio effects, waveshapers, delays, and filters in JavaScript that execute directly inside the audio thread at native speeds.
+                </p>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Where to Write Custom DSP</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>FX Rack Custom FX</strong>: In any track's FX Rack, click <em>+ Add FX</em> and select <em>Custom DSP FX</em>. This opens the code editor with live compiling.</li>
+                  <li><strong>Scripting Window (F8)</strong>: Use <code>Muse.fx.createOfflineEffect(...)</code> or <code>Muse.audioEngine.registerCustomSynth(...)</code> to inject custom DSP nodes programmatically.</li>
+                </ul>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>The DSP Function Arguments</h3>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>
+                  In the Custom FX editor, your code executes for every audio block (typically 128 samples per block). Your code is given 7 variables:
+                </p>
+                <div style={{ background: 'rgba(255,255,255,0.03)', padding: '15px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.05)', marginBottom: '15px' }}>
+                  <ul style={{ color: '#ccc', lineHeight: 1.7, fontSize: '13px', margin: 0 }}>
+                    <li><code>input</code>: <code>Float32Array[]</code> — Incoming audio channels (<code>input[0]</code> = Left, <code>input[1]</code> = Right).</li>
+                    <li><code>output</code>: <code>Float32Array[]</code> — Outgoing audio channels (<code>output[0]</code> = Left, <code>output[1]</code> = Right).</li>
+                    <li><code>params</code>: Key-value map of your UI sliders (e.g. <code>params.wet</code>, <code>params.drive</code>).</li>
+                    <li><code>state</code>: Persistent memory object. Values stored here survive between audio blocks (essential for feedback, delays, filters).</li>
+                    <li><code>sampleRate</code>: The current system sample rate (e.g. 44100 or 48000 Hz).</li>
+                    <li><code>currentTime</code>: Audio context clock in seconds.</li>
+                    <li><code>context</code>: Track and block metadata (<code>{`{ trackId, bpm, blockSize, channelCount }`}</code>).</li>
+                  </ul>
+                </div>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Standard DSP Processing Template</h3>
+                <pre style={{ background: 'rgba(0,0,0,0.3)', padding: '12px', borderRadius: '6px', color: '#a5d8ff', fontSize: '12px', overflowX: 'auto', border: '1px solid rgba(77,171,247,0.2)' }} className="thin-scroll">
+{`// 1. Read custom parameters
+const wet = params.wet ?? 1.0;
+const drive = params.drive ?? 2.0;
+
+// 2. Initialize persistent state (runs once)
+if (!state.initialized) {
+  state.initialized = true;
+  state.phase = 0;
+}
+
+// 3. Loop over stereo channels
+for (let ch = 0; ch < input.length; ch++) {
+  const inData = input[ch];
+  const outData = output[ch];
+
+  for (let i = 0; i < inData.length; i++) {
+    const drySample = inData[i];
+
+    // --- YOUR DSP MATH HERE ---
+    // Example: Soft-clipping hyperbolic tangent saturation
+    const wetSample = Math.tanh(drySample * drive);
+
+    // 4. Mix dry and wet signals
+    outData[i] = drySample * (1 - wet) + wetSample * wet;
+  }
+}`}
+                </pre>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Example: Stereo Feedback Echo Delay</h3>
+                <pre style={{ background: 'rgba(0,0,0,0.3)', padding: '12px', borderRadius: '6px', color: '#a5d8ff', fontSize: '12px', overflowX: 'auto', border: '1px solid rgba(77,171,247,0.2)' }} className="thin-scroll">
+{`const delayTime = params.time ?? 0.3; // Seconds
+const feedback = params.feedback ?? 0.45;
+const wet = params.wet ?? 0.5;
+
+// Allocate circular delay buffer (up to 2 seconds)
+const maxSamples = Math.floor(sampleRate * 2.0);
+if (!state.bufferL) {
+  state.bufferL = new Float32Array(maxSamples);
+  state.bufferR = new Float32Array(maxSamples);
+  state.writeIdx = 0;
+}
+
+const delaySamples = Math.max(1, Math.min(maxSamples - 1, Math.floor(delayTime * sampleRate)));
+const inL = input[0];
+const inR = input[1];
+const outL = output[0];
+const outR = output[1];
+
+for (let i = 0; i < inL.length; i++) {
+  let readIdx = state.writeIdx - delaySamples;
+  if (readIdx < 0) readIdx += maxSamples;
+
+  const delayedL = state.bufferL[readIdx];
+  const delayedR = state.bufferR[readIdx];
+
+  // Write into circular buffer with feedback
+  state.bufferL[state.writeIdx] = inL[i] + delayedL * feedback;
+  state.bufferR[state.writeIdx] = inR[i] + delayedR * feedback;
+
+  state.writeIdx = (state.writeIdx + 1) % maxSamples;
+
+  // Mix output
+  outL[i] = inL[i] * (1 - wet) + delayedL * wet;
+  outR[i] = inR[i] * (1 - wet) + delayedR * wet;
+}`}
+                </pre>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Competitive Performance Tips</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Zero Garbage Collection</strong>: Never call <code>new Float32Array(...)</code> inside the sample loop. Always allocate memory inside <code>if (!state.initialized)</code>.</li>
+                  <li><strong>Fast Bitwise Wrapping</strong>: When your buffer size is a power of 2 (e.g. 65536), use <code>index & 65535</code> instead of <code>index % 65536</code> for lightning-fast modulo operations.</li>
+                  <li><strong>Fast Math</strong>: Use <code>x | 0</code> instead of <code>Math.floor(x)</code> for integer truncation.</li>
+                </ul>
               </div>
             )}
 

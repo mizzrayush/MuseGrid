@@ -1247,6 +1247,7 @@ export interface AppState {
   setCompleteNotesOnPause: (val: boolean) => void
   setIsPlaying: (v: boolean) => void
   addNote: (note: Note) => void
+  addNotes: (notes: Note[]) => void
   updateNote: (id: string, updates: Partial<Note>) => void
   updateNotes: (ids: string[], updates: Partial<Note>) => void
   removeNote: (id: string) => void
@@ -1815,6 +1816,7 @@ if (firstTrack) {
     setDeduplicateProximityTolerance: (val) => set({ deduplicateProximityTolerance: val }),
 
     addNote: (note) => set((state) => ({ notes: deduplicateNotes([...state.notes, note]) })),
+    addNotes: (newNotes) => set((state) => ({ notes: deduplicateNotes([...state.notes, ...newNotes]) })),
     updateNote: (id, updates) => set((state) => ({
       notes: deduplicateNotes(state.notes.map(n => n.id === id ? { ...n, ...updates } : n))
     })),

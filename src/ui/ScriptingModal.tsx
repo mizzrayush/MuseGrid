@@ -344,6 +344,7 @@ interface MuseAPI {
   transcribeToTrack(buffer: AudioBuffer, name: string): Promise<string>;
   exportScore(options: { trackId: string; format?: 'musicxml'; includeLyrics?: boolean }): Promise<void>;
   exportAudio(filename: string, options?: any): Promise<boolean>;
+  sleep(ms: number): Promise<void>;
 }
 
 declare const Muse: MuseAPI;
@@ -352,6 +353,25 @@ declare const Tone: any;
 `;
 
 const SCRIPT_TEMPLATES = [
+  {
+    name: 'Test Cancellable Loop (100 Hellos)',
+    code: `// MuseGrid Test Script: 100 Hellos with Cancellable Timer
+// Tests the red Cancel button and RUNNING status indicator!
+// You can click the red 'Cancel' button or press Ctrl+C at any time.
+
+console.log("=== Starting 100 Hello Test Script ===");
+console.log("Notice the red 'Cancel' button and 'RUNNING' badge in the header!");
+console.log("Press 'Cancel' or hit Ctrl+C at any time to abort.");
+
+for (let i = 1; i <= 100; i++) {
+  console.log("[" + i + "/100] Hello from MuseGrid Scripting! (Elapsed: " + i + "s)");
+  await Muse.sleep(1000); // 1-second pause per loop
+}
+
+console.log("=== Completed all 100 iterations successfully! ===");
+MuseState.showToast("Test script finished successfully!", "success");
+`
+  },
   {
     name: 'Generate Neo-Soul Chords',
     code: `// Generate rich Neo-Soul chord progressions in the active track
@@ -1156,6 +1176,11 @@ interface ScriptHistoryItem {
   code: string;
   preNotes: Note[];
   preTracks: Track[];
+  preLoopStart?: number;
+  preLoopEnd?: number;
+  preLoopEnabled?: boolean;
+  preBpm?: number;
+  preActiveTrackId?: string | null;
 }
 
 let scriptHistoryCache: ScriptHistoryItem[] = [];
@@ -1165,7 +1190,7 @@ export const ScriptingModal: React.FC = () => {
   const setIsVisible = useStore(state => state.setIsScriptingModalVisible);
   const scriptContent = useStore(state => state.scriptContent);
   const setScriptContent = useStore(state => state.setScriptContent);
-  
+
   const [logs, setLogs] = useState<{ message: string, type: 'info' | 'error' | 'success' }[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [activePrompt, setActivePrompt] = useState<{
@@ -1223,7 +1248,7 @@ export const ScriptingModal: React.FC = () => {
         const newRatio = relativeY / rect.height;
         setConsoleHeightRatio(Math.max(0.15, Math.min(0.85, newRatio)));
       }
-      
+
       if (isDraggingVerticalDivider.current && outerContainerRef.current) {
         const rect = outerContainerRef.current.getBoundingClientRect();
         const relativeX = e.clientX - rect.left;
@@ -1271,7 +1296,7 @@ export const ScriptingModal: React.FC = () => {
       noSemanticValidation: false,
       noSyntaxValidation: false,
     });
-    
+
     monaco.languages.typescript.javascriptDefaults.addExtraLib(
       MUSE_TYPES,
       'ts:filename/muse.d.ts'
@@ -1288,7 +1313,7 @@ export const ScriptingModal: React.FC = () => {
     try {
       audioEngine.stop();
       ScriptAPI.Tone.Transport.stop();
-    } catch (_) {}
+    } catch (_) { }
     addLog('Script execution cancelled by user.', 'error');
     useStore.getState().showToast('Script cancelled', 'info');
     setIsRunning(false);
@@ -1300,11 +1325,20 @@ export const ScriptingModal: React.FC = () => {
     setIsRunning(true);
     addLog('Executing script...', 'info');
 
+    // Yield to the browser frame so React updates and the DOM paints the red Cancel button and RUNNING badge BEFORE script execution starts
+    await new Promise(resolve => setTimeout(resolve, 80));
+
     // Snapshot state before running script
-    const preNotes = JSON.parse(JSON.stringify(useStore.getState().notes));
-    const preTracks = JSON.parse(JSON.stringify(useStore.getState().tracks));
+    const currentStoreState = useStore.getState();
+    const preNotes = JSON.parse(JSON.stringify(currentStoreState.notes));
+    const preTracks = JSON.parse(JSON.stringify(currentStoreState.tracks));
+    const preLoopStart = currentStoreState.loopStart;
+    const preLoopEnd = currentStoreState.loopEnd;
+    const preLoopEnabled = currentStoreState.loopEnabled;
+    const preBpm = currentStoreState.bpm;
+    const preActiveTrackId = currentStoreState.activeTrackId;
     const codeToRun = scriptContent;
-    
+
     const customConsole = {
       log: (...args: any[]) => {
         if (cancelScriptRef.current) return;
@@ -1347,13 +1381,13 @@ export const ScriptingModal: React.FC = () => {
 
     try {
       // Create an async function context so users can use top-level await
-      const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-      
+      const AsyncFunction = Object.getPrototypeOf(async function () { }).constructor;
+
       // Inject our API and console wrapper into the scope
       const executor = new AsyncFunction('MuseState', 'Muse', 'Tone', 'console', codeToRun);
-      
+
       await executor(ScriptAPI.getState(), ScriptAPI, ScriptAPI.Tone, customConsole);
-      
+
       if (cancelScriptRef.current) {
         addLog('Script execution cancelled.', 'info');
         return;
@@ -1375,7 +1409,12 @@ export const ScriptingModal: React.FC = () => {
         name: scriptName,
         code: codeToRun,
         preNotes,
-        preTracks
+        preTracks,
+        preLoopStart,
+        preLoopEnd,
+        preLoopEnabled,
+        preBpm,
+        preActiveTrackId
       };
 
       setHistoryList(prev => {
@@ -1435,7 +1474,7 @@ export const ScriptingModal: React.FC = () => {
           return nativeText;
         }
       }
-    } catch (_) {}
+    } catch (_) { }
 
     // 2. Try standard navigator.clipboard
     try {
@@ -1443,13 +1482,13 @@ export const ScriptingModal: React.FC = () => {
         const text = await navigator.clipboard.readText();
         if (typeof text === 'string') return text;
       }
-    } catch (_) {}
+    } catch (_) { }
 
     return '';
   };
 
   return (
-    <div className="animate-modal-bg" 
+    <div className="animate-modal-bg"
       onKeyDown={(e) => {
         e.stopPropagation();
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && isRunning) {
@@ -1461,31 +1500,31 @@ export const ScriptingModal: React.FC = () => {
         }
       }}
       style={{
-      position: 'fixed', inset: 0, 
-      background: 'rgba(8, 9, 14, 0.78)', 
-      backdropFilter: 'blur(10px)',
-      WebkitBackdropFilter: 'blur(10px)',
-      zIndex: 100000, 
-      display: 'flex', alignItems: 'center', justifyContent: 'center', 
-      padding: '24px'
-    }}>
+        position: 'fixed', inset: 0,
+        background: 'rgba(8, 9, 14, 0.78)',
+        backdropFilter: 'blur(10px)',
+        WebkitBackdropFilter: 'blur(10px)',
+        zIndex: 100000,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: '24px'
+      }}>
       <div className="animate-modal-card" style={{
         width: '100%', maxWidth: '1000px', height: '90%',
-        display: 'flex', flexDirection: 'column', 
-        border: '1px solid rgba(255,255,255,0.12)', borderRadius: '16px', 
-        boxShadow: '0 30px 80px rgba(0,0,0,0.85)', overflow: 'hidden', 
+        display: 'flex', flexDirection: 'column',
+        border: '1px solid rgba(255,255,255,0.12)', borderRadius: '16px',
+        boxShadow: '0 30px 80px rgba(0,0,0,0.85)', overflow: 'hidden',
         background: '#12131a'
       }}>
         {/* Header */}
         <div style={{
-          padding: '18px 24px', borderBottom: '1px solid rgba(255,255,255,0.06)', 
+          padding: '18px 24px', borderBottom: '1px solid rgba(255,255,255,0.06)',
           display: 'flex', justifyContent: 'space-between', alignItems: 'center',
           background: 'rgba(255,255,255,0.01)'
         }}>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <span style={{ fontSize: '20px' }}>&lt;/&gt;</span>
-              <span style={{ fontSize: '16px', fontWeight: 800, color: 'white', letterSpacing: '-0.02em' }}>MuseGrid Scripting Engine</span>
+              <span style={{ fontSize: '16px', fontWeight: 800, color: 'white', letterSpacing: '-0.02em' }}>Scripting Engine</span>
             </div>
             <div style={{ fontSize: '11px', color: '#666', marginTop: '2px' }}>
               Algorithmic Composition &amp; Custom DSP
@@ -1495,7 +1534,7 @@ export const ScriptingModal: React.FC = () => {
             <button
               onClick={handleLoadScript}
               style={{
-                background: 'rgba(255,255,255,0.05)', color: '#aaa', border: '1px solid rgba(255,255,255,0.1)', 
+                background: 'rgba(255,255,255,0.05)', color: '#aaa', border: '1px solid rgba(255,255,255,0.1)',
                 padding: '6px 12px', borderRadius: '6px', fontSize: '11px', fontWeight: 800,
                 cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.15s'
               }}
@@ -1516,7 +1555,7 @@ export const ScriptingModal: React.FC = () => {
               }}
               defaultValue=""
               style={{
-                background: 'rgba(255,255,255,0.05)', color: '#aaa', border: '1px solid rgba(255,255,255,0.1)', 
+                background: 'rgba(255,255,255,0.05)', color: '#aaa', border: '1px solid rgba(255,255,255,0.1)',
                 padding: '6px 12px', borderRadius: '6px', fontSize: '11px', fontWeight: 800,
                 cursor: 'pointer', appearance: 'none'
               }}
@@ -1529,7 +1568,7 @@ export const ScriptingModal: React.FC = () => {
             <button
               onClick={handleSaveScript}
               style={{
-                background: 'rgba(255,255,255,0.05)', color: '#aaa', border: '1px solid rgba(255,255,255,0.1)', 
+                background: 'rgba(255,255,255,0.05)', color: '#aaa', border: '1px solid rgba(255,255,255,0.1)',
                 padding: '6px 12px', borderRadius: '6px', fontSize: '11px', fontWeight: 800,
                 cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.15s'
               }}
@@ -1554,61 +1593,62 @@ export const ScriptingModal: React.FC = () => {
             >
               <IconHelp size={12} /> {rightPanelTab === 'docs' ? 'Console' : 'Help / API'}
             </button>
-            {isRunning && (
-              <span
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', position: 'relative' }}>
+              <button
+                onClick={isRunning ? handleCancelScript : executeScript}
                 style={{
-                  display: 'inline-flex',
+                  background: isRunning ? '#e03131' : '#40c057',
+                  color: 'white',
+                  border: 'none',
+                  padding: '6px 14px',
+                  borderRadius: '6px',
+                  fontSize: '11px',
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                  display: 'flex',
                   alignItems: 'center',
-                  gap: '5px',
-                  background: 'rgba(255, 82, 82, 0.12)',
-                  border: '1px solid rgba(255, 82, 82, 0.35)',
-                  padding: '4px 8px',
-                  borderRadius: '12px',
-                  fontSize: '10px',
-                  fontWeight: 700,
-                  color: '#ff6b6b',
-                  letterSpacing: '0.04em',
-                  textTransform: 'uppercase'
+                  gap: '6px',
+                  transition: 'all 0.15s ease'
                 }}
+                title={isRunning ? "Cancel Running Script (Ctrl+C)" : "Execute Script"}
               >
-                <span
+                {isRunning ? <IconStop size={12} /> : <IconPlay size={12} />}
+                {isRunning ? 'Cancel' : 'Run Script'}
+              </button>
+              {isRunning && (
+                <div
                   style={{
-                    width: '6px',
-                    height: '6px',
-                    borderRadius: '50%',
-                    background: '#ff6b6b',
-                    boxShadow: '0 0 6px #ff6b6b',
-                    display: 'inline-block'
+                    position: 'absolute',
+                    top: 'calc(100% + 2px)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    color: '#ff6b6b',
+                    whiteSpace: 'nowrap',
+                    letterSpacing: '0.02em',
+                    pointerEvents: 'none'
                   }}
-                />
-                Running
-              </span>
-            )}
-            <button 
-              onClick={isRunning ? handleCancelScript : executeScript} 
-              style={{
-                background: isRunning ? '#e03131' : '#40c057',
-                color: 'white',
-                border: 'none', 
-                padding: '6px 14px',
-                borderRadius: '6px',
-                fontSize: '11px',
-                fontWeight: 800,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                transition: 'all 0.15s ease'
-              }}
-              title={isRunning ? "Cancel Running Script (Ctrl+C)" : "Execute Script"}
-            >
-              {isRunning ? <IconStop size={12} /> : <IconPlay size={12} />}
-              {isRunning ? 'Cancel' : 'Run Script'}
-            </button>
-            <button 
+                >
+                  <span
+                    style={{
+                      width: '5px',
+                      height: '5px',
+                      borderRadius: '50%',
+                      background: '#ff6b6b',
+                      boxShadow: '0 0 6px #ff6b6b',
+                      display: 'inline-block'
+                    }}
+                  />
+                  Running
+                </div>
+              )}
+            </div>
+            <button
               onClick={() => setIsVisible(false)}
               style={{
-                background: 'none', border: 'none', color: '#666', 
+                background: 'none', border: 'none', color: '#666',
                 cursor: 'pointer', padding: '4px',
                 display: 'flex', alignItems: 'center'
               }}
@@ -1620,7 +1660,7 @@ export const ScriptingModal: React.FC = () => {
 
         {/* Content Body */}
         <div ref={outerContainerRef} style={{ display: 'flex', flex: 1, height: '0px', userSelect: (isDividerDragging || isVerticalDividerDragging) ? 'none' : 'auto' }}>
-          
+
           {/* Editor Side */}
           <div style={{ width: `${editorWidthRatio * 100}%`, display: 'flex', flexDirection: 'column', position: 'relative', background: '#0e0f14' }}>
             {!usePlainEditor ? (
@@ -1755,7 +1795,7 @@ export const ScriptingModal: React.FC = () => {
 
           {/* Right Side: Console or Docs */}
           <div ref={containerRef} style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#111', height: '100%', minWidth: 0, userSelect: isDividerDragging ? 'none' : 'auto' }}>
-            
+
             {/* Top Sub-Header Tabs */}
             <div style={{
               display: 'flex',
@@ -1806,7 +1846,7 @@ export const ScriptingModal: React.FC = () => {
                 {/* Console Output (Dynamic Height) */}
                 <div style={{ height: `${consoleHeightRatio * 100}%`, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
                   <div style={{
-                    padding: '8px 12px', borderBottom: '1px solid rgba(255,255,255,0.1)', 
+                    padding: '8px 12px', borderBottom: '1px solid rgba(255,255,255,0.1)',
                     display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                     fontSize: '12px', color: '#aaa', fontWeight: 600, background: '#141419'
                   }}>
@@ -1818,7 +1858,7 @@ export const ScriptingModal: React.FC = () => {
                   <div style={{ flex: 1, overflowY: 'auto', padding: '12px', display: 'flex', flexDirection: 'column', gap: '6px', fontFamily: 'monospace', fontSize: '12px' }} className="thin-scroll">
                     {logs.length === 0 && <span style={{ color: '#555' }}>No output yet...</span>}
                     {logs.map((log, i) => (
-                      <div key={i} style={{ 
+                      <div key={i} style={{
                         color: log.type === 'error' ? '#ff3366' : log.type === 'success' ? '#40c057' : '#ddd',
                         wordBreak: 'break-all'
                       }}>
@@ -1853,7 +1893,7 @@ export const ScriptingModal: React.FC = () => {
                 {/* Run History (Fills remaining height) */}
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#0e0f14', minHeight: 0 }}>
                   <div style={{
-                    padding: '8px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', 
+                    padding: '8px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)',
                     display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                     fontSize: '12px', color: '#aaa', fontWeight: 600, background: '#141419'
                   }}>
@@ -1883,25 +1923,39 @@ export const ScriptingModal: React.FC = () => {
                           <span style={{ fontSize: '11px', fontWeight: 700, color: '#ddd' }}>{item.name}</span>
                           <span style={{ fontSize: '9px', color: '#666' }}>{item.timestamp}</span>
                         </div>
-                        
+
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
                             // Revert script actions!
                             const state = useStore.getState();
                             state.commitHistory(); // Make it undoable
-                            
-                            // Restore notes and tracks
-                            useStore.setState({ notes: item.preNotes, tracks: item.preTracks });
-                            
+
+                            // Restore notes, tracks, loop region, and tempo
+                            useStore.setState({
+                              notes: item.preNotes,
+                              tracks: item.preTracks,
+                              ...(item.preLoopStart !== undefined ? { loopStart: item.preLoopStart } : {}),
+                              ...(item.preLoopEnd !== undefined ? { loopEnd: item.preLoopEnd } : {}),
+                              ...(item.preLoopEnabled !== undefined ? { loopEnabled: item.preLoopEnabled } : {}),
+                              ...(item.preBpm !== undefined ? { bpm: item.preBpm } : {}),
+                              ...(item.preActiveTrackId !== undefined ? { activeTrackId: item.preActiveTrackId } : {})
+                            });
+
+                            if (item.preBpm !== undefined) {
+                              audioEngine.setBpm(item.preBpm);
+                            }
+
                             // Re-create instruments on AudioEngine
                             item.preTracks.forEach(t => {
                               audioEngine.createInstrument(t.id, t.instrument || 'synth');
                             });
-                            
+
+                            state.requestCanvasAlign();
+
                             addLog(`Reverted script changes from: "${item.name}"`, 'success');
                             useStore.getState().showToast('Script modifications reverted!', 'success');
-                            
+
                             // Remove item from history list
                             const updated = historyList.filter(h => h.id !== item.id);
                             setHistoryList(updated);
@@ -2059,7 +2113,7 @@ export const ScriptingModal: React.FC = () => {
             display: 'flex', flexDirection: 'column', gap: '14px'
           }}>
             <div style={{ fontSize: '13px', fontWeight: 700, color: 'white' }}>{activePrompt.message}</div>
-            
+
             {activePrompt.options ? (
               <select
                 id="prompt-select-input"

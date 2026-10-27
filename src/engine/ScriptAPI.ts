@@ -75,6 +75,7 @@ function normalizeCustomFxConfig(config: ScriptCustomFxConfig): CustomFxConfig {
 export const ScriptAPI = {
   // Global State Access
   getState: () => useStore.getState(),
+  sleep: (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms)),
   
   // DSP & Tone.js Engine
   Tone: Tone,

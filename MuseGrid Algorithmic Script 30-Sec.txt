@@ -80,8 +80,9 @@ MuseState.addTrack({
 const uuid = () => Math.random().toString(36).substr(2, 9);
 
 // Helper for adding notes
+const notesToInsert = [];
 const insertNote = (trackId, time, pitch, duration = 48, velocity = 100) => {
-  MuseState.addNote({
+  notesToInsert.push({
     id: uuid(),
     trackId,
     time,
@@ -168,12 +169,17 @@ for (let bar = 0; bar < 16; bar++) {
   }
 }
 
-// 3. Finalize and Play
+// 3. Batch Commit Notes, Finalize and Play
+if (typeof MuseState.addNotes === 'function') {
+  MuseState.addNotes(notesToInsert);
+} else {
+  notesToInsert.forEach(n => MuseState.addNote(n));
+}
 MuseState.requestCanvasAlign();
 Muse.ui.toggleModal('scripting', false); // Close the modal window
 MuseState.showToast('Professional Electro Track Generated!', 'success');
 
 // Play automatically after a tiny delay to ensure state sets
 setTimeout(() => {
-  MuseState.setIsPlaying(true);
+  Muse.transport.play();
 }, 500);

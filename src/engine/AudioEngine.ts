@@ -3135,6 +3135,35 @@ class AudioEngine {
       this.metronome.connect(this.metronomeChannel)
     } catch (_) {}
     this.setupTransport()
+
+    // Keep AudioEngine / Tone.Transport playback strictly synchronized with Zustand isPlaying state
+    useStore.subscribe(async (state, prevState) => {
+      if (state.isPlaying !== prevState.isPlaying) {
+        if (state.isPlaying) {
+          if (Tone.Transport.state !== 'started') {
+            if (!this.isInitialized) {
+              await this.init()
+            }
+            this.syncNoteVst3Overrides()
+            Tone.Transport.start()
+            this.resumeActiveNotes()
+            this.startVst3Automation()
+            if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
+              (window as any).juceAudioBridge.postCommand({ type: 'play' })
+            }
+          }
+        } else {
+          if (Tone.Transport.state === 'started') {
+            Tone.Transport.pause()
+            this.stopActiveNotes()
+            this.stopVst3Automation()
+            if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
+              (window as any).juceAudioBridge.postCommand({ type: 'stop' })
+            }
+          }
+        }
+      }
+    })
   }
 
   async init() {
@@ -3324,12 +3353,20 @@ class AudioEngine {
           try { d.snare?.triggerRelease?.() } catch(_) {}
         });
       }
-      if (state.bpm !== prevState.bpm && this.wasmNode) {
-        this.wasmNode.port.postMessage({
-          type: 'global-settings',
-          sampleRate: Tone.getContext().rawContext.sampleRate,
-          bpm: state.bpm
-        });
+      if (state.bpm !== prevState.bpm) {
+        if (Math.abs(Tone.Transport.bpm.value - state.bpm) > 0.01) {
+          Tone.Transport.bpm.rampTo(state.bpm, 0.05);
+        }
+        if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
+          (window as any).juceAudioBridge.postCommand({ type: 'setBpm', bpm: state.bpm });
+        }
+        if (this.wasmNode) {
+          this.wasmNode.port.postMessage({
+            type: 'global-settings',
+            sampleRate: Tone.getContext().rawContext.sampleRate,
+            bpm: state.bpm
+          });
+        }
       }
       if (state.swing !== prevState.swing) {
         this.applySwing(state.swing)

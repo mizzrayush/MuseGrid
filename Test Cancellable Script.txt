@@ -1,0 +1,15 @@
+// MuseGrid Test Script: 100 Hellos with Cancellable Timer
+// Tests the red Cancel button and RUNNING status indicator!
+// You can click the red 'Cancel' button or press Ctrl+C at any time.
+
+console.log("=== Starting 100 Hello Test Script ===");
+console.log("Notice the red 'Cancel' button and 'RUNNING' badge in the header!");
+console.log("Press 'Cancel' or hit Ctrl+C at any time to abort.");
+
+for (let i = 1; i <= 100; i++) {
+  console.log(`[${i}/100] Hello from MuseGrid Scripting! (Elapsed: ${i}s)`);
+  await Muse.sleep(1000); // 1-second pause per loop
+}
+
+console.log("=== Completed all 100 iterations successfully! ===");
+MuseState.showToast("Test script finished successfully!", "success");

@@ -595,7 +595,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
           velocity: 90,
           instrument: 0
         }]
-        const harmony = await generateAutoHarmony(seedNote)
+        const harmony = await generateAutoHarmony(seedNote, aiTemperature, scaleConfig, totalSteps)
         harmony.voice1.forEach((n: any, idx: number) => {
           generatedNotes.push({
             id: `ai_b1_${idx}_${Date.now()}`,

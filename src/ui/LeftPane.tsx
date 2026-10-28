@@ -6574,7 +6574,9 @@ export default function LeftPane() {
                         transition: 'all 0.15s ease'
                       }}
                     >
-                      ➕ New Track
+                      <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '4px' }}>
+                        <IconPlus size={9} /> New Track
+                      </span>
                     </button>
                   </div>
                 </div>
@@ -6604,7 +6606,9 @@ export default function LeftPane() {
                         transition: 'all 0.15s ease'
                       }}
                     >
-                      ➕ Overdub (Merge)
+                      <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '4px' }}>
+                        <IconLayers size={9} /> Overdub (Merge)
+                      </span>
                     </button>
                     <button
                       onClick={() => setAiWriteMode('replace')}
@@ -6622,7 +6626,9 @@ export default function LeftPane() {
                         transition: 'all 0.15s ease'
                       }}
                     >
-                      ✂ Replace Region
+                      <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '4px' }}>
+                        <IconScissors size={9} /> Replace Region
+                      </span>
                     </button>
                   </div>
                 </div>
@@ -6767,12 +6773,16 @@ export default function LeftPane() {
                 fontWeight: 800,
                 letterSpacing: '0.06em',
                 cursor: isAiLoading ? 'not-allowed' : 'pointer',
-                transition: 'all 0.15s ease'
+                transition: 'all 0.15s ease',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '6px'
               }}
               onMouseEnter={e => !isAiLoading && (e.currentTarget.style.background = 'linear-gradient(135deg, rgba(218, 119, 242, 0.25), rgba(77, 171, 247, 0.25))')}
               onMouseLeave={e => !isAiLoading && (e.currentTarget.style.background = 'linear-gradient(135deg, rgba(218, 119, 242, 0.15), rgba(77, 171, 247, 0.15))')}
             >
-              ⚡ GENERATE FULL ARRANGEMENT (SYNTH + DRUMS)
+              <IconZap size={11} color="#e599f7" /> GENERATE FULL ARRANGEMENT (SYNTH + DRUMS)
             </button>
 
             {activeTrack?.instrument === 'synth' && (
@@ -10897,8 +10907,8 @@ for (let channel = 0; channel < input.length; channel++) {
                                   <option value="import-muzins" style={{ background: '#12141c', color: '#e0e0e0' }}>Load from Device (.muzins)...</option>
                                 </optgroup>
                                 <optgroup label="── SPECIALIZED ACOUSTIC & VOCAL ENGINES ──" style={{ background: '#0a0b10', color: '#da77f2', fontWeight: 800 }}>
-                                  <option value="physical" style={{ background: '#12141c', color: '#4dabf7' }}>⚡ Physical Modeling (String / Wind / Perc)</option>
-                                  <option value="vocal" style={{ background: '#12141c', color: '#69db7c' }}>🎤 Vocal / Singing Synth (Formant Vowel)</option>
+                                  <option value="physical" style={{ background: '#12141c', color: '#4dabf7' }}>[Physical Modeling] String / Wind / Perc</option>
+                                  <option value="vocal" style={{ background: '#12141c', color: '#69db7c' }}>[Vocal Synth] Formant Singing Synthesizer</option>
                                 </optgroup>
                               </StopPropSelect>
                               {track.vst3InstrumentId && (

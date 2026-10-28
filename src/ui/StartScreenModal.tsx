@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
-import { useStore, getRecentProjects, saveRecentProject, removeRecentProject, clearAllRecentProjects, type RecentProjectItem, type ScaleLock } from '../engine/store'
+import { useStore, saveRecentProject, removeRecentProject, clearAllRecentProjects, type RecentProjectItem, type ScaleLock } from '../engine/store'
 import { DAW_TEMPLATES, getUserTemplates, saveUserTemplate, deleteUserTemplate, buildPreviewPattern, type DawTemplate } from '../utils/dawTemplates'
 import { selectAndReadFile, parseProjectPayload } from '../utils/fileDialog'
 import { AppSlider } from './AppSlider'
@@ -48,15 +48,16 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
   const showToast = useStore(s => s.showToast)
   const currentNotes = useStore(s => s.notes)
   const openTabs = useStore(s => s.openTabs)
+  const activeTabId = useStore(s => s.activeTabId)
   const switchTab = useStore(s => s.switchTab)
   const openProjectInTab = useStore(s => s.openProjectInTab)
+  const recentList = useStore(s => s.recentProjects)
   const hasActiveSession = currentNotes.length > 0 || !isInitialLaunch || openTabs.length > 0
 
   const [activeTab, setActiveTab] = useState<'library' | 'templates' | 'ai'>('library')
   const [openingId, setOpeningId] = useState<string | null>(null)
   const [templateCategory, setTemplateCategory] = useState<string>('All')
   const [searchQuery, setSearchQuery] = useState('')
-  const [recentList, setRecentList] = useState<RecentProjectItem[]>([])
   const [userTemplates, setUserTemplates] = useState<DawTemplate[]>(() => getUserTemplates())
   const [newTemplateModal, setNewTemplateModal] = useState<{
     isOpen: boolean
@@ -96,11 +97,19 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
   const [aiGenerating, setAiGenerating] = useState(false)
   const [aiStatusText, setAiStatusText] = useState('')
 
+  // Real-time synchronization of recent projects
   useEffect(() => {
-    if (isStartScreenOpen) {
-      setRecentList(getRecentProjects())
+    const handleRefresh = () => {
+      useStore.getState().refreshRecentProjects()
     }
-  }, [isStartScreenOpen])
+    window.addEventListener('musegrid-recent-projects-updated', handleRefresh)
+    window.addEventListener('storage', handleRefresh)
+    useStore.getState().refreshRecentProjects()
+    return () => {
+      window.removeEventListener('musegrid-recent-projects-updated', handleRefresh)
+      window.removeEventListener('storage', handleRefresh)
+    }
+  }, [activeTabId, isStartScreenOpen])
 
   const [contextMenu, setContextMenu] = useState<{ item: RecentProjectItem; x: number; y: number } | null>(null)
   const [confirmModal, setConfirmModal] = useState<{
@@ -148,8 +157,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
     setContextMenu(null)
     setAnimatingDeleteIds(prev => new Set(prev).add(item.id))
     setTimeout(() => {
-      const updated = removeRecentProject(item.id)
-      setRecentList(updated)
+      removeRecentProject(item.id)
       setAnimatingDeleteIds(prev => {
         const next = new Set(prev)
         next.delete(item.id)
@@ -169,7 +177,6 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
     setAnimatingDeleteIds(allIds)
     setTimeout(() => {
       clearAllRecentProjects()
-      setRecentList([])
       setAnimatingDeleteIds(new Set())
       showToast('Cleared all recent projects', 'info')
     }, 240)
@@ -208,8 +215,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
     }
 
     setTimeout(() => {
-      const updated = removeRecentProject(item.id)
-      setRecentList(updated)
+      removeRecentProject(item.id)
       setAnimatingDeleteIds(prev => {
         const next = new Set(prev)
         next.delete(item.id)

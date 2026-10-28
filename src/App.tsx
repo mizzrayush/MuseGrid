@@ -19,7 +19,7 @@ import { useStore, saveRecentProject, type ProjectTab } from './engine/store'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET } from './utils/instruments'
 import { saveFileWithDialog } from './utils/fileExport'
 import { ProjectTabBar } from './ui/ProjectTabBar'
-import { IconTrash, IconDownload, IconSave, IconPlay, IconStop, IconMidi, IconAlign, IconSkipBack, IconChevronDown, IconMaximize, IconMusic, IconStretch, IconChevronLeft, IconChevronRight, IconSync, IconHelp, IconTarget, IconSliders, IconAlertTriangle } from './ui/Icons'
+import { IconTrash, IconDownload, IconSave, IconPlay, IconStop, IconMidi, IconAlign, IconSkipBack, IconChevronDown, IconMaximize, IconMusic, IconStretch, IconChevronLeft, IconChevronRight, IconSync, IconHelp, IconTarget, IconSliders, IconAlertTriangle, IconMuseLogo } from './ui/Icons'
 
 function TransportTimeDisplay() {
   const playheadPosition = useStore(s => s.playheadPosition)
@@ -394,6 +394,12 @@ function App() {
                 lyric: n.lyric
               }))
             }
+          })
+          saveRecentProject({
+            name: pName,
+            filePath: res.filePath,
+            bpm: data.bpm || 120,
+            trackCount: data.tracks.length
           })
           setIsInitialLaunch(false)
           ipc.invoke('set-fullscreen', true).catch(() => {})
@@ -780,6 +786,12 @@ function App() {
   const handleNewProject = () => {
     setIsInitialLaunch(false)
     openProjectInTab({ name: 'Untitled Project', isDirty: false })
+    saveRecentProject({
+      name: 'Untitled Project',
+      bpm: 120,
+      trackCount: 2,
+      previewSnippet: 'Blank Project'
+    })
     const ipc = (window as any).ipcRenderer
     if (ipc && typeof ipc.invoke === 'function') {
       ipc.invoke('set-fullscreen', true).catch(() => {})
@@ -882,10 +894,34 @@ function App() {
           overflow: 'hidden'
         }}>
           {/* Top Header / Studio Pro Transport Deck */}
-          <div className="glass-panel" style={{ height: '54px', display: 'flex', alignItems: 'center', padding: '0 16px', gap: '14px', borderBottom: '1px solid rgba(255, 255, 255, 0.06)', zIndex: 10 }}>
-        
-        {/* Project Tabs Strip */}
-        <ProjectTabBar onRequestCloseTab={handleRequestCloseTab} />
+          <div className="glass-panel" style={{ height: '54px', display: 'flex', alignItems: 'center', padding: '0 16px', gap: '12px', borderBottom: '1px solid rgba(255, 255, 255, 0.06)', zIndex: 10 }}>
+            
+            {/* Top-Left Corner Brand Icon */}
+            <div
+              onClick={() => useStore.getState().openStartTab()}
+              title="MuseGrid Studio (Return to Start Screen)"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                cursor: 'pointer',
+                userSelect: 'none',
+                flexShrink: 0,
+                transition: 'opacity 0.15s ease'
+              }}
+              onMouseEnter={e => { e.currentTarget.style.opacity = '0.85' }}
+              onMouseLeave={e => { e.currentTarget.style.opacity = '1' }}
+            >
+              <IconMuseLogo size={22} />
+              <span style={{ fontSize: '13px', fontWeight: 800, color: '#fff', letterSpacing: '-0.3px' }}>
+                MUSE<span style={{ color: '#4dabf7' }}>GRID</span>
+              </span>
+            </div>
+
+            <div style={{ width: '1px', height: '18px', background: 'rgba(255, 255, 255, 0.08)', flexShrink: 0 }} />
+
+            {/* Project Tabs Strip */}
+            <ProjectTabBar onRequestCloseTab={handleRequestCloseTab} />
 
         {activeTabId !== 'start' ? (
           <>

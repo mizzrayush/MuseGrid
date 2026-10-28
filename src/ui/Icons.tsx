@@ -106,10 +106,12 @@ export const IconMuseLogo = ({ size = 24, style, className }: { size?: number; s
       </linearGradient>
     </defs>
     <rect x="2" y="2" width="20" height="20" rx="5" fill="url(#mg-logo-bg)" stroke="rgba(255,255,255,0.15)" strokeWidth="0.8" />
-    <rect x="5.5" y="5.5" width="2.5" height="12.5" rx="1.25" fill="url(#mg-bar-grad1)" />
-    <rect x="9.5" y="9.5" width="2.5" height="8.5" rx="1.25" fill="url(#mg-bar-grad1)" />
-    <rect x="13.5" y="9.5" width="2.5" height="8.5" rx="1.25" fill="url(#mg-bar-grad2)" />
-    <rect x="17.5" y="5.5" width="2.5" height="12.5" rx="1.25" fill="url(#mg-bar-grad2)" />
+    <rect x="5.5" y="10" width="2.5" height="8" rx="1.25" fill="url(#mg-bar-grad1)" />
+    <rect x="9.5" y="5.5" width="2.5" height="12.5" rx="1.25" fill="url(#mg-bar-grad1)" />
+    <rect x="13.5" y="8" width="2.5" height="10" rx="1.25" fill="url(#mg-bar-grad2)" />
+    <rect x="17.5" y="12" width="2.5" height="6" rx="1.25" fill="url(#mg-bar-grad2)" />
+    <circle cx="6.75" cy="6.5" r="1.2" fill="#00e6ff" opacity="0.9" />
+    <circle cx="18.75" cy="8.5" r="1.2" fill="#ff3366" opacity="0.9" />
   </svg>
 )
 

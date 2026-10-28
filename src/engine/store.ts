@@ -1321,6 +1321,8 @@ export interface AppState {
   closeTab: (tabId: string) => void
   updateActiveTab: (updates: Partial<ProjectTab>) => void
   openStartTab: () => void
+  recentProjects: RecentProjectItem[]
+  refreshRecentProjects: () => void
 
   // New controls
   setSnapEnabled: (v: boolean) => void
@@ -1673,6 +1675,27 @@ export const applyProjectDataToEngineAndStore = (data: any, tabName?: string, fi
     sharedPanX: data.sharedPanX || 0,
     isPlaying: false
   }
+}
+
+export interface RecentProjectItem {
+  id: string
+  name: string
+  filePath?: string
+  lastModified: number
+  bpm?: number
+  trackCount?: number
+  previewSnippet?: string
+}
+
+export function getRecentProjects(): RecentProjectItem[] {
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('musegrid_recent_projects') : null
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed)) return parsed
+    }
+  } catch (e) {}
+  return []
 }
 
 export const useStore = create<AppState>((originalSet, get, api) => {
@@ -2773,6 +2796,15 @@ if (firstTrack) {
         isStartScreenOpen: false
       })
 
+      // 5. Automatically record to recent projects immediately so the recent list is always in sync
+      saveRecentProject({
+        name: newTab.name,
+        filePath: newTab.filePath || undefined,
+        bpm: projectDataToLoad.bpm || 120,
+        trackCount: (projectDataToLoad.tracks || []).length || 2,
+        previewSnippet: newTab.filePath ? undefined : `${(projectDataToLoad.tracks || []).length} tracks • ${projectDataToLoad.notes?.length || 0} notes`
+      })
+
       return id
     },
 
@@ -2804,7 +2836,8 @@ if (firstTrack) {
       }
 
       if (tabId === 'start') {
-        set({ openTabs: updatedTabs, activeTabId: 'start' })
+        const recent = getRecentProjects()
+        set({ openTabs: updatedTabs, activeTabId: 'start', recentProjects: recent })
         return
       }
 
@@ -2878,6 +2911,9 @@ if (firstTrack) {
     openStartTab: () => {
       useStore.getState().switchTab('start')
     },
+
+    recentProjects: getRecentProjects(),
+    refreshRecentProjects: () => set({ recentProjects: getRecentProjects() }),
 
     quantizeSelectedNotes: () => set((state) => {
       if (state.selectedNoteIds.length === 0) return {}
@@ -3897,27 +3933,6 @@ useStore.subscribe((state, prevState) => {
   }
 })
 
-export interface RecentProjectItem {
-  id: string
-  name: string
-  filePath?: string
-  lastModified: number
-  bpm?: number
-  trackCount?: number
-  previewSnippet?: string
-}
-
-export function getRecentProjects(): RecentProjectItem[] {
-  try {
-    const raw = localStorage.getItem('musegrid_recent_projects')
-    if (raw) {
-      const parsed = JSON.parse(raw)
-      if (Array.isArray(parsed)) return parsed
-    }
-  } catch (e) {}
-  return []
-}
-
 export function saveRecentProject(item: Omit<RecentProjectItem, 'id' | 'lastModified'> & { id?: string }): void {
   try {
     const list = getRecentProjects()
@@ -3936,6 +3951,10 @@ export function saveRecentProject(item: Omit<RecentProjectItem, 'id' | 'lastModi
       ...filtered
     ].slice(0, 12)
     localStorage.setItem('musegrid_recent_projects', JSON.stringify(updated))
+    useStore.setState({ recentProjects: updated })
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('musegrid-recent-projects-updated', { detail: updated }))
+    }
   } catch (e) {}
 }
 
@@ -3944,6 +3963,10 @@ export function removeRecentProject(idOrPath: string): RecentProjectItem[] {
     const list = getRecentProjects()
     const updated = list.filter(p => p.id !== idOrPath && p.filePath !== idOrPath)
     localStorage.setItem('musegrid_recent_projects', JSON.stringify(updated))
+    useStore.setState({ recentProjects: updated })
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('musegrid-recent-projects-updated', { detail: updated }))
+    }
     return updated
   } catch (e) {
     return []
@@ -3953,6 +3976,10 @@ export function removeRecentProject(idOrPath: string): RecentProjectItem[] {
 export function clearAllRecentProjects(): void {
   try {
     localStorage.removeItem('musegrid_recent_projects')
+    useStore.setState({ recentProjects: [] })
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('musegrid-recent-projects-updated', { detail: [] }))
+    }
   } catch (e) {}
 }
 

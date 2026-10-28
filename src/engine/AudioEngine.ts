@@ -6556,6 +6556,60 @@ class AudioEngine {
       console.error('Voice preview failed:', err)
     }
   }
+
+  async getAudioDeviceSetup(): Promise<AudioDeviceSetup | null> {
+    if ((window as any).__isJuceNative__ && (window as any).ipcRenderer) {
+      try {
+        const setup = await (window as any).ipcRenderer.invoke('get-audio-device-setup')
+        if (setup) return setup
+      } catch (err) {
+        console.error('Failed to get audio device setup from native:', err)
+      }
+    }
+    return {
+      currentType: 'Web Audio (Browser)',
+      availableTypes: ['Web Audio (Browser)'],
+      currentOutputDevice: 'Default Audio Output',
+      availableOutputDevices: ['Default Audio Output'],
+      sampleRate: Tone.getContext()?.sampleRate || 44100,
+      availableSampleRates: [44100, 48000],
+      bufferSize: 512,
+      availableBufferSizes: [128, 256, 512, 1024],
+      latencyMs: ((512 * 1000) / (Tone.getContext()?.sampleRate || 44100))
+    }
+  }
+
+  async setAudioDeviceSetup(updates: {
+    type?: string
+    outputDevice?: string
+    sampleRate?: number
+    bufferSize?: number
+  }): Promise<AudioDeviceSetup | null> {
+    if ((window as any).__isJuceNative__ && (window as any).ipcRenderer) {
+      try {
+        const setup = await (window as any).ipcRenderer.invoke('set-audio-device-setup', updates)
+        if (setup) return setup
+      } catch (err) {
+        console.error('Failed to set audio device setup via native:', err)
+      }
+    }
+    return this.getAudioDeviceSetup()
+  }
+}
+
+export interface AudioDeviceSetup {
+  currentType: string
+  availableTypes: string[]
+  currentOutputDevice: string
+  availableOutputDevices: string[]
+  sampleRate: number
+  availableSampleRates: number[]
+  bufferSize: number
+  availableBufferSizes: number[]
+  latencyMs: number
 }
 
 export const audioEngine = new AudioEngine()
+if (typeof window !== 'undefined') {
+  (window as any).museAudioEngine = audioEngine
+}

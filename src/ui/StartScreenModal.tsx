@@ -13,7 +13,9 @@ import {
 interface StartScreenModalProps {
   onNewProject: () => void
   onOpenProject: () => void
+  onProjectLoaded?: () => void
   isInitialLaunch?: boolean
+  embedded?: boolean
 }
 
 const SCALE_ROOTS = [
@@ -40,12 +42,15 @@ const SCALE_MODES = [
   { label: 'Lydian (Space Ambient)', value: 'lydian' }
 ]
 
-export default function StartScreenModal({ onNewProject, onOpenProject, isInitialLaunch = false }: StartScreenModalProps) {
+export default function StartScreenModal({ onNewProject, onOpenProject, onProjectLoaded, isInitialLaunch = false, embedded = false }: StartScreenModalProps) {
   const isStartScreenOpen = useStore(s => s.isStartScreenOpen)
   const setIsStartScreenOpen = useStore(s => s.setIsStartScreenOpen)
   const showToast = useStore(s => s.showToast)
   const currentNotes = useStore(s => s.notes)
-  const hasActiveSession = currentNotes.length > 0 || !isInitialLaunch
+  const openTabs = useStore(s => s.openTabs)
+  const switchTab = useStore(s => s.switchTab)
+  const openProjectInTab = useStore(s => s.openProjectInTab)
+  const hasActiveSession = currentNotes.length > 0 || !isInitialLaunch || openTabs.length > 0
 
   const [activeTab, setActiveTab] = useState<'library' | 'templates' | 'ai'>('library')
   const [openingId, setOpeningId] = useState<string | null>(null)
@@ -324,6 +329,14 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
   }
 
   const handleClose = () => {
+    if (embedded) {
+      if (openTabs.length > 0) {
+        switchTab(openTabs[0].id)
+      } else {
+        onNewProject()
+      }
+      return
+    }
     if (hasActiveSession) {
       setIsStartScreenOpen(false)
     } else {
@@ -349,6 +362,14 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
   }
 
   const handleSkipToWorkspace = () => {
+    if (embedded) {
+      if (openTabs.length > 0) {
+        switchTab(openTabs[0].id)
+      } else {
+        onNewProject()
+      }
+      return
+    }
     setIsStartScreenOpen(false)
     enterDawFullscreen()
   }
@@ -356,21 +377,19 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
   const handleLoadTemplate = (tmpl: DawTemplate) => {
     audioEngine.resetForNewProject()
 
-    useStore.getState().loadState({
-      projectName: tmpl.title,
-      projectFilePath: null,
-      bpm: tmpl.bpm,
-      scaleLock: tmpl.scaleLock,
-      tracks: tmpl.tracks,
-      notes: tmpl.notes,
-      activeTrackId: tmpl.tracks[0]?.id || 'track_synth',
-      sharedPanX: 0
-    })
-
-    tmpl.tracks.forEach(track => {
-      audioEngine.createInstrument(track.id, track.instrument || 'synth')
-      if (track.instrument === 'drum' && track.drumKit) {
-        audioEngine.setTrackDrumKit(track.id, track.drumKit)
+    const hasTemplateNotes = Boolean(tmpl.notes && tmpl.notes.length > 0)
+    openProjectInTab({
+      name: tmpl.title,
+      isDirty: hasTemplateNotes,
+      projectData: {
+        projectName: tmpl.title,
+        projectFilePath: null,
+        bpm: tmpl.bpm,
+        scaleLock: tmpl.scaleLock,
+        tracks: tmpl.tracks,
+        notes: tmpl.notes,
+        activeTrackId: tmpl.tracks[0]?.id || 'track_synth',
+        sharedPanX: 0
       }
     })
 
@@ -382,6 +401,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
     })
 
     setIsStartScreenOpen(false)
+    if (onProjectLoaded) onProjectLoaded()
     enterDawFullscreen()
     showToast(`Loaded ${tmpl.title}`, 'success')
   }
@@ -420,23 +440,24 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
               return
             }
 
-            audioEngine.resetForNewProject()
-            useStore.getState().loadState({
-              ...parsed,
-              projectFilePath: res.filePath,
-              projectName: res.filePath.split(/[\\/]/).pop().replace(/\.(muz|muztrack)$/i, '')
-            })
-            if (parsed.bpm) audioEngine.setBpm(parsed.bpm)
-            useStore.getState().tracks.forEach(track => {
-              audioEngine.createInstrument(track.id, track.instrument || 'synth')
+            const pName = res.filePath.split(/[\\/]/).pop().replace(/\.(muz|muztrack)$/i, '')
+            openProjectInTab({
+              name: pName,
+              filePath: res.filePath,
+              projectData: {
+                ...parsed,
+                projectFilePath: res.filePath,
+                projectName: pName
+              }
             })
             saveRecentProject({
-              name: res.filePath.split(/[\\/]/).pop().replace(/\.(muz|muztrack)$/i, ''),
+              name: pName,
               filePath: res.filePath,
               bpm: parsed.bpm || 120,
               trackCount: (parsed.tracks || []).length
             })
             setIsStartScreenOpen(false)
+            if (onProjectLoaded) onProjectLoaded()
             enterDawFullscreen()
             showToast(`Opened ${item.name}`, 'success')
             setOpeningId(null)
@@ -618,25 +639,22 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
         })
       }
 
-      // Load state
-      useStore.getState().loadState({
-        projectName: `AI - ${aiMood} (${aiBars} Bars)`,
-        projectFilePath: null,
-        bpm: aiBpm,
-        scaleLock: scaleConfig,
-        tracks: tracksToUse,
-        notes: generatedNotes,
-        activeTrackId: tracksToUse[0]?.id || 'track_synth',
-        loopEnabled: true,
-        loopStart: 0,
-        loopEnd: aiBars * ticksPerBar,
-        sharedPanX: 0
-      })
-
-      tracksToUse.forEach(t => {
-        audioEngine.createInstrument(t.id, t.instrument || 'synth')
-        if (t.instrument === 'drum' && t.drumKit) {
-          audioEngine.setTrackDrumKit(t.id, t.drumKit)
+      // Load state into new tab
+      openProjectInTab({
+        name: `AI - ${aiMood} (${aiBars} Bars)`,
+        isDirty: true,
+        projectData: {
+          projectName: `AI - ${aiMood} (${aiBars} Bars)`,
+          projectFilePath: null,
+          bpm: aiBpm,
+          scaleLock: scaleConfig,
+          tracks: tracksToUse,
+          notes: generatedNotes,
+          activeTrackId: tracksToUse[0]?.id || 'track_synth',
+          loopEnabled: true,
+          loopStart: 0,
+          loopEnd: aiBars * ticksPerBar,
+          sharedPanX: 0
         }
       })
 
@@ -648,6 +666,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
       })
 
       setIsStartScreenOpen(false)
+      if (onProjectLoaded) onProjectLoaded()
       enterDawFullscreen()
       showToast(`Generated ${generatedNotes.length} notes across ${tracksToUse.length} tracks!`, 'success')
     } catch (err: any) {
@@ -674,42 +693,41 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
     })
   }, [allTemplates, templateCategory, searchQuery])
 
-  if (!isStartScreenOpen) return null
+  if (!embedded && !isStartScreenOpen && !isInitialLaunch) return null
+
+  const isWindowed = !embedded
 
   return (
     <div
-      className={hasActiveSession ? "animate-modal-bg" : undefined}
       style={{
-        position: 'fixed',
-        inset: 0,
-        background: hasActiveSession ? 'rgba(6, 7, 11, 0.86)' : '#0d0e15',
-        backdropFilter: hasActiveSession ? 'blur(16px)' : undefined,
-        WebkitBackdropFilter: hasActiveSession ? 'blur(16px)' : undefined,
-        zIndex: 100000,
+        position: isWindowed ? 'fixed' : 'relative',
+        inset: isWindowed ? 0 : undefined,
+        width: '100%',
+        height: '100%',
+        flex: 1,
+        background: '#0d0e15',
+        zIndex: isWindowed ? 100000 : 1,
         display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: hasActiveSession ? '24px' : 0
+        alignItems: 'stretch',
+        justifyContent: 'stretch',
+        padding: 0,
+        overflow: 'hidden'
       }}
       onClick={e => {
-        if (e.target === e.currentTarget && hasActiveSession) {
+        if (isWindowed && e.target === e.currentTarget && !isInitialLaunch) {
           setIsStartScreenOpen(false)
         }
       }}
     >
       <div
-        className={hasActiveSession ? "animate-modal-card" : undefined}
         style={{
-          width: hasActiveSession ? '92%' : '100%',
-          maxWidth: hasActiveSession ? '940px' : '100%',
-          height: hasActiveSession ? '80vh' : '100%',
-          maxHeight: hasActiveSession ? '620px' : '100%',
-          background: '#111219',
-          border: hasActiveSession ? '1px solid rgba(255, 255, 255, 0.1)' : 'none',
-          borderRadius: hasActiveSession ? '20px' : 0,
+          width: '100%',
+          height: '100%',
+          background: '#0d0e15',
+          border: 'none',
+          borderRadius: 0,
           display: 'flex',
-          overflow: 'hidden',
-          boxShadow: hasActiveSession ? '0 30px 90px rgba(0, 0, 0, 0.9), 0 0 40px rgba(77, 171, 247, 0.08)' : 'none'
+          overflow: 'hidden'
         }}
         onClick={e => e.stopPropagation()}
       >
@@ -876,7 +894,49 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              {hasActiveSession ? (
+              {embedded ? (
+                openTabs.length > 0 ? (
+                  <button
+                    onClick={handleClose}
+                    style={{
+                      background: 'rgba(255, 255, 255, 0.06)',
+                      border: '1px solid rgba(255, 255, 255, 0.1)',
+                      borderRadius: '8px',
+                      color: '#ccc',
+                      padding: '6px 12px',
+                      fontSize: '11px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px'
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.12)'; e.currentTarget.style.color = '#fff' }}
+                    onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)'; e.currentTarget.style.color = '#ccc' }}
+                    title="Open active project tab"
+                  >
+                    <span>Open Active Project →</span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={onNewProject}
+                    style={{
+                      background: 'rgba(77, 171, 247, 0.12)',
+                      border: '1px solid rgba(77, 171, 247, 0.3)',
+                      borderRadius: '8px',
+                      color: '#4dabf7',
+                      padding: '6px 12px',
+                      fontSize: '11px',
+                      fontWeight: 600,
+                      cursor: 'pointer'
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.background = 'rgba(77, 171, 247, 0.2)' }}
+                    onMouseLeave={e => { e.currentTarget.style.background = 'rgba(77, 171, 247, 0.12)' }}
+                  >
+                    + Blank Project →
+                  </button>
+                )
+              ) : hasActiveSession ? (
                 <button
                   onClick={handleClose}
                   style={{
@@ -1506,42 +1566,43 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
 
           {/* Tab 3: AI Studio */}
           {activeTab === 'ai' && (
-            <div style={{ flex: 1, overflowY: 'auto', padding: '24px' }} className="thin-scroll">
-              <div style={{ maxWidth: '680px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px' }} className="thin-scroll">
+              <div style={{ width: '100%', maxWidth: '1200px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '16px' }}>
                 {/* Mode Selector */}
                 <div>
-                  <label style={{ fontSize: '11.5px', fontWeight: 600, color: '#999', letterSpacing: '0.2px', display: 'block', marginBottom: '8px' }}>
+                  <label style={{ fontSize: '11.5px', fontWeight: 700, color: '#aaa', letterSpacing: '0.4px', display: 'block', marginBottom: '8px', textTransform: 'uppercase' }}>
                     1. Generation mode
                   </label>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '10px' }}>
                     {[
-                      { id: 'full', label: 'Full Production', sub: 'Melody + Drums', icon: <IconMusic size={14} color="#da77f2" /> },
-                      { id: 'melody', label: 'Melody Hook', sub: 'MusicRNN', icon: <IconMusic size={14} color="#4dabf7" /> },
-                      { id: 'drums', label: 'Rhythm Groove', sub: 'Drums RNN', icon: <IconDrum size={14} color="#ff922b" /> },
-                      { id: 'bach', label: 'Bach Polyphony', sub: 'Coconet 4-Part', icon: <IconLayers size={14} color="#ffd43b" /> }
+                      { id: 'full', label: 'Full Production', sub: 'Melody + Drums', icon: <IconMusic size={15} color="#da77f2" /> },
+                      { id: 'melody', label: 'Melody Hook', sub: 'MusicRNN', icon: <IconMusic size={15} color="#4dabf7" /> },
+                      { id: 'drums', label: 'Rhythm Groove', sub: 'Drums RNN', icon: <IconDrum size={15} color="#ff922b" /> },
+                      { id: 'bach', label: 'Bach Polyphony', sub: 'Coconet 4-Part', icon: <IconLayers size={15} color="#ffd43b" /> }
                     ].map(item => (
                       <button
                         key={item.id}
                         onClick={() => setAiMode(item.id as any)}
                         style={{
-                          padding: '12px 10px',
+                          padding: '12px 8px',
                           borderRadius: '12px',
                           border: '1px solid',
                           borderColor: aiMode === item.id ? '#da77f2' : 'rgba(255,255,255,0.08)',
-                          background: aiMode === item.id ? 'rgba(218, 119, 242, 0.12)' : 'rgba(255,255,255,0.02)',
+                          background: aiMode === item.id ? 'rgba(218, 119, 242, 0.14)' : 'rgba(255,255,255,0.025)',
                           color: aiMode === item.id ? '#fff' : '#aaa',
                           textAlign: 'center',
                           cursor: 'pointer',
                           display: 'flex',
                           flexDirection: 'column',
                           alignItems: 'center',
-                          gap: '4px',
-                          transition: 'all 0.15s'
+                          gap: '5px',
+                          transition: 'all 0.15s',
+                          boxShadow: aiMode === item.id ? '0 0 16px rgba(218, 119, 242, 0.15)' : 'none'
                         }}
                       >
                         {item.icon}
-                        <span style={{ fontSize: '12px', fontWeight: 700 }}>{item.label}</span>
-                        <span style={{ fontSize: '9.5px', color: '#777' }}>{item.sub}</span>
+                        <span style={{ fontSize: '12px', fontWeight: 700, whiteSpace: 'nowrap' }}>{item.label}</span>
+                        <span style={{ fontSize: '9.5px', color: '#888', whiteSpace: 'nowrap' }}>{item.sub}</span>
                       </button>
                     ))}
                   </div>
@@ -1549,7 +1610,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
 
                 {/* Mood Presets */}
                 <div>
-                  <label style={{ fontSize: '11.5px', fontWeight: 600, color: '#999', letterSpacing: '0.2px', display: 'block', marginBottom: '8px' }}>
+                  <label style={{ fontSize: '11.5px', fontWeight: 700, color: '#aaa', letterSpacing: '0.4px', display: 'block', marginBottom: '8px', textTransform: 'uppercase' }}>
                     2. Genre & mood
                   </label>
                   <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
@@ -1567,15 +1628,16 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                           else if (m.includes('Ambient')) { setAiBpm(68); setAiScaleMode('lydian') }
                         }}
                         style={{
-                          padding: '6px 12px',
+                          padding: '6px 14px',
                           borderRadius: '20px',
                           border: '1px solid',
-                          borderColor: aiMood === m ? '#da77f2' : 'rgba(255,255,255,0.06)',
-                          background: aiMood === m ? 'rgba(218,119,242,0.15)' : 'rgba(255,255,255,0.02)',
+                          borderColor: aiMood === m ? '#da77f2' : 'rgba(255,255,255,0.08)',
+                          background: aiMood === m ? 'rgba(218,119,242,0.18)' : 'rgba(255,255,255,0.025)',
                           color: aiMood === m ? '#fff' : '#888',
                           fontSize: '11px',
                           fontWeight: 600,
-                          cursor: 'pointer'
+                          cursor: 'pointer',
+                          transition: 'all 0.15s'
                         }}
                       >
                         {m}
@@ -1585,7 +1647,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                 </div>
 
                 {/* Musical Scale & Tempo */}
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '12px' }}>
                   <div>
                     <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '4px' }}>
                       Root Key
@@ -1595,7 +1657,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                       onChange={e => setAiScaleRoot(Number(e.target.value))}
                       style={{
                         width: '100%',
-                        padding: '8px',
+                        padding: '8px 10px',
                         background: '#181924',
                         border: '1px solid rgba(255,255,255,0.1)',
                         borderRadius: '8px',
@@ -1619,7 +1681,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                       onChange={e => setAiScaleMode(e.target.value)}
                       style={{
                         width: '100%',
-                        padding: '8px',
+                        padding: '8px 10px',
                         background: '#181924',
                         border: '1px solid rgba(255,255,255,0.1)',
                         borderRadius: '8px',
@@ -1646,7 +1708,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                       onChange={e => setAiBpm(Number(e.target.value))}
                       style={{
                         width: '100%',
-                        padding: '8px',
+                        padding: '8px 10px',
                         background: '#181924',
                         border: '1px solid rgba(255,255,255,0.1)',
                         borderRadius: '8px',
@@ -1659,7 +1721,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                 </div>
 
                 {/* Length & Parameters */}
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '14px', background: 'rgba(0,0,0,0.2)', padding: '16px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.04)' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '16px', background: 'rgba(0,0,0,0.25)', padding: '14px 18px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.06)' }}>
                   <div>
                     <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '6px' }}>
                       Length: <strong style={{ color: '#fff' }}>{aiBars} Bars</strong>
@@ -1675,11 +1737,12 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                             borderRadius: '6px',
                             border: '1px solid',
                             borderColor: aiBars === b ? '#da77f2' : 'rgba(255,255,255,0.08)',
-                            background: aiBars === b ? 'rgba(218,119,242,0.15)' : 'transparent',
+                            background: aiBars === b ? 'rgba(218,119,242,0.18)' : 'rgba(255,255,255,0.02)',
                             color: aiBars === b ? '#da77f2' : '#888',
-                            fontSize: '11px',
+                            fontSize: '11.5px',
                             fontWeight: 700,
-                            cursor: 'pointer'
+                            cursor: 'pointer',
+                            transition: 'all 0.15s'
                           }}
                         >
                           {b}B
@@ -1689,7 +1752,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                   </div>
 
                   <div>
-                    <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '8px' }}>
+                    <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '6px' }}>
                       Creativity: <strong style={{ color: '#fff' }}>{aiTemperature.toFixed(2)}</strong>
                     </label>
                     <AppSlider
@@ -1700,14 +1763,14 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                       onChange={setAiTemperature}
                       color="#da77f2"
                     />
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', color: '#666', marginTop: '4px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9.5px', color: '#666', marginTop: '4px' }}>
                       <span>Tight</span>
                       <span>Wild</span>
                     </div>
                   </div>
 
                   <div>
-                    <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '8px' }}>
+                    <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '6px' }}>
                       Density: <strong style={{ color: '#fff' }}>{Math.round(aiDensity * 100)}%</strong>
                     </label>
                     <AppSlider
@@ -1718,7 +1781,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                       onChange={setAiDensity}
                       color="#da77f2"
                     />
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', color: '#666', marginTop: '4px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9.5px', color: '#666', marginTop: '4px' }}>
                       <span>Sparse</span>
                       <span>Intense</span>
                     </div>
@@ -1731,32 +1794,34 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                   onClick={handleGenerateAiProject}
                   style={{
                     width: '100%',
-                    padding: '12px',
-                    borderRadius: '10px',
-                    border: '1px solid #6741d9',
-                    background: '#4c2889',
+                    padding: '12px 20px',
+                    borderRadius: '12px',
+                    border: '1px solid #7950f2',
+                    background: 'linear-gradient(135deg, #5c3dbd 0%, #4c2889 100%)',
                     color: '#fff',
-                    fontSize: '13px',
-                    fontWeight: 600,
+                    fontSize: '13.5px',
+                    fontWeight: 700,
                     cursor: aiGenerating ? 'not-allowed' : 'pointer',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
                     gap: '8px',
-                    boxShadow: 'none',
-                    transition: 'all 0.15s',
+                    boxShadow: '0 4px 18px rgba(103, 65, 217, 0.35)',
+                    transition: 'all 0.18s ease',
                     opacity: aiGenerating ? 0.6 : 1
                   }}
                   onMouseEnter={e => {
                     if (!aiGenerating) {
-                      e.currentTarget.style.background = '#5c3dbd'
-                      e.currentTarget.style.borderColor = '#7950f2'
+                      e.currentTarget.style.background = 'linear-gradient(135deg, #6741d9 0%, #5c3dbd 100%)'
+                      e.currentTarget.style.borderColor = '#9775fa'
+                      e.currentTarget.style.boxShadow = '0 6px 24px rgba(103, 65, 217, 0.5)'
                     }
                   }}
                   onMouseLeave={e => {
                     if (!aiGenerating) {
-                      e.currentTarget.style.background = '#4c2889'
-                      e.currentTarget.style.borderColor = '#6741d9'
+                      e.currentTarget.style.background = 'linear-gradient(135deg, #5c3dbd 0%, #4c2889 100%)'
+                      e.currentTarget.style.borderColor = '#7950f2'
+                      e.currentTarget.style.boxShadow = '0 4px 18px rgba(103, 65, 217, 0.35)'
                     }
                   }}
                 >

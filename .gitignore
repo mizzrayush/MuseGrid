@@ -24,6 +24,8 @@ public/ai_models/
 # Local scratch + audit output
 scratch/
 updates/
+scripts/render_icon.html
+scripts/*_icon_1024.png
 
 # Editor directories and files
 .vscode/*

@@ -215,8 +215,8 @@ public:
 
             setResizable(true, true);
             setResizeLimits(960, 580, 3840, 2160);
-            setSize(1080, 700);
-            centreWithSize(1080, 700);
+            setSize(1180, 700);
+            centreWithSize(1180, 700);
 
             juce::Logger::writeToLog("distDir: " + distDir.getFullPathName() + " (exists: " + juce::String(distDir.exists() ? "YES" : "NO") + ")");
             juce::Logger::writeToLog("Navigating to: " + browserComponent->getResourceProviderRoot());

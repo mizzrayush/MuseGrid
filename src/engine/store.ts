@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { DrumKit, SynthPreset } from '../utils/instruments'
+import { type DrumKit, type SynthPreset, DEFAULT_SYNTH_PRESET, DEFAULT_DRUM_KIT } from '../utils/instruments'
 import { BUILT_IN_FX_LABELS, getTrackFxInstances, isBuiltInFxType } from './fxDefaults'
 
 /** Per-note sound override: a built-in preset, a drum kit, or a hosted VST3 instrument. */
@@ -1058,7 +1058,18 @@ export interface MidiRemapData {
   pitchSensitivity: number;
 }
 
+export interface ProjectTab {
+  id: string
+  name: string
+  filePath?: string | null
+  isDirty: boolean
+  lastSavedAt?: number
+  projectData?: any
+}
+
 export interface AppState {
+  openTabs: ProjectTab[]
+  activeTabId: string
   projectId: string
   projectName: string | null
   projectFilePath: string | null
@@ -1305,6 +1316,11 @@ export interface AppState {
 
   setProjectInfo: (info: Partial<{ projectName: string | null, projectFilePath: string | null }>) => void
   setIsDirty: (v: boolean) => void
+  openProjectInTab: (tabData: { id?: string, name: string, filePath?: string | null, isDirty?: boolean, projectData?: any }) => string
+  switchTab: (tabId: string) => void
+  closeTab: (tabId: string) => void
+  updateActiveTab: (updates: Partial<ProjectTab>) => void
+  openStartTab: () => void
 
   // New controls
   setSnapEnabled: (v: boolean) => void
@@ -1476,6 +1492,189 @@ export interface AppState {
   deleteVoicePreset: (id: string) => void
 }
 
+export const snapshotProjectData = (state: AppState) => ({
+  bpm: state.bpm,
+  tracks: state.tracks,
+  notes: state.notes,
+  activeTrackId: state.activeTrackId,
+  midiRemapData: { ...state.midiRemapData, midi: null },
+  loopEnabled: state.loopEnabled,
+  loopStart: state.loopStart,
+  loopEnd: state.loopEnd,
+  scaleLock: state.scaleLock,
+  snapEnabled: state.snapEnabled,
+  snapResolution: state.snapResolution,
+  gridBlockTicks: state.gridBlockTicks,
+  gridShadeEvery: state.gridShadeEvery,
+  gridColumnCount: state.gridColumnCount,
+  swing: state.swing,
+  metronomeEnabled: state.metronomeEnabled,
+  metronomeVolume: state.metronomeVolume,
+  quantizeInputEnabled: state.quantizeInputEnabled,
+  playheadFollowMode: state.playheadFollowMode,
+  automationCurves: state.automationCurves,
+  automationTargets: state.automationTargets,
+  automationLanes: state.automationLanes,
+  clips: state.clips,
+  groups: state.groups,
+  drumSteps: state.drumSteps,
+  timeSignature: state.timeSignature,
+  metronomeSettings: state.metronomeSettings,
+  studioSettings: state.studioSettings,
+  customFxConfigs: state.customFxConfigs,
+  pitchSnapEnabled: state.pitchSnapEnabled,
+  pitchDropSnap: state.pitchDropSnap,
+  pitchSnapSensitivity: state.pitchSnapSensitivity,
+  verticalMergeThreshold: state.verticalMergeThreshold,
+  verticalStretchMode: state.verticalStretchMode,
+  customSynthRows: state.customSynthRows,
+  customDrumRows: state.customDrumRows,
+  synthLowerOctave: state.synthLowerOctave,
+  synthUpperOctave: state.synthUpperOctave,
+  minNoteSize: state.minNoteSize,
+  autoExtendGrid: state.autoExtendGrid,
+  gridResizable: state.gridResizable,
+  readOnlyMode: state.readOnlyMode,
+  voicePresets: state.voicePresets,
+  deduplicateEnabled: state.deduplicateEnabled,
+  deduplicateOverlapThreshold: state.deduplicateOverlapThreshold,
+  deduplicateProximityTolerance: state.deduplicateProximityTolerance,
+  grooveTemplates: state.grooveTemplates,
+  activeGrooveTemplateId: state.activeGrooveTemplateId,
+  grooveTimingStrength: state.grooveTimingStrength,
+  grooveVelocityStrength: state.grooveVelocityStrength,
+  grooveExtractionTargetAll: state.grooveExtractionTargetAll,
+  quantizeStrength: state.quantizeStrength,
+  zoomSynth: state.zoomSynth,
+  zoomDrum: state.zoomDrum,
+  syncZoom: state.syncZoom,
+  gridSplitOrder: state.gridSplitOrder,
+  gridPaneMode: state.gridPaneMode,
+  showSynthVelocity: state.showSynthVelocity,
+  showDrumVelocity: state.showDrumVelocity,
+  vocalVelocityMin: state.vocalVelocityMin,
+  vocalVelocityMax: state.vocalVelocityMax,
+  vocalVelocityScale: state.vocalVelocityScale,
+  vocalVelocityEnabled: state.vocalVelocityEnabled,
+  horizScrollLockEnabled: state.horizScrollLockEnabled,
+  vertScrollLockEnabled: state.vertScrollLockEnabled,
+  scrollBoth: state.scrollBoth
+})
+
+export const createDefaultTracks = (): Track[] => [
+  {
+    id: 'track_synth',
+    name: 'Default Synth',
+    instrument: 'synth',
+    volume: 1,
+    pan: 0,
+    muted: false,
+    soloed: false,
+    color: '#4dabf7',
+    collapsed: true,
+    synthPreset: DEFAULT_SYNTH_PRESET,
+    delayTime: 0.25,
+    delayFeedback: 0.25
+  },
+  {
+    id: 'track_drum',
+    name: 'Drum Machine',
+    instrument: 'drum',
+    volume: 1,
+    pan: 0,
+    muted: false,
+    soloed: false,
+    color: '#ff9900',
+    collapsed: true,
+    drumKit: DEFAULT_DRUM_KIT,
+    delayTime: 0.25,
+    delayFeedback: 0.25
+  }
+]
+
+export const createBlankProjectData = (projectName = 'Untitled Project') => ({
+  projectName,
+  projectFilePath: null,
+  bpm: 120,
+  timeSignature: [4, 4],
+  loopEnabled: false,
+  loopStart: 0,
+  loopEnd: 768,
+  scaleLock: {
+    enabled: false,
+    root: 0,
+    mode: 'major',
+    accidental: 'sharp' as const
+  },
+  gridSplitOrder: 'synth-first' as const,
+  gridPaneMode: 'split' as const,
+  tracks: createDefaultTracks(),
+  notes: [],
+  selectedNoteIds: [],
+  clips: [],
+  groups: [],
+  automationCurves: {},
+  automationTargets: {},
+  automationLanes: {},
+  history: [],
+  historyIndex: -1,
+  columnWidths: {},
+  sharedPanX: 0,
+  activeTrackId: 'track_synth',
+  playheadPosition: 0
+})
+
+export const applyProjectDataToEngineAndStore = (data: any, tabName?: string, filePath?: string | null): Partial<AppState> => {
+  const ae = typeof window !== 'undefined' ? (window as any).museAudioEngine : null
+  if (ae && typeof ae.resetForNewProject === 'function') {
+    ae.resetForNewProject()
+  }
+
+  const tracksToUse: Track[] = (data.tracks && data.tracks.length > 0) ? data.tracks : createDefaultTracks()
+  const notesToUse: Note[] = Array.isArray(data.notes) ? deduplicateNotes(data.notes) : []
+  const activeId = data.activeTrackId || tracksToUse[0]?.id || 'track_synth'
+
+  if (ae) {
+    tracksToUse.forEach((t: any) => {
+      ae.createInstrument(t.id, t.instrument || 'synth')
+      if (t.instrument === 'drum' && t.drumKit && typeof ae.setTrackDrumKit === 'function') {
+        ae.setTrackDrumKit(t.id, t.drumKit)
+      }
+    })
+    if (data.bpm && typeof ae.setBpm === 'function') {
+      ae.setBpm(data.bpm)
+    }
+  }
+
+  return {
+    projectName: tabName || data.projectName || 'Untitled Project',
+    projectFilePath: filePath !== undefined ? filePath : (data.projectFilePath || null),
+    isDirty: false,
+    notes: notesToUse,
+    tracks: tracksToUse,
+    activeTrackId: activeId,
+    selectedNoteIds: [],
+    history: [],
+    historyIndex: -1,
+    bpm: data.bpm || 120,
+    timeSignature: data.timeSignature || [4, 4],
+    scaleLock: data.scaleLock || { enabled: false, root: 0, mode: 'major', accidental: 'sharp' },
+    loopEnabled: !!data.loopEnabled,
+    loopStart: data.loopStart || 0,
+    loopEnd: data.loopEnd || 768,
+    automationCurves: data.automationCurves || {},
+    automationTargets: data.automationTargets || {},
+    automationLanes: data.automationLanes || {},
+    clips: data.clips || [],
+    groups: data.groups || [],
+    drumSteps: data.drumSteps || 16,
+    playheadPosition: 0,
+    columnWidths: data.columnWidths || {},
+    sharedPanX: data.sharedPanX || 0,
+    isPlaying: false
+  }
+}
+
 export const useStore = create<AppState>((originalSet, get, api) => {
   const set = (
     nextStateOrFn: AppState | Partial<AppState> | ((state: AppState) => AppState | Partial<AppState>),
@@ -1531,7 +1730,16 @@ export const useStore = create<AppState>((originalSet, get, api) => {
     return true
   }
 
+  const initialShowStart = getInitialStartScreenOpen()
+
   return {
+    openTabs: initialShowStart ? [] : [{
+      id: 'tab_default',
+      name: 'Untitled Project',
+      filePath: null,
+      isDirty: false
+    }],
+    activeTabId: initialShowStart ? 'start' : 'tab_default',
     projectId: Math.random().toString(36).substring(2, 9),
     projectName: null,
     projectFilePath: null,
@@ -2314,18 +2522,65 @@ if (firstTrack) {
     })),
     loadState: (newState) => set((state) => {
       const newProjectId = Math.random().toString(36).substring(2, 9)
+      const pName = newState.projectName !== undefined ? newState.projectName : state.projectName
+      const fPath = newState.projectFilePath !== undefined ? newState.projectFilePath : state.projectFilePath
+      let currentActiveId = state.activeTabId
+      let updatedTabs = [...state.openTabs]
+      const currentTabHasContent = state.notes.length > 0 || state.isDirty
+
+      if (currentActiveId === 'start' || updatedTabs.length === 0 || currentTabHasContent) {
+        if (currentActiveId !== 'start' && currentTabHasContent) {
+          updatedTabs = updatedTabs.map(t => {
+            if (t.id === currentActiveId) {
+              return {
+                ...t,
+                tracks: state.tracks,
+                notes: state.notes,
+                bpm: state.bpm,
+                scaleLock: state.scaleLock,
+                history: state.history,
+                isDirty: state.isDirty
+              }
+            }
+            return t
+          })
+        }
+        currentActiveId = `tab_${Math.random().toString(36).substring(2, 9)}`
+        updatedTabs = [...updatedTabs, {
+          id: currentActiveId,
+          name: pName || 'Untitled Project',
+          filePath: fPath,
+          isDirty: false,
+          projectData: newState
+        }]
+      } else {
+        updatedTabs = updatedTabs.map(t => {
+          if (t.id === currentActiveId) {
+            return {
+              ...t,
+              name: pName || 'Untitled Project',
+              filePath: fPath,
+              isDirty: false,
+              projectData: { ...t.projectData, ...newState }
+            }
+          }
+          return t
+        })
+      }
       return {
         ...state,
         ...newState,
+        openTabs: updatedTabs,
+        activeTabId: currentActiveId,
         projectId: newState.projectId || newProjectId,
-        projectName: newState.projectName !== undefined ? newState.projectName : state.projectName,
-        projectFilePath: newState.projectFilePath !== undefined ? newState.projectFilePath : state.projectFilePath,
+        projectName: pName,
+        projectFilePath: fPath,
         isDirty: false,
         customFxConfigs: newState.customFxConfigs !== undefined ? newState.customFxConfigs : state.customFxConfigs,
         // A project saved before formula lanes exists must keep its drawn lanes, not lose the map.
         automationLanes: newState.automationLanes ?? state.automationLanes,
         projectRevision: state.projectRevision + 1,
-        notes: deduplicateNotes(newState.notes || state.notes),
+        notes: deduplicateNotes(newState.notes !== undefined ? newState.notes : state.notes),
         tracks: (newState.tracks || state.tracks).map((t: any) => ({
           ...t,
           collapsed: t.collapsed !== undefined ? t.collapsed : true
@@ -2424,21 +2679,205 @@ if (firstTrack) {
     commitHistory: () => set((state) => {
       const trimmed = state.history.slice(0, state.historyIndex + 1)
       const next = [...trimmed, [...state.notes]].slice(-50) // max 50 steps
-      return { history: next, historyIndex: next.length - 1, isDirty: true }
+      const updatedTabs = state.openTabs.map(t => t.id === state.activeTabId ? { ...t, isDirty: true } : t)
+      return { history: next, historyIndex: next.length - 1, isDirty: true, openTabs: updatedTabs }
     }),
     undo: () => set((state) => {
       if (state.historyIndex <= 0) return { isDirty: true }
       const idx = state.historyIndex - 1
-      return { notes: [...state.history[idx]], historyIndex: idx, isDirty: true }
+      const updatedTabs = state.openTabs.map(t => t.id === state.activeTabId ? { ...t, isDirty: true } : t)
+      return { notes: [...state.history[idx]], historyIndex: idx, isDirty: true, openTabs: updatedTabs }
     }),
     redo: () => set((state) => {
       if (state.historyIndex >= state.history.length - 1) return { isDirty: true }
       const idx = state.historyIndex + 1
-      return { notes: [...state.history[idx]], historyIndex: idx, isDirty: true }
+      const updatedTabs = state.openTabs.map(t => t.id === state.activeTabId ? { ...t, isDirty: true } : t)
+      return { notes: [...state.history[idx]], historyIndex: idx, isDirty: true, openTabs: updatedTabs }
     }),
 
-    setProjectInfo: (info) => set(() => ({ ...info })),
-    setIsDirty: (v) => set({ isDirty: v }),
+    setProjectInfo: (info) => set((state) => {
+      const pName = info.projectName !== undefined ? info.projectName : state.projectName
+      const fPath = info.projectFilePath !== undefined ? info.projectFilePath : state.projectFilePath
+      const updatedTabs = state.openTabs.map(t => {
+        if (t.id === state.activeTabId) {
+          return {
+            ...t,
+            name: pName || 'Untitled Project',
+            filePath: fPath
+          }
+        }
+        return t
+      })
+      return {
+        ...info,
+        openTabs: updatedTabs
+      }
+    }),
+
+    setIsDirty: (v) => set((state) => {
+      const updatedTabs = state.openTabs.map(t => {
+        if (t.id === state.activeTabId) {
+          return { ...t, isDirty: v }
+        }
+        return t
+      })
+      return { isDirty: v, openTabs: updatedTabs }
+    }),
+
+    openProjectInTab: (tabData) => {
+      const state = useStore.getState()
+      const id = tabData.id || `tab_${Math.random().toString(36).substring(2, 9)}`
+
+      // 1. Snapshot current active tab before switching away
+      let updatedTabs = [...state.openTabs]
+      if (state.activeTabId && state.activeTabId !== 'start') {
+        const curSnapshot = snapshotProjectData(state)
+        updatedTabs = updatedTabs.map(t => {
+          if (t.id === state.activeTabId) {
+            return {
+              ...t,
+              projectData: curSnapshot,
+              name: state.projectName || t.name,
+              filePath: state.projectFilePath,
+              isDirty: state.isDirty
+            }
+          }
+          return t
+        })
+      }
+
+      // 2. Prepare the new project data (either supplied or fresh blank)
+      const projectDataToLoad = tabData.projectData || createBlankProjectData(tabData.name)
+
+      const initialDirty = tabData.isDirty !== undefined
+        ? tabData.isDirty
+        : (!tabData.filePath && (projectDataToLoad.notes?.length ?? 0) > 0)
+
+      // 3. Create the new tab
+      const newTab: ProjectTab = {
+        id,
+        name: tabData.name || 'Untitled Project',
+        filePath: tabData.filePath || null,
+        isDirty: initialDirty,
+        projectData: projectDataToLoad
+      }
+
+      // 4. Apply clean project state to store and audio engine
+      const appliedState = applyProjectDataToEngineAndStore(projectDataToLoad, newTab.name, newTab.filePath)
+
+      set({
+        ...appliedState,
+        isDirty: initialDirty,
+        openTabs: [...updatedTabs, newTab],
+        activeTabId: id,
+        isStartScreenOpen: false
+      })
+
+      return id
+    },
+
+    switchTab: (tabId) => {
+      const state = useStore.getState()
+      if (state.activeTabId === tabId) return
+
+      // Stop transport if playing
+      if (state.isPlaying) {
+        state.setIsPlaying(false)
+      }
+
+      let updatedTabs = [...state.openTabs]
+      // Snapshot current tab before switching away if activeTabId is not 'start'
+      if (state.activeTabId && state.activeTabId !== 'start') {
+        const currentData = snapshotProjectData(state)
+        updatedTabs = updatedTabs.map(t => {
+          if (t.id === state.activeTabId) {
+            return {
+              ...t,
+              projectData: currentData,
+              name: state.projectName || t.name,
+              filePath: state.projectFilePath,
+              isDirty: state.isDirty
+            }
+          }
+          return t
+        })
+      }
+
+      if (tabId === 'start') {
+        set({ openTabs: updatedTabs, activeTabId: 'start' })
+        return
+      }
+
+      const targetTab = updatedTabs.find(t => t.id === tabId)
+      if (!targetTab) return
+
+      const projectDataToLoad = targetTab.projectData || createBlankProjectData(targetTab.name)
+      const appliedState = applyProjectDataToEngineAndStore(projectDataToLoad, targetTab.name, targetTab.filePath)
+
+      set({
+        ...appliedState,
+        openTabs: updatedTabs,
+        activeTabId: tabId,
+        isDirty: targetTab.isDirty
+      })
+    },
+
+    closeTab: (tabId) => {
+      const state = useStore.getState()
+      if (state.isPlaying) {
+        state.setIsPlaying(false)
+      }
+
+      const remainingTabs = state.openTabs.filter(t => t.id !== tabId)
+
+      if (state.activeTabId === tabId) {
+        if (remainingTabs.length > 0) {
+          const closedIdx = state.openTabs.findIndex(t => t.id === tabId)
+          const newIdx = Math.max(0, Math.min(closedIdx, remainingTabs.length - 1))
+          const nextTab = remainingTabs[newIdx]
+          const projectDataToLoad = nextTab.projectData || createBlankProjectData(nextTab.name)
+          const appliedState = applyProjectDataToEngineAndStore(projectDataToLoad, nextTab.name, nextTab.filePath)
+
+          set({
+            ...appliedState,
+            openTabs: remainingTabs,
+            activeTabId: nextTab.id,
+            isDirty: nextTab.isDirty
+          })
+          return
+        } else {
+          // No tabs remain -> return to Start screen with clean state and purge leftover notes
+          const ae = typeof window !== 'undefined' ? (window as any).museAudioEngine : null
+          if (ae && typeof ae.resetForNewProject === 'function') {
+            ae.resetForNewProject()
+          }
+
+          set({
+            openTabs: [],
+            activeTabId: 'start',
+            projectName: null,
+            projectFilePath: null,
+            isDirty: false,
+            notes: [],
+            selectedNoteIds: [],
+            history: [],
+            historyIndex: -1
+          })
+          return
+        }
+      }
+
+      // Closing inactive tab
+      set({ openTabs: remainingTabs })
+    },
+
+    updateActiveTab: (updates) => set(state => ({
+      openTabs: state.openTabs.map(t => t.id === state.activeTabId ? { ...t, ...updates } : t)
+    })),
+
+    openStartTab: () => {
+      useStore.getState().switchTab('start')
+    },
 
     quantizeSelectedNotes: () => set((state) => {
       if (state.selectedNoteIds.length === 0) return {}

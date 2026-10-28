@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom'
 import { Midi } from '@tonejs/midi'
 import * as Tone from 'tone'
 import { useStore, DEFAULT_DRUM_ROWS, DEFAULT_VOICE_PRESETS, defaultGrooveTemplates, isPluginDrum, isPluginSynth, getPluginInstrumentType, type Track, type DrumRowConfig, type CustomFxConfig, type Note, type VoicePreset } from '../engine/store'
-import { audioEngine } from '../engine/AudioEngine'
+import { audioEngine, type AudioDeviceSetup } from '../engine/AudioEngine'
 import { getTrackFxInstances } from '../engine/fxDefaults'
 import { useContextMenuDismissal } from './useContextMenuDismissal'
 import { AppSlider, sliderProgress } from './AppSlider'
@@ -930,6 +930,68 @@ export default function LeftPane() {
 
   const [vst3Filter, setVst3Filter] = useState<'all' | 'instruments' | 'fx'>('all')
   const [vst3Search, setVst3Search] = useState('')
+
+  const [audioSetup, setAudioSetup] = useState<AudioDeviceSetup | null>(null)
+  const [isUpdatingAudioDevice, setIsUpdatingAudioDevice] = useState(false)
+
+  useEffect(() => {
+    audioEngine.getAudioDeviceSetup().then(setup => {
+      if (setup) setAudioSetup(setup)
+    })
+  }, [])
+
+  const handleDriverTypeChange = async (newType: string) => {
+    setIsUpdatingAudioDevice(true)
+    try {
+      const updated = await audioEngine.setAudioDeviceSetup({ type: newType })
+      if (updated) setAudioSetup(updated)
+      useStore.getState().showToast(`Audio system changed to ${newType}`, 'success')
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setIsUpdatingAudioDevice(false)
+    }
+  }
+
+  const handleDeviceChange = async (deviceName: string) => {
+    setIsUpdatingAudioDevice(true)
+    try {
+      const updated = await audioEngine.setAudioDeviceSetup({ outputDevice: deviceName })
+      if (updated) setAudioSetup(updated)
+      useStore.getState().showToast(`Audio output set to ${deviceName}`, 'success')
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setIsUpdatingAudioDevice(false)
+    }
+  }
+
+  const handleBufferSizeChange = async (bufSize: number) => {
+    setIsUpdatingAudioDevice(true)
+    try {
+      const updated = await audioEngine.setAudioDeviceSetup({ bufferSize: bufSize })
+      if (updated) setAudioSetup(updated)
+      const lat = updated?.latencyMs ? ` (~${updated.latencyMs.toFixed(1)} ms)` : ''
+      useStore.getState().showToast(`Buffer size set to ${bufSize} samples${lat}`, 'success')
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setIsUpdatingAudioDevice(false)
+    }
+  }
+
+  const handleSampleRateChange = async (rate: number) => {
+    setIsUpdatingAudioDevice(true)
+    try {
+      const updated = await audioEngine.setAudioDeviceSetup({ sampleRate: rate })
+      if (updated) setAudioSetup(updated)
+      useStore.getState().showToast(`Sample rate set to ${(rate / 1000).toFixed(1)} kHz`, 'success')
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setIsUpdatingAudioDevice(false)
+    }
+  }
 
   const filteredVst3List = useMemo(() => {
     return (vst3Plugins || []).filter(p => {
@@ -4470,6 +4532,174 @@ export default function LeftPane() {
               }}>
                 <IconAlertTriangle size={13} style={{ color: '#ffe066', flexShrink: 0 }} />
                 <span>WASM engine is currently experimental and may occasionally fall back to Tone.js if audio worklet channels underflow or experience high jitter.</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Workstation Audio Driver & Hardware Setup */}
+          <div style={{
+            marginTop: '12px',
+            padding: '10px 12px',
+            background: 'rgba(255, 255, 255, 0.02)',
+            border: '1px solid rgba(255, 255, 255, 0.07)',
+            borderRadius: '8px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '10px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <IconSpeaker size={13} style={{ color: '#4dabf7' }} />
+                <span style={{ fontSize: '11px', fontWeight: 700, color: '#e0e6ed', letterSpacing: '0.02em' }}>
+                  Hardware Audio Driver
+                </span>
+              </div>
+              {audioSetup && (
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  background: 'rgba(0, 230, 118, 0.1)',
+                  border: '1px solid rgba(0, 230, 118, 0.25)',
+                  borderRadius: '12px',
+                  padding: '2px 8px',
+                  fontSize: '9.5px',
+                  fontWeight: 700,
+                  color: '#00e676'
+                }}>
+                  <span style={{ width: '5px', height: '5px', borderRadius: '50%', background: '#00e676', boxShadow: '0 0 6px #00e676' }} />
+                  {audioSetup.latencyMs ? `${audioSetup.latencyMs.toFixed(1)} ms` : 'Active'}
+                </div>
+              )}
+            </div>
+
+            {/* Audio Driver / System */}
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                <span style={{ fontSize: '10.5px', color: '#888', fontWeight: 600 }}>Audio System</span>
+                {isUpdatingAudioDevice && (
+                  <span style={{ fontSize: '10px', color: '#4dabf7', fontWeight: 600 }}>Applying...</span>
+                )}
+              </div>
+              <select
+                value={audioSetup?.currentType || ''}
+                disabled={isUpdatingAudioDevice}
+                onChange={e => handleDriverTypeChange(e.target.value)}
+                style={{
+                  width: '100%',
+                  background: '#151620',
+                  color: '#fff',
+                  padding: '6px 8px',
+                  borderRadius: '5px',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  outline: 'none',
+                  cursor: isUpdatingAudioDevice ? 'wait' : 'pointer'
+                }}
+              >
+                {(audioSetup?.availableTypes || ['Windows Audio', 'DirectSound']).map(t => (
+                  <option key={t} value={t}>{t}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Output Device */}
+            <div>
+              <span style={{ fontSize: '10.5px', color: '#888', fontWeight: 600, display: 'block', marginBottom: '4px' }}>
+                Output Device
+              </span>
+              <select
+                value={audioSetup?.currentOutputDevice || ''}
+                disabled={isUpdatingAudioDevice || !audioSetup?.availableOutputDevices?.length}
+                onChange={e => handleDeviceChange(e.target.value)}
+                style={{
+                  width: '100%',
+                  background: '#151620',
+                  color: '#fff',
+                  padding: '6px 8px',
+                  borderRadius: '5px',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  fontSize: '11px',
+                  fontWeight: 500,
+                  outline: 'none',
+                  cursor: isUpdatingAudioDevice ? 'wait' : 'pointer'
+                }}
+              >
+                {(audioSetup?.availableOutputDevices || [audioSetup?.currentOutputDevice || 'Default Output']).map(dev => (
+                  <option key={dev} value={dev}>{dev}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Buffer Size & Sample Rate */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+              <div>
+                <span style={{ fontSize: '10.5px', color: '#888', fontWeight: 600, display: 'block', marginBottom: '4px' }}>
+                  Buffer Size
+                </span>
+                <select
+                  value={audioSetup?.bufferSize || 512}
+                  disabled={isUpdatingAudioDevice}
+                  onChange={e => handleBufferSizeChange(Number(e.target.value))}
+                  style={{
+                    width: '100%',
+                    background: '#151620',
+                    color: '#fff',
+                    padding: '6px 8px',
+                    borderRadius: '5px',
+                    border: '1px solid rgba(255,255,255,0.1)',
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    outline: 'none',
+                    cursor: isUpdatingAudioDevice ? 'wait' : 'pointer'
+                  }}
+                >
+                  {(audioSetup?.availableBufferSizes && audioSetup.availableBufferSizes.length > 0
+                    ? audioSetup.availableBufferSizes
+                    : [64, 128, 256, 512, 1024, 2048]
+                  ).map(bs => {
+                    const lat = audioSetup?.sampleRate ? ((bs * 1000) / audioSetup.sampleRate).toFixed(1) : ''
+                    return (
+                      <option key={bs} value={bs}>
+                        {bs} spl {lat ? `(~${lat}ms)` : ''}
+                      </option>
+                    )
+                  })}
+                </select>
+              </div>
+
+              {/* Sample Rate */}
+              <div>
+                <span style={{ fontSize: '10.5px', color: '#888', fontWeight: 600, display: 'block', marginBottom: '4px' }}>
+                  Sample Rate
+                </span>
+                <select
+                  value={audioSetup?.sampleRate || 44100}
+                  disabled={isUpdatingAudioDevice}
+                  onChange={e => handleSampleRateChange(Number(e.target.value))}
+                  style={{
+                    width: '100%',
+                    background: '#151620',
+                    color: '#fff',
+                    padding: '6px 8px',
+                    borderRadius: '5px',
+                    border: '1px solid rgba(255,255,255,0.1)',
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    outline: 'none',
+                    cursor: isUpdatingAudioDevice ? 'wait' : 'pointer'
+                  }}
+                >
+                  {(audioSetup?.availableSampleRates && audioSetup.availableSampleRates.length > 0
+                    ? audioSetup.availableSampleRates
+                    : [44100, 48000, 88200, 96000]
+                  ).map(sr => (
+                    <option key={sr} value={sr}>
+                      {(sr / 1000).toFixed(1)} kHz
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
           </div>

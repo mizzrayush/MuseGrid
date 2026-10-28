@@ -269,6 +269,12 @@ juce::WebBrowserComponent::Options JuceBridge::setupOptions(juce::WebBrowserComp
             else if (auto* app = juce::JUCEApplication::getInstance())
                 app->systemRequestedQuit();
             comp(true);
+        })
+        .withNativeFunction("get-audio-device-setup", [this](auto& args, auto comp) {
+            handleGetAudioDeviceSetup(args, comp);
+        })
+        .withNativeFunction("set-audio-device-setup", [this](auto& args, auto comp) {
+            handleSetAudioDeviceSetup(args, comp);
         });
 }
 
@@ -1203,4 +1209,133 @@ void JuceBridge::handleVst3OpenEditor(const juce::Array<juce::var>& args, juce::
         return;
     }
     complete(false);
+}
+
+void JuceBridge::handleGetAudioDeviceSetup(const juce::Array<juce::var>& /*args*/, juce::WebBrowserComponent::NativeFunctionCompletion complete)
+{
+    auto& dm = audioEngine.getDeviceManager();
+    const auto& availableTypes = dm.getAvailableDeviceTypes();
+
+    juce::DynamicObject::Ptr res = new juce::DynamicObject();
+
+    juce::Array<juce::var> typeNames;
+    for (auto* type : availableTypes)
+    {
+        if (type != nullptr)
+            typeNames.add(type->getTypeName());
+    }
+    res->setProperty("availableTypes", typeNames);
+    res->setProperty("currentType", dm.getCurrentAudioDeviceType());
+
+    auto* currentDevice = dm.getCurrentAudioDevice();
+    auto setup = dm.getAudioDeviceSetup();
+
+    res->setProperty("currentOutputDevice", setup.outputDeviceName);
+    res->setProperty("sampleRate", setup.sampleRate);
+    res->setProperty("bufferSize", setup.bufferSize);
+
+    juce::Array<juce::var> outputDevices;
+    if (auto* currentTypeObj = dm.getCurrentDeviceTypeObject())
+    {
+        currentTypeObj->scanForDevices();
+        auto names = currentTypeObj->getDeviceNames(false);
+        for (const auto& n : names)
+            outputDevices.add(n);
+    }
+    res->setProperty("availableOutputDevices", outputDevices);
+
+    juce::Array<juce::var> sampleRates;
+    juce::Array<juce::var> bufferSizes;
+    double latencyMs = 0.0;
+
+    if (currentDevice != nullptr)
+    {
+        for (auto rate : currentDevice->getAvailableSampleRates())
+            sampleRates.add(rate);
+
+        for (auto size : currentDevice->getAvailableBufferSizes())
+            bufferSizes.add(size);
+
+        int outputLatencySamples = currentDevice->getOutputLatencyInSamples();
+        if (setup.sampleRate > 0)
+            latencyMs = (double)(setup.bufferSize + outputLatencySamples) * 1000.0 / setup.sampleRate;
+    }
+
+    if (sampleRates.isEmpty())
+    {
+        sampleRates.add(44100);
+        sampleRates.add(48000);
+        sampleRates.add(88200);
+        sampleRates.add(96000);
+    }
+
+    if (bufferSizes.isEmpty())
+    {
+        bufferSizes.add(64);
+        bufferSizes.add(128);
+        bufferSizes.add(256);
+        bufferSizes.add(512);
+        bufferSizes.add(1024);
+    }
+
+    if (latencyMs <= 0.0 && setup.sampleRate > 0 && setup.bufferSize > 0)
+    {
+        latencyMs = (double)setup.bufferSize * 1000.0 / setup.sampleRate;
+    }
+
+    res->setProperty("availableSampleRates", sampleRates);
+    res->setProperty("availableBufferSizes", bufferSizes);
+    res->setProperty("latencyMs", latencyMs);
+
+    complete(juce::var(res.get()));
+}
+
+void JuceBridge::handleSetAudioDeviceSetup(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete)
+{
+    if (args.isEmpty() || !args[0].isObject())
+    {
+        handleGetAudioDeviceSetup(args, complete);
+        return;
+    }
+
+    auto* req = args[0].getDynamicObject();
+    auto& dm = audioEngine.getDeviceManager();
+
+    if (req->hasProperty("type"))
+    {
+        juce::String newType = req->getProperty("type").toString();
+        if (newType.isNotEmpty() && newType != dm.getCurrentAudioDeviceType())
+        {
+            dm.setCurrentAudioDeviceType(newType, true);
+        }
+    }
+
+    auto setup = dm.getAudioDeviceSetup();
+
+    if (req->hasProperty("outputDevice"))
+    {
+        juce::String outDev = req->getProperty("outputDevice").toString();
+        if (outDev.isNotEmpty())
+            setup.outputDeviceName = outDev;
+    }
+
+    if (req->hasProperty("sampleRate"))
+    {
+        double sr = (double)req->getProperty("sampleRate");
+        if (sr > 0) setup.sampleRate = sr;
+    }
+
+    if (req->hasProperty("bufferSize"))
+    {
+        int bs = (int)req->getProperty("bufferSize");
+        if (bs > 0) setup.bufferSize = bs;
+    }
+
+    auto err = dm.setAudioDeviceSetup(setup, true);
+    if (err.isNotEmpty())
+    {
+        juce::Logger::writeToLog("setAudioDeviceSetup: " + err);
+    }
+
+    handleGetAudioDeviceSetup(args, complete);
 }

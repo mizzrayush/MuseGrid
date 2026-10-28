@@ -51,4 +51,8 @@ private:
     void handleVst3Scan(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
     void handleVst3GetPlugins(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
     void handleVst3OpenEditor(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
+
+    // Audio Device Manager & Driver Handlers
+    void handleGetAudioDeviceSetup(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
+    void handleSetAudioDeviceSetup(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
 };

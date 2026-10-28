@@ -15,10 +15,11 @@ import { DrumDesignerModal } from './ui/DrumDesignerModal'
 import { audioEngine } from './engine/AudioEngine'
 import { recordingEngine } from './engine/RecordingEngine'
 import { scheduler } from './engine/Scheduler'
-import { useStore, saveRecentProject } from './engine/store'
+import { useStore, saveRecentProject, type ProjectTab } from './engine/store'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET } from './utils/instruments'
 import { saveFileWithDialog } from './utils/fileExport'
-import { IconTrash, IconDownload, IconSave, IconPlay, IconStop, IconMidi, IconAlign, IconSkipBack, IconChevronDown, IconMaximize, IconMusic, IconStretch, IconChevronLeft, IconChevronRight, IconSync, IconHelp, IconTarget, IconSliders, IconLayers, IconAlertTriangle } from './ui/Icons'
+import { ProjectTabBar } from './ui/ProjectTabBar'
+import { IconTrash, IconDownload, IconSave, IconPlay, IconStop, IconMidi, IconAlign, IconSkipBack, IconChevronDown, IconMaximize, IconMusic, IconStretch, IconChevronLeft, IconChevronRight, IconSync, IconHelp, IconTarget, IconSliders, IconAlertTriangle } from './ui/Icons'
 
 function TransportTimeDisplay() {
   const playheadPosition = useStore(s => s.playheadPosition)
@@ -144,11 +145,32 @@ function App() {
   const [saveCloseClosing, setSaveCloseClosing] = useState(false)
   const [isSavingAndClosing, setIsSavingAndClosing] = useState(false)
   const [showSaveMenu, setShowSaveMenu] = useState(false)
+  const openTabs = useStore(s => s.openTabs)
+  const activeTabId = useStore(s => s.activeTabId)
+  const openProjectInTab = useStore(s => s.openProjectInTab)
+  const closeTab = useStore(s => s.closeTab)
+  const [tabPendingClose, setTabPendingClose] = useState<ProjectTab | null>(null)
   const [isInitialLaunch, setIsInitialLaunch] = useState(() => {
     return localStorage.getItem('musegrid_show_start_screen') !== 'false'
   })
-  const isStartScreenOpen = useStore(s => s.isStartScreenOpen)
-  const isStartScreenCovering = isStartScreenOpen && isInitialLaunch
+  const hasOpenProjects = openTabs.length > 0 && !isInitialLaunch
+
+  const handleRequestCloseTab = (tab: ProjectTab) => {
+    const state = useStore.getState()
+    const isActive = state.activeTabId === tab.id
+    const isDirty = isActive ? state.isDirty : tab.isDirty
+    const hasNotes = isActive ? (state.notes.length > 0) : ((tab.projectData?.notes?.length ?? 0) > 0)
+    const filePath = isActive ? state.projectFilePath : tab.filePath
+    const name = isActive ? (state.projectName || tab.name) : tab.name
+
+    const hasUnsavedChanges = isDirty || (!filePath && hasNotes)
+
+    if (hasUnsavedChanges) {
+      setTabPendingClose({ ...tab, name, filePath, isDirty: true })
+    } else {
+      closeTab(tab.id)
+    }
+  }
 
   const projectName = useStore(s => s.projectName)
   const isDirty = useStore(s => s.isDirty)
@@ -343,50 +365,57 @@ function App() {
 
         if (parsed.format === 'muztrack') {
           const data = parsed
-          useStore.getState().loadState({
-            projectName: res.filePath.split(/[\\/]/).pop().replace(/\.(muz|muztrack)$/i, ''),
-            projectFilePath: res.filePath,
-            automationTargets: {},
-            automationLanes: {},
-            bpm: data.bpm || 120,
-            timeSignature: data.timeSignature || '4/4',
-            tracks: (data.tracks || []).map((t: any) => ({
-              ...t,
-              instrument: t.instrument || 'synth',
-              volume: t.volume ?? 0.8,
-              pan: t.pan ?? 0,
-              muted: false,
-              soloed: false
-            })),
-            notes: (data.notes || []).map((n: any) => ({
-              id: n.id || `n_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-              trackId: n.trackId,
-              pitch: n.pitch,
-              time: n.time,
-              duration: n.duration,
-              velocity: n.velocity ?? 0.8,
-              lyric: n.lyric
-            }))
+          const pName = res.filePath.split(/[\\/]/).pop().replace(/\.(muz|muztrack)$/i, '')
+          openProjectInTab({
+            name: pName,
+            filePath: res.filePath,
+            projectData: {
+              projectName: pName,
+              projectFilePath: res.filePath,
+              automationTargets: {},
+              automationLanes: {},
+              bpm: data.bpm || 120,
+              timeSignature: data.timeSignature || '4/4',
+              tracks: (data.tracks || []).map((t: any) => ({
+                ...t,
+                instrument: t.instrument || 'synth',
+                volume: t.volume ?? 0.8,
+                pan: t.pan ?? 0,
+                muted: false,
+                soloed: false
+              })),
+              notes: (data.notes || []).map((n: any) => ({
+                id: n.id || `n_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                trackId: n.trackId,
+                pitch: n.pitch,
+                time: n.time,
+                duration: n.duration,
+                velocity: n.velocity ?? 0.8,
+                lyric: n.lyric
+              }))
+            }
           })
-          audioEngine.setBpm(data.bpm || 120)
-          useStore.getState().tracks.forEach(track => { audioEngine.createInstrument(track.id, track.instrument || 'synth') })
-          const state = useStore.getState()
-          if (state.tracks.length > 0) state.setActiveTrackId(state.tracks[0].id)
-          state.setIsStartScreenOpen(false)
+          setIsInitialLaunch(false)
           ipc.invoke('set-fullscreen', true).catch(() => {})
           useStore.getState().showToast(`Opened .muztrack project (${data.tracks.length} tracks)`, 'success')
           return
         }
-        useStore.getState().loadState({ ...parsed, automationTargets: parsed.automationTargets ?? {}, automationLanes: parsed.automationLanes ?? {}, projectFilePath: res.filePath, projectName: res.filePath.split(/[\\/]/).pop().replace(/\.(muz|muztrack)$/i, '') })
-        audioEngine.setBpm(parsed.bpm || 120)
-        useStore.getState().tracks.forEach(track => { audioEngine.createInstrument(track.id, track.instrument || 'synth') })
-        const state = useStore.getState()
-        const activeExists = state.tracks.some(t => t.id === state.activeTrackId)
-        if (!activeExists && state.tracks.length > 0) state.setActiveTrackId(state.tracks[0].id)
-        state.setIsStartScreenOpen(false)
+        const pName = res.filePath.split(/[\\/]/).pop().replace(/\.(muz|muztrack)$/i, '')
+        openProjectInTab({
+          name: pName,
+          filePath: res.filePath,
+          projectData: {
+            ...parsed,
+            automationTargets: parsed.automationTargets ?? {},
+            automationLanes: parsed.automationLanes ?? {},
+            projectFilePath: res.filePath,
+            projectName: pName
+          }
+        })
+        setIsInitialLaunch(false)
         ipc.invoke('set-fullscreen', true).catch(() => {})
         saveRecentProject({
-          name: res.filePath.split(/[\\/]/).pop().replace(/\.(muz|muztrack)$/i, ''),
+          name: pName,
           filePath: res.filePath,
           bpm: parsed.bpm || 120,
           trackCount: (parsed.tracks || []).length
@@ -495,6 +524,13 @@ function App() {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault()
         handleSaveProject()
+        return
+      }
+
+      // Ctrl+N / Cmd+N (New Project Tab)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
+        e.preventDefault()
+        handleNewProject()
         return
       }
 
@@ -742,12 +778,11 @@ function App() {
   }
 
   const handleNewProject = () => {
-    const notes = useStore.getState().notes
-    const isDirty = useStore.getState().isDirty
-    if (notes.length === 0 && !isDirty) {
-      confirmNewProject()
-    } else {
-      setShowNewProjectConfirm(true)
+    setIsInitialLaunch(false)
+    openProjectInTab({ name: 'Untitled Project', isDirty: false })
+    const ipc = (window as any).ipcRenderer
+    if (ipc && typeof ipc.invoke === 'function') {
+      ipc.invoke('set-fullscreen', true).catch(() => {})
     }
   }
 
@@ -829,49 +864,33 @@ function App() {
   return (
     <div style={{ display: 'flex', width: '100vw', height: '100vh', flexDirection: 'column', background: '#0a0a0f', overflow: 'hidden' }}>
       <ToastContainer />
-      {/* Studio Workspace Container (hidden on initial start screen to prevent flash) */}
-      <div style={{
-        display: 'flex',
-        flexDirection: 'column',
-        width: '100%',
-        height: '100%',
-        overflow: 'hidden',
-        visibility: isStartScreenCovering ? 'hidden' : 'visible'
-      }}>
-        {/* Top Header / Studio Pro Transport Deck */}
-        <div className="glass-panel" style={{ height: '54px', display: 'flex', alignItems: 'center', padding: '0 16px', gap: '14px', borderBottom: '1px solid rgba(255, 255, 255, 0.06)', zIndex: 10 }}>
+      {/* If no project is open (e.g. startup or all closed), render full-screen Start Screen edge-to-edge without tabs */}
+      {!hasOpenProjects ? (
+        <StartScreenModal
+          embedded={true}
+          isInitialLaunch={isInitialLaunch}
+          onNewProject={handleNewProject}
+          onOpenProject={handleOpenProject}
+          onProjectLoaded={() => setIsInitialLaunch(false)}
+        />
+      ) : (
+        <div style={{
+          display: 'flex',
+          flexDirection: 'column',
+          width: '100%',
+          height: '100%',
+          overflow: 'hidden'
+        }}>
+          {/* Top Header / Studio Pro Transport Deck */}
+          <div className="glass-panel" style={{ height: '54px', display: 'flex', alignItems: 'center', padding: '0 16px', gap: '14px', borderBottom: '1px solid rgba(255, 255, 255, 0.06)', zIndex: 10 }}>
         
-        {/* Brand & Project Identity */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
-          {/* Project File Chip */}
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px',
-            background: 'rgba(255,255,255,0.03)',
-            border: '1px solid rgba(255,255,255,0.07)',
-            borderRadius: '6px',
-            padding: '3px 8px',
-            fontSize: '11px',
-            fontWeight: 600,
-            color: '#8b92a5'
-          }} title={isDirty ? "Unsaved changes" : "All changes saved"}>
-            <span style={{
-              width: '6px',
-              height: '6px',
-              borderRadius: '50%',
-              background: isDirty ? '#f59f00' : '#00e676',
-              boxShadow: isDirty ? '0 0 6px rgba(245, 159, 0, 0.6)' : '0 0 6px rgba(0, 230, 118, 0.5)'
-            }} />
-            <span style={{ color: '#d0d5e2', maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {projectName || 'Untitled'}
-            </span>
-            {isDirty && <span style={{ color: '#f59f00', fontWeight: 800, fontSize: '12px' }}>*</span>}
-          </div>
-        </div>
+        {/* Project Tabs Strip */}
+        <ProjectTabBar onRequestCloseTab={handleRequestCloseTab} />
 
-        {/* Central Hardware Transport Deck */}
-        <div className="transport-deck" style={{ margin: '0 auto' }}>
+        {activeTabId !== 'start' ? (
+          <>
+            {/* Central Hardware Transport Deck */}
+            <div className="transport-deck" style={{ margin: '0 auto' }}>
           {/* Return to Zero */}
           <button
             onClick={() => {
@@ -1044,40 +1063,6 @@ function App() {
 
         {/* Right Workspace Controls */}
         <div style={{ display: 'flex', gap: '7px', marginLeft: 'auto', alignItems: 'center', flexShrink: 0 }}>
-          {/* Start Hub */}
-          <button
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              background: 'linear-gradient(135deg, rgba(77, 171, 247, 0.16) 0%, rgba(139, 92, 246, 0.16) 100%)',
-              border: '1px solid rgba(139, 92, 246, 0.35)',
-              color: '#fff',
-              borderRadius: '6px',
-              padding: '5px 11px',
-              cursor: 'pointer',
-              fontSize: '11px',
-              fontWeight: 700,
-              boxShadow: '0 2px 8px rgba(77, 171, 247, 0.12)',
-              transition: 'all 0.15s ease'
-            }}
-            onClick={() => {
-              setIsInitialLaunch(false)
-              useStore.getState().setIsStartScreenOpen(true)
-            }}
-            title="Open Studio Start Hub (Templates, AI & Library)"
-            onMouseEnter={e => {
-              e.currentTarget.style.background = 'linear-gradient(135deg, rgba(77, 171, 247, 0.28) 0%, rgba(139, 92, 246, 0.28) 100%)'
-              e.currentTarget.style.borderColor = 'rgba(139, 92, 246, 0.55)'
-            }}
-            onMouseLeave={e => {
-              e.currentTarget.style.background = 'linear-gradient(135deg, rgba(77, 171, 247, 0.16) 0%, rgba(139, 92, 246, 0.16) 100%)'
-              e.currentTarget.style.borderColor = 'rgba(139, 92, 246, 0.35)'
-            }}
-          >
-            <IconLayers size={13} style={{ color: '#4dabf7' }} /> Start Hub
-          </button>
-
           {/* Save */}
           <div style={{ position: 'relative', display: 'flex' }} onClick={e => e.stopPropagation()}>
             <div style={{ display: 'flex', alignItems: 'stretch', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px' }}>
@@ -1312,21 +1297,57 @@ function App() {
             <IconHelp size={14} />
           </button>
         </div>
+        </>
+        ) : (
+          <div style={{ display: 'flex', gap: '7px', marginLeft: 'auto', alignItems: 'center', flexShrink: 0 }}>
+            {/* Minimalist Help on Start tab */}
+            <button
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: 'rgba(255,255,255,0.05)',
+                border: '1px solid rgba(255,255,255,0.1)',
+                color: '#b8c0d4',
+                borderRadius: '6px',
+                padding: '5px 8px',
+                height: '25px',
+                minWidth: '27px',
+                cursor: 'pointer',
+                transition: 'all 0.12s'
+              }}
+              title="Open DAW Manual & MIDI Theory Reference (Help)"
+              onClick={() => useStore.getState().setIsHelpPaneVisible(true)}
+              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.1)'; e.currentTarget.style.color = '#fff' }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = '#b8c0d4' }}
+            >
+              <IconHelp size={14} />
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Main Workspace */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden', position: 'relative' }}>
-        <div style={{
-          width: leftPaneCollapsed ? '0px' : `${leftPaneWidth}px`,
-          minWidth: leftPaneCollapsed ? '0px' : '240px',
-          flexShrink: 0,
-          display: 'flex',
-          overflow: 'hidden',
-          transition: 'width 0.22s cubic-bezier(0.4, 0, 0.2, 1), min-width 0.22s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.15s ease-in-out',
-          opacity: leftPaneCollapsed ? 0 : 1
-        }}>
-          <LeftPane />
-        </div>
+        {activeTabId === 'start' ? (
+          <StartScreenModal
+            embedded={true}
+            onNewProject={handleNewProject}
+            onOpenProject={handleOpenProject}
+          />
+        ) : (
+          <>
+            <div style={{
+              width: leftPaneCollapsed ? '0px' : `${leftPaneWidth}px`,
+              minWidth: leftPaneCollapsed ? '0px' : '240px',
+              flexShrink: 0,
+              display: 'flex',
+              overflow: 'hidden',
+              transition: 'width 0.22s cubic-bezier(0.4, 0, 0.2, 1), min-width 0.22s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.15s ease-in-out',
+              opacity: leftPaneCollapsed ? 0 : 1
+            }}>
+              <LeftPane />
+            </div>
 
         {/* Vertical Splitter */}
         <div
@@ -1829,8 +1850,11 @@ function App() {
           })()}
         </div>
         <RightPane />
-      </div>
-      </div>
+      </>
+    )}
+  </div>
+  </div>
+  )}
 
       {isScorePreviewVisible && (
         <ScorePreviewModal onClose={() => setIsScorePreviewVisible(false)} />
@@ -2056,17 +2080,111 @@ function App() {
 
       <ImportAudioModal />
       <HelpPane />
-      <StartScreenModal
-        onNewProject={() => {
-          setIsInitialLaunch(false)
-          handleNewProject()
-        }}
-        onOpenProject={() => {
-          setIsInitialLaunch(false)
-          handleOpenProject()
-        }}
-        isInitialLaunch={isInitialLaunch}
-      />
+      {/* Dirty Tab Close Confirmation Modal */}
+      {tabPendingClose && (
+        <div
+          className="animate-modal-bg"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(5, 5, 10, 0.75)',
+            backdropFilter: 'blur(8px)',
+            zIndex: 100000,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '20px'
+          }}
+          onClick={e => {
+            if (e.target === e.currentTarget) setTabPendingClose(null)
+          }}
+        >
+          <div
+            className="animate-modal-card"
+            style={{
+              width: '100%',
+              maxWidth: '440px',
+              background: '#13141f',
+              border: '1px solid rgba(255, 255, 255, 0.12)',
+              borderRadius: '16px',
+              padding: '24px',
+              boxShadow: '0 25px 60px rgba(0, 0, 0, 0.7)'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
+              <IconAlertTriangle size={20} style={{ color: '#f59f00' }} />
+              <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 700, color: '#fff' }}>
+                Save Changes to "{tabPendingClose.name}"?
+              </h3>
+            </div>
+            <p style={{ margin: '0 0 20px', fontSize: '13px', color: '#a0a6b8', lineHeight: '1.5' }}>
+              This project tab has unsaved changes. If you close it without saving, your modifications will be permanently lost.
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+              <button
+                onClick={() => setTabPendingClose(null)}
+                style={{
+                  padding: '7px 14px',
+                  borderRadius: '7px',
+                  background: 'rgba(255, 255, 255, 0.06)',
+                  border: '1px solid rgba(255, 255, 255, 0.12)',
+                  color: '#bbb',
+                  fontSize: '12px',
+                  fontWeight: 600,
+                  cursor: 'pointer'
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  const id = tabPendingClose.id
+                  setTabPendingClose(null)
+                  closeTab(id)
+                }}
+                style={{
+                  padding: '7px 14px',
+                  borderRadius: '7px',
+                  background: 'rgba(255, 75, 75, 0.14)',
+                  border: '1px solid rgba(255, 75, 75, 0.3)',
+                  color: '#ff6b6b',
+                  fontSize: '12px',
+                  fontWeight: 600,
+                  cursor: 'pointer'
+                }}
+              >
+                Don't Save
+              </button>
+              <button
+                onClick={async () => {
+                  const tabToClose = tabPendingClose
+                  if (!tabToClose) return
+                  setTabPendingClose(null)
+                  if (activeTabId !== tabToClose.id) {
+                    useStore.getState().switchTab(tabToClose.id)
+                  }
+                  const saved = await handleSaveProject()
+                  if (saved) {
+                    closeTab(tabToClose.id)
+                  }
+                }}
+                style={{
+                  padding: '7px 16px',
+                  borderRadius: '7px',
+                  background: 'rgba(0, 230, 118, 0.18)',
+                  border: '1px solid rgba(0, 230, 118, 0.4)',
+                  color: '#00e676',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  cursor: 'pointer'
+                }}
+              >
+                Save & Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <ScriptingModal />
       <SynthStudioModal />
       <DrumDesignerModal />

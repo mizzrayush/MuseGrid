@@ -188,7 +188,11 @@ export const MidiEditSection: React.FC<MidiEditSectionProps> = ({ activeTrack })
 
   const handleQuickGlue = () => {
     const updated = applyGlue(targetNotes)
-    replaceTargetNotes(updated, `Merged into ${updated.length} notes (Ctrl+G)`)
+    if (updated.length < targetNotes.length) {
+      replaceTargetNotes(updated, 'Joined notes (Ctrl+G)')
+    } else {
+      useStore.getState().showToast('No same-pitch notes joined', 'info')
+    }
   }
 
   const handleQuickDice = () => {
@@ -517,10 +521,10 @@ export const MidiEditSection: React.FC<MidiEditSectionProps> = ({ activeTrack })
             </button>
             <button
               onClick={handleQuickGlue}
-              title="Merge adjacent / overlapping same-pitch notes (Ctrl+G)"
+              title="Join notes on same pitch (Ctrl+G)"
               style={actionBtnStyle('#00e6ff')}
             >
-              Glue (Ctrl+G)
+              Join (Ctrl+G)
             </button>
           </div>
 

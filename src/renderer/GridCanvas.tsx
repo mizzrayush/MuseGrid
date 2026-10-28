@@ -944,10 +944,30 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         return
       }
 
-      // Glue / Merge Notes (Ctrl+G)
+      // Join Notes on Same Pitch (Ctrl+G)
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'g') {
         e.preventDefault()
-        applyMidiTransform(applyGlue, 'Glue applied (Ctrl+G)')
+        if (isReadOnly) return
+        const targets = selectedNoteIds.length > 0
+          ? store.notes.filter(n => selectedNoteIds.includes(n.id))
+          : store.notes.filter(n => n.trackId === targetTrackId)
+        if (targets.length === 0) {
+          store.showToast('No same-pitch notes joined', 'info')
+          return
+        }
+        const glued = applyGlue(targets)
+        if (glued.length < targets.length) {
+          store.commitHistory()
+          const targetIdSet = new Set(targets.map(n => n.id))
+          const remaining = store.notes.filter(n => !targetIdSet.has(n.id))
+          useStore.setState({ notes: [...remaining, ...glued] })
+          if (selectedNoteIds.length > 0) {
+            setSelectedNoteIds(glued.map((n: any) => n.id))
+          }
+          store.showToast('Joined notes', 'success')
+        } else {
+          store.showToast('No same-pitch notes joined', 'info')
+        }
         return
       }
 
@@ -2535,17 +2555,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   const allSelectedNotesMuted = useMemo(() => selectedNotesList.length > 0 && mutedCount === selectedNotesList.length, [selectedNotesList, mutedCount])
   const hasMixedMuteState = useMemo(() => mutedCount > 0 && mutedCount < selectedNotesList.length, [mutedCount, selectedNotesList])
 
-  // Check if multiple notes of the same pitch are selected and can be merged into a longer note
-  const isMergeEligible = useMemo(() => {
-    if (selectedNotesList.length < 2) return false
-    const pitchMap = new Map<string, number>()
-    for (const note of selectedNotesList) {
-      const key = `${note.trackId}_${note.pitch}`
-      pitchMap.set(key, (pitchMap.get(key) || 0) + 1)
-      if (pitchMap.get(key)! >= 2) return true
-    }
-    return false
-  }, [selectedNotesList])
+
 
   const clickedContextMenuNote = useMemo(() => {
     if (!contextMenu?.clickedNoteId) return null
@@ -2675,13 +2685,17 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
 
   const handleGlueSelectedNotes = () => {
     if (selectedNotesList.length === 0 || isReadOnly) return
-    useStore.getState().commitHistory()
-    const targetIdSet = new Set(selectedNotesList.map(n => n.id))
-    const remaining = useStore.getState().notes.filter(n => !targetIdSet.has(n.id))
     const glued = applyGlue(selectedNotesList)
-    useStore.setState({ notes: [...remaining, ...glued] })
-    setSelectedNoteIds(glued.map(n => n.id))
-    useStore.getState().showToast('Glue applied', 'info')
+    if (glued.length < selectedNotesList.length) {
+      useStore.getState().commitHistory()
+      const targetIdSet = new Set(selectedNotesList.map(n => n.id))
+      const remaining = useStore.getState().notes.filter(n => !targetIdSet.has(n.id))
+      useStore.setState({ notes: [...remaining, ...glued] })
+      setSelectedNoteIds(glued.map(n => n.id))
+      useStore.getState().showToast('Joined notes', 'success')
+    } else {
+      useStore.getState().showToast('No same-pitch notes joined', 'info')
+    }
     setContextMenu(null)
   }
 
@@ -4682,34 +4696,29 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                     <span style={{ fontSize: '10px', color: '#888', fontWeight: 600 }}>M</span>
                   </button>
 
-                  {isMergeEligible && (
-                    <button
-                      style={{
-                        width: '100%',
-                        padding: '7px 12px',
-                        background: 'rgba(255, 146, 43, 0.12)',
-                        border: '1px solid rgba(255, 146, 43, 0.35)',
-                        borderRadius: '4px',
-                        color: '#ff922b',
-                        cursor: 'pointer',
-                        textAlign: 'left',
-                        fontSize: '11px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        fontWeight: 700,
-                        margin: '3px 0'
-                      }}
-                      onClick={handleGlueSelectedNotes}
-                      onMouseEnter={e => e.currentTarget.style.background = 'rgba(255, 146, 43, 0.22)'}
-                      onMouseLeave={e => e.currentTarget.style.background = 'rgba(255, 146, 43, 0.12)'}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <IconLayers size={13} style={{ color: '#ff922b' }} /> Merge Consecutive Notes
-                      </div>
-                      <span style={{ fontSize: '10px', color: '#ff922b', fontWeight: 600 }}>Ctrl+G</span>
-                    </button>
-                  )}
+                  <button
+                    style={{
+                      width: '100%',
+                      padding: '6px 12px',
+                      background: 'none',
+                      border: 'none',
+                      color: '#eee',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      fontSize: '11px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between'
+                    }}
+                    onClick={handleGlueSelectedNotes}
+                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <IconLayers size={13} style={{ color: '#4dabf7' }} /> Join Notes (Same Pitch)
+                    </div>
+                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+G</span>
+                  </button>
 
                   <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />
 
@@ -4902,17 +4911,6 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                     <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+L</span>
                   </button>
 
-                  <button
-                    style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
-                    onClick={handleGlueSelectedNotes}
-                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
-                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <IconLayers size={13} style={{ color: '#ff922b' }} /> Glue / Merge
-                    </div>
-                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+G</span>
-                  </button>
 
                   <button
                     style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}

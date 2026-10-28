@@ -47,10 +47,37 @@ Source: "..\bin\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 ; Embedded Frontend, Monaco Editor, WASM Audio DSP, AI Models (Demucs, Magenta)
 Source: "..\bin\dist\*"; DestDir: "{app}\dist"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+; Microsoft Edge WebView2 Offline Runtime Installer (extracted and run ONLY if WebView2 is missing on host PC)
+Source: "..\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; DestDir: "{tmp}"; Flags: ignoreversion; Check: not IsWebView2Installed
+
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon.ico"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon
 
 [Run]
+; Install Microsoft Edge WebView2 Runtime silently if not present on the host PC
+Filename: "{tmp}\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; Parameters: "/silent /install"; StatusMsg: "Configuring Microsoft Edge WebView2 Runtime..."; Flags: waituntilterminated; Check: not IsWebView2Installed
+
+; Launch application after installation finishes
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// Checks whether Microsoft Edge WebView2 Runtime is already installed on the system
+function IsWebView2Installed: Boolean;
+var
+  Version: String;
+begin
+  // Check 64-bit and 32-bit registry hives for Edge WebView2 Runtime
+  Result := RegQueryStringValue(HKEY_LOCAL_MACHINE,
+    'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-23EC-450E-9488-0B3D800E08E1}', 'pv', Version) or
+    RegQueryStringValue(HKEY_LOCAL_MACHINE,
+    'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-23EC-450E-9488-0B3D800E08E1}', 'pv', Version) or
+    RegQueryStringValue(HKEY_CURRENT_USER,
+    'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-23EC-450E-9488-0B3D800E08E1}', 'pv', Version);
+
+  if Result and (Version <> '') and (Version <> '0.0.0.0') then
+    Result := True
+  else
+    Result := False;
+end;

@@ -1262,6 +1262,7 @@ export interface AppState {
   updateNote: (id: string, updates: Partial<Note>) => void
   updateNotes: (ids: string[], updates: Partial<Note>) => void
   removeNote: (id: string) => void
+  deleteNote: (id: string) => void
   removeNotes: (ids: string[]) => void
   addTrack: (track: Track) => void
   removeTrack: (id: string) => void
@@ -2090,6 +2091,7 @@ if (firstTrack) {
       }
     }),
     removeNote: (id) => set((state) => ({ notes: state.notes.filter(n => n.id !== id) })),
+    deleteNote: (id) => set((state) => ({ notes: state.notes.filter(n => n.id !== id) })),
     removeNotes: (ids) => set((state) => {
       const idSet = new Set(ids)
       return {

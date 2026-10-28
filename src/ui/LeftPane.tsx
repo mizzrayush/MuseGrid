@@ -3456,7 +3456,7 @@ export default function LeftPane() {
 
     state.commitHistory()
     if (noteToDelete) {
-      state.deleteNote(noteToDelete.id)
+      state.removeNote(noteToDelete.id)
     }
     state.setPlayheadPosition(Math.max(0, targetTick))
   }

@@ -3426,11 +3426,14 @@ export default function LeftPane() {
         duration: 48, // 1/16th note default for genie step
         pitch: pitch,
         // eslint-disable-next-line react-hooks/purity
-        velocity: 80 + Math.random() * 20
+        velocity: Math.floor(80 + Math.random() * 20)
       }
 
       useStore.getState().commitHistory()
       addNote(newNote)
+
+      // Audibly preview the placed note immediately in the active track's synth
+      audioEngine.playNote(activeTrackId, 'synth', pitch, '8n', undefined, (newNote.velocity || 80) / 127)
 
       // Advance playhead by 1/16th note (48 ticks)
       useStore.getState().setPlayheadPosition(currentPlayhead + 48)
@@ -3439,6 +3442,23 @@ export default function LeftPane() {
       console.error(err)
       useStore.getState().showToast('Error generating Genie note.', 'error')
     }
+  }
+
+  const handleGenieBackspace = () => {
+    if (!activeTrackId) return
+    const currentPlayhead = useStore.getState().playheadPosition
+    if (currentPlayhead < 48) return
+
+    const targetTick = currentPlayhead - 48
+    const state = useStore.getState()
+    // Find note on active track starting at targetTick (or closest within 12 ticks)
+    const noteToDelete = state.notes.find(n => n.trackId === activeTrackId && Math.abs(n.time - targetTick) < 12)
+
+    state.commitHistory()
+    if (noteToDelete) {
+      state.deleteNote(noteToDelete.id)
+    }
+    state.setPlayheadPosition(Math.max(0, targetTick))
   }
 
   const handleResetGenie = async () => {
@@ -6817,7 +6837,7 @@ export default function LeftPane() {
                     </span>
                     <button onClick={handleResetGenie} style={{ background: 'transparent', border: 'none', color: '#888', fontSize: '9px', cursor: 'pointer' }}>Reset State</button>
                   </div>
-                  <div style={{ display: 'flex', gap: '4px', justifyContent: 'space-between' }}>
+                  <div style={{ display: 'flex', gap: '3px', justifyContent: 'space-between', alignItems: 'center' }}>
                     {[0, 1, 2, 3, 4, 5, 6, 7].map(num => (
                       <button
                         key={num}
@@ -6848,9 +6868,42 @@ export default function LeftPane() {
                         {num + 1}
                       </button>
                     ))}
+                    <button
+                      onClick={handleGenieBackspace}
+                      disabled={!activeTrackId || useStore.getState().playheadPosition < 48}
+                      title="Backspace: Delete previously placed note and step playhead back"
+                      style={{
+                        flex: 1.25,
+                        padding: '10px 0',
+                        background: 'rgba(255, 107, 107, 0.14)',
+                        border: '1px solid rgba(255, 107, 107, 0.35)',
+                        borderRadius: '4px',
+                        color: '#ff6b6b',
+                        fontSize: '13px',
+                        fontWeight: 800,
+                        cursor: activeTrackId && useStore.getState().playheadPosition >= 48 ? 'pointer' : 'not-allowed',
+                        opacity: activeTrackId && useStore.getState().playheadPosition >= 48 ? 1 : 0.4,
+                        boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+                        transition: 'all 0.1s',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center'
+                      }}
+                      onMouseDown={e => {
+                        e.currentTarget.style.transform = 'translateY(2px)'
+                        e.currentTarget.style.boxShadow = 'none'
+                      }}
+                      onMouseUp={e => {
+                        e.currentTarget.style.transform = 'none'
+                        e.currentTarget.style.boxShadow = '0 2px 4px rgba(0,0,0,0.2)'
+                      }}
+                    >
+                      ⌫
+                    </button>
                   </div>
-                  <div style={{ fontSize: '9px', color: '#666', marginTop: '6px', textAlign: 'center' }}>
-                    Press 1-8 to compose. Playhead advances automatically.
+                  <div style={{ fontSize: '9px', color: '#888', marginTop: '6px', textAlign: 'center', display: 'flex', justifyContent: 'space-between', padding: '0 2px' }}>
+                    <span>Press 1-8 to compose note</span>
+                    <span>⌫ to delete & step back</span>
                   </div>
                 </div>
               </>

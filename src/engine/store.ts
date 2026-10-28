@@ -1316,7 +1316,7 @@ export interface AppState {
 
   setProjectInfo: (info: Partial<{ projectName: string | null, projectFilePath: string | null }>) => void
   setIsDirty: (v: boolean) => void
-  openProjectInTab: (tabData: { id?: string, name: string, filePath?: string | null, isDirty?: boolean, projectData?: any }) => string
+  openProjectInTab: (tabData: { id?: string, name: string, filePath?: string | null, isDirty?: boolean, projectData?: any, previewSnippet?: string }) => string
   switchTab: (tabId: string) => void
   closeTab: (tabId: string) => void
   updateActiveTab: (updates: Partial<ProjectTab>) => void
@@ -1687,12 +1687,30 @@ export interface RecentProjectItem {
   previewSnippet?: string
 }
 
+function normalizeProjectName(name: string): string {
+  return (name || '').toLowerCase().replace(/\s*\(\d+\s*bars?\)/i, '').trim()
+}
+
 export function getRecentProjects(): RecentProjectItem[] {
   try {
     const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('musegrid_recent_projects') : null
     if (raw) {
       const parsed = JSON.parse(raw)
-      if (Array.isArray(parsed)) return parsed
+      if (Array.isArray(parsed)) {
+        const seen = new Set<string>()
+        const clean: RecentProjectItem[] = []
+        for (const item of parsed) {
+          if (!item || !item.name) continue
+          const key = item.filePath
+            ? `file:${item.filePath.toLowerCase()}`
+            : `name:${normalizeProjectName(item.name)}`
+          if (!seen.has(key)) {
+            seen.add(key)
+            clean.push(item)
+          }
+        }
+        return clean.slice(0, 12)
+      }
     }
   } catch (e) {}
   return []
@@ -2802,7 +2820,7 @@ if (firstTrack) {
         filePath: newTab.filePath || undefined,
         bpm: projectDataToLoad.bpm || 120,
         trackCount: (projectDataToLoad.tracks || []).length || 2,
-        previewSnippet: newTab.filePath ? undefined : `${(projectDataToLoad.tracks || []).length} tracks • ${projectDataToLoad.notes?.length || 0} notes`
+        previewSnippet: tabData.previewSnippet || (newTab.filePath ? undefined : `${(projectDataToLoad.tracks || []).length} tracks • ${projectDataToLoad.notes?.length || 0} notes`)
       })
 
       return id
@@ -3937,7 +3955,17 @@ export function saveRecentProject(item: Omit<RecentProjectItem, 'id' | 'lastModi
   try {
     const list = getRecentProjects()
     const id = item.id || (item.filePath ? item.filePath : 'proj_' + Date.now())
-    const filtered = list.filter(p => (item.filePath ? p.filePath !== item.filePath : p.name !== item.name))
+    const itemNorm = normalizeProjectName(item.name || '')
+    const filtered = list.filter(p => {
+      if (item.filePath && p.filePath) {
+        return p.filePath.toLowerCase() !== item.filePath.toLowerCase()
+      }
+      if (!item.filePath && !p.filePath) {
+        if (p.name === item.name) return false
+        if (normalizeProjectName(p.name) === itemNorm) return false
+      }
+      return true
+    })
     const updated: RecentProjectItem[] = [
       {
         id,

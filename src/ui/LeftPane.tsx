@@ -1225,6 +1225,9 @@ export default function LeftPane() {
   const selectedNoteIds = useStore(s => s.selectedNoteIds)
   const setSelectedNoteIds = useStore(s => s.setSelectedNoteIds)
   const addNote = useStore(s => s.addNote)
+  const addNotes = useStore(s => s.addNotes)
+  const removeNotes = useStore(s => s.removeNotes)
+  const playheadPosition = useStore(s => s.playheadPosition)
   const updateNote = useStore(s => s.updateNote)
   const commitHistory = useStore(s => s.commitHistory)
   const clips = useStore(s => s.clips)
@@ -1290,7 +1293,9 @@ export default function LeftPane() {
   const [progressionSpacing, setProgressionSpacing] = useState<number>(192)
   const [suggestionKind, setSuggestionKind] = useState<SuggestionKind>('chords')
   const [generationSourceMode, setGenerationSourceMode] = useState<'active' | 'all'>('active')
-  const [generationDestinationMode, setGenerationDestinationMode] = useState<'new' | 'current'>('new')
+  const [generationDestinationMode, setGenerationDestinationMode] = useState<'new' | 'current'>('current')
+  const [aiStartPos, setAiStartPos] = useState<'playhead' | 'end' | 'start'>('playhead')
+  const [aiWriteMode, setAiWriteMode] = useState<'overdub' | 'replace'>('overdub')
   const [quantizeStrength, setQuantizeStrength] = useState(100)
   const leftPaneTopRatio = useStore(s => s.leftPaneTopRatio)
   const setLeftPaneTopRatio = useStore(s => s.setLeftPaneTopRatio)
@@ -3080,31 +3085,232 @@ export default function LeftPane() {
     try {
       const activeNotes = notes.filter(n => n.trackId === activeTrackId)
       const currentPlayhead = useStore.getState().playheadPosition
-      // Dynamic Seed Length
-      const seedNotes = activeNotes.filter(n => n.time >= currentPlayhead - (aiSeedBars * 192 * 4) && n.time < currentPlayhead)
+
+      // 1. Calculate effective start position based on user's choice
+      let effectiveStartTime = 0
+      if (aiStartPos === 'playhead') {
+        effectiveStartTime = currentPlayhead
+      } else if (aiStartPos === 'end') {
+        const trackMax = activeNotes.length > 0 ? Math.max(...activeNotes.map(n => n.time + n.duration)) : 0
+        const songMax = notes.length > 0 ? Math.max(...notes.map(n => n.time + n.duration)) : 0
+        const endPoint = trackMax > 0 ? trackMax : songMax
+        effectiveStartTime = Math.ceil(endPoint / 48) * 48
+      } else {
+        effectiveStartTime = 0
+      }
+
+      // 2. Dynamic Seed Notes: feed previous bars relative to effectiveStartTime
+      const seedWindow = aiSeedBars * 192 * 4
+      let seedNotes: Note[] = []
+      if (effectiveStartTime > 0) {
+        seedNotes = activeNotes.filter(n => n.time >= effectiveStartTime - seedWindow && n.time < effectiveStartTime)
+        if (seedNotes.length === 0) {
+          seedNotes = activeNotes.filter(n => n.time < effectiveStartTime).slice(-16)
+        }
+      } else {
+        seedNotes = activeNotes.filter(n => n.time < seedWindow).slice(0, 16)
+      }
+
       const trackScale = track.scaleOverride || scaleLock
 
       let newNotes: any[] = []
       if (track.instrument === 'synth') {
-        newNotes = await generateAiMelody(seedNotes, aiLength, aiTemperature, aiDensity, aiOctaveShift, trackScale, currentPlayhead, aiSeedPitch)
+        newNotes = await generateAiMelody(seedNotes, aiLength, aiTemperature, aiDensity, aiOctaveShift, trackScale, effectiveStartTime, aiSeedPitch)
       } else {
-        newNotes = await generateAiDrums(seedNotes, aiLength, aiTemperature, aiDensity, midiRemapData.drumMap, currentPlayhead, aiSeedPitch)
+        newNotes = await generateAiDrums(seedNotes, aiLength, aiTemperature, aiDensity, midiRemapData.drumMap, effectiveStartTime, aiSeedPitch)
       }
 
       if (newNotes.length > 0) {
         useStore.getState().commitHistory()
-        newNotes.forEach(n => {
-          addNote({
-            ...n,
-            id: newId(),
-            trackId: activeTrackId,
-            time: n.time
+
+        // 3. Destination track handling
+        let targetTrackId = activeTrackId
+        if (generationDestinationMode === 'new') {
+          targetTrackId = newId()
+          const isSynth = track.instrument === 'synth'
+          addTrack({
+            id: targetTrackId,
+            name: `${track.name} (AI)`,
+            instrument: track.instrument,
+            color: isSynth ? '#da77f2' : '#e599f7',
+            synthPreset: isSynth ? (track.synthPreset || DEFAULT_SYNTH_PRESET) : undefined,
+            drumKit: !isSynth ? (track.drumKit || 'electronic') : undefined,
+            volume: track.volume ?? 1,
+            pan: 0,
+            muted: false,
+            soloed: false,
+            scaleOverride: track.scaleOverride
           })
-        })
+          audioEngine.createInstrument(targetTrackId, track.instrument)
+          setActiveTrackId(targetTrackId)
+        }
+
+        // 4. Overdub vs Replace behavior
+        const genDuration = aiLength * 48
+        const genEnd = effectiveStartTime + genDuration
+
+        if (aiWriteMode === 'replace' && generationDestinationMode === 'current') {
+          const notesToDelete = notes.filter(n =>
+            n.trackId === targetTrackId &&
+            n.time < genEnd &&
+            (n.time + n.duration) > effectiveStartTime
+          )
+          if (notesToDelete.length > 0) {
+            removeNotes(notesToDelete.map(n => n.id))
+          }
+        }
+
+        const notesToInsert = newNotes.map(n => ({
+          ...n,
+          id: newId(),
+          trackId: targetTrackId,
+          time: n.time
+        }))
+        addNotes(notesToInsert)
+
+        useStore.getState().showToast(
+          `Generated ${newNotes.length} notes (${aiWriteMode === 'replace' ? 'Replaced' : 'Overdubbed'} at Bar ${Math.floor(effectiveStartTime / 768) + 1})!`,
+          'success'
+        )
       }
     } catch (err) {
       console.error(err)
       useStore.getState().showToast('AI Generation failed. Ensure you are online to load the models.', 'error')
+    } finally {
+      setIsAiLoading(false)
+    }
+  }
+
+  const handleGenerateFullArrangement = async () => {
+    if (isAiLoading) return
+    setIsAiLoading(true)
+    try {
+      let synthTrack = tracks.find(t => t.instrument === 'synth')
+      let drumTrack = tracks.find(t => t.instrument === 'drum')
+
+      let targetSynthId = synthTrack?.id
+      let targetDrumId = drumTrack?.id
+
+      if (generationDestinationMode === 'new' || (!synthTrack && !drumTrack)) {
+        if (!synthTrack || generationDestinationMode === 'new') {
+          const newSynthId = newId()
+          addTrack({
+            id: newSynthId,
+            name: 'AI Synth Arrangement',
+            instrument: 'synth',
+            color: '#da77f2',
+            synthPreset: DEFAULT_SYNTH_PRESET,
+            volume: 1,
+            pan: 0,
+            muted: false,
+            soloed: false
+          })
+          audioEngine.createInstrument(newSynthId, 'synth')
+          targetSynthId = newSynthId
+          synthTrack = { id: newSynthId, instrument: 'synth' } as any
+        }
+        if (!drumTrack || generationDestinationMode === 'new') {
+          const newDrumId = newId()
+          addTrack({
+            id: newDrumId,
+            name: 'AI Drum Arrangement',
+            instrument: 'drum',
+            color: '#e599f7',
+            drumKit: 'electronic',
+            volume: 1,
+            pan: 0,
+            muted: false,
+            soloed: false
+          })
+          audioEngine.createInstrument(newDrumId, 'drum')
+          targetDrumId = newDrumId
+          drumTrack = { id: newDrumId, instrument: 'drum' } as any
+        }
+        if (targetSynthId) setActiveTrackId(targetSynthId)
+      }
+
+      // 1. Calculate effective start position
+      let effectiveStartTime = 0
+      if (aiStartPos === 'playhead') {
+        effectiveStartTime = useStore.getState().playheadPosition
+      } else if (aiStartPos === 'end') {
+        const songMax = notes.length > 0 ? Math.max(...notes.map(n => n.time + n.duration)) : 0
+        effectiveStartTime = Math.ceil(songMax / 48) * 48
+      } else {
+        effectiveStartTime = 0
+      }
+
+      const seedWindow = aiSeedBars * 192 * 4
+      const trackScale = synthTrack?.scaleOverride || scaleLock
+      const toAdd: any[] = []
+
+      if (targetSynthId) {
+        const synthNotes = notes.filter(n => n.trackId === (generationDestinationMode === 'new' ? (tracks.find(t => t.instrument === 'synth')?.id || targetSynthId) : targetSynthId))
+        let seedNotes: Note[] = []
+        if (effectiveStartTime > 0) {
+          seedNotes = synthNotes.filter(n => n.time >= effectiveStartTime - seedWindow && n.time < effectiveStartTime)
+          if (seedNotes.length === 0) seedNotes = synthNotes.filter(n => n.time < effectiveStartTime).slice(-16)
+        } else {
+          seedNotes = synthNotes.filter(n => n.time < seedWindow).slice(0, 16)
+        }
+        const melody = await generateAiMelody(seedNotes, aiLength, aiTemperature, aiDensity, aiOctaveShift, trackScale, effectiveStartTime, aiSeedPitch)
+        melody.forEach(n => {
+          toAdd.push({
+            ...n,
+            id: newId(),
+            trackId: targetSynthId!,
+            time: n.time
+          })
+        })
+      }
+
+      if (targetDrumId) {
+        const drumNotes = notes.filter(n => n.trackId === (generationDestinationMode === 'new' ? (tracks.find(t => t.instrument === 'drum')?.id || targetDrumId) : targetDrumId))
+        let seedNotes: Note[] = []
+        if (effectiveStartTime > 0) {
+          seedNotes = drumNotes.filter(n => n.time >= effectiveStartTime - seedWindow && n.time < effectiveStartTime)
+          if (seedNotes.length === 0) seedNotes = drumNotes.filter(n => n.time < effectiveStartTime).slice(-16)
+        } else {
+          seedNotes = drumNotes.filter(n => n.time < seedWindow).slice(0, 16)
+        }
+        const drums = await generateAiDrums(seedNotes, aiLength, aiTemperature, aiDensity, midiRemapData.drumMap, effectiveStartTime, aiSeedPitch)
+        drums.forEach(n => {
+          toAdd.push({
+            ...n,
+            id: newId(),
+            trackId: targetDrumId!,
+            time: n.time
+          })
+        })
+      }
+
+      if (toAdd.length > 0) {
+        useStore.getState().commitHistory()
+
+        const genDuration = aiLength * 48
+        const genEnd = effectiveStartTime + genDuration
+
+        if (aiWriteMode === 'replace' && generationDestinationMode === 'current') {
+          const targetIds = new Set([targetSynthId, targetDrumId].filter(Boolean))
+          const notesToDelete = notes.filter(n =>
+            targetIds.has(n.trackId) &&
+            n.time < genEnd &&
+            (n.time + n.duration) > effectiveStartTime
+          )
+          if (notesToDelete.length > 0) {
+            removeNotes(notesToDelete.map(n => n.id))
+          }
+        }
+
+        addNotes(toAdd)
+        useStore.getState().showToast(
+          `Generated full arrangement (${toAdd.length} notes, ${aiWriteMode === 'replace' ? 'Replaced' : 'Overdubbed'} at Bar ${Math.floor(effectiveStartTime / 768) + 1})!`,
+          'success'
+        )
+      }
+    } catch (err) {
+      console.error(err)
+      useStore.getState().showToast('AI Arrangement generation failed.', 'error')
     } finally {
       setIsAiLoading(false)
     }
@@ -3251,17 +3457,41 @@ export default function LeftPane() {
     try {
       const activeNotes = generationSourceMode === 'all' ? notes : notes.filter(n => n.trackId === activeTrackId)
       const currentPlayhead = useStore.getState().playheadPosition
-      // Dynamic Seed Length (using existing AI params)
-      const seedNotes = activeNotes.filter(n => n.time >= currentPlayhead - (aiSeedBars * 192 * 4) && n.time < currentPlayhead)
-      const trackScale = track.scaleOverride || scaleLock
+
+      // 1. Calculate effective start position
+      let effectiveStartTime = 0
+      if (aiStartPos === 'playhead') {
+        effectiveStartTime = currentPlayhead
+      } else if (aiStartPos === 'end') {
+        const trackMax = activeNotes.length > 0 ? Math.max(...activeNotes.map(n => n.time + n.duration)) : 0
+        const songMax = notes.length > 0 ? Math.max(...notes.map(n => n.time + n.duration)) : 0
+        const endPoint = trackMax > 0 ? trackMax : songMax
+        effectiveStartTime = Math.ceil(endPoint / 48) * 48
+      } else {
+        effectiveStartTime = 0
+      }
+
+      const seedWindow = aiSeedBars * 192 * 4
+      let seedNotes: Note[] = []
+      if (effectiveStartTime > 0) {
+        seedNotes = activeNotes.filter(n => n.time >= effectiveStartTime - seedWindow && n.time < effectiveStartTime)
+        if (seedNotes.length === 0) seedNotes = activeNotes.filter(n => n.time < effectiveStartTime).slice(-16)
+      } else {
+        seedNotes = activeNotes.filter(n => n.time < seedWindow).slice(0, 16)
+      }
 
       if (seedNotes.length === 0) {
-        useStore.getState().showToast('No melody notes found before playhead to use as seed.', 'error')
+        seedNotes = activeNotes.slice(-16)
+      }
+
+      if (seedNotes.length === 0) {
+        useStore.getState().showToast('No melody notes found to harmonize.', 'error')
         setIsAiLoading(false)
         return
       }
 
-      // We use the basic RNN to predict a single-note line, shifted down for bass, or used as roots for chords
+      const trackScale = track.scaleOverride || scaleLock
+
       if (type === 'counterpoint') {
         const { voice1, voice2, voice3 } = await generateAutoHarmony(seedNotes, aiTemperature)
 
@@ -3291,11 +3521,12 @@ export default function LeftPane() {
           createVoiceTrack('AI Tenor', '#69db7c', voice2)
           createVoiceTrack('AI Bass (Chorale)', '#4dabf7', voice3)
 
-          newNotes.forEach(addNote)
+          addNotes(newNotes)
+          useStore.getState().showToast(`Generated 3-part Bach counterpoint arrangement at Bar ${Math.floor(effectiveStartTime / 768) + 1}!`, 'success')
         }
       } else {
         const aiShift = type === 'bass' ? aiOctaveShift - 2 : aiOctaveShift
-        const generatedRoots = await generateAiMelody(seedNotes, aiLength, aiTemperature, aiDensity, aiShift, trackScale)
+        const generatedRoots = await generateAiMelody(seedNotes, aiLength, aiTemperature, aiDensity, aiShift, trackScale, effectiveStartTime)
 
         if (generatedRoots.length > 0) {
           useStore.getState().commitHistory()
@@ -3345,8 +3576,27 @@ export default function LeftPane() {
               })
             }
           })
-          newNotes.forEach(addNote)
+
+          const genDuration = aiLength * 48
+          const genEnd = effectiveStartTime + genDuration
+
+          if (aiWriteMode === 'replace' && generationDestinationMode === 'current') {
+            const notesToDelete = notes.filter(n =>
+              n.trackId === targetTrackId &&
+              n.time < genEnd &&
+              (n.time + n.duration) > effectiveStartTime
+            )
+            if (notesToDelete.length > 0) {
+              removeNotes(notesToDelete.map(n => n.id))
+            }
+          }
+
+          addNotes(newNotes)
           setActiveTrackId(targetTrackId)
+          useStore.getState().showToast(
+            `Generated ${newNotes.length} harmony notes (${aiWriteMode === 'replace' ? 'Replaced' : 'Overdubbed'} at Bar ${Math.floor(effectiveStartTime / 768) + 1})!`,
+            'success'
+          )
         }
       }
     } catch (err) {
@@ -6188,6 +6438,175 @@ export default function LeftPane() {
                 </span>
               </div>
 
+              {/* Target & Placement Card */}
+              <div style={{ background: 'rgba(0,0,0,0.3)', borderRadius: '8px', padding: '9px 10px', marginBottom: '12px', border: '1px solid rgba(255,255,255,0.06)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <div style={{ fontSize: '9px', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#da77f2', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span>Target & Placement</span>
+                  <span style={{ fontSize: '8.5px', color: '#888', textTransform: 'none', fontWeight: 500 }}>
+                    {aiStartPos === 'playhead' ? `Playhead (Bar ${Math.floor(playheadPosition / 768) + 1})` : aiStartPos === 'end' ? 'End of Music' : 'Start (0:00)'}
+                  </span>
+                </div>
+
+                {/* 1. Start Position */}
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '3px' }}>
+                    <span style={{ fontSize: '9.5px', color: '#aaa', fontWeight: 600 }}>Start Position</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: '3px', background: 'rgba(0,0,0,0.35)', padding: '2px', borderRadius: '5px' }}>
+                    <button
+                      onClick={() => setAiStartPos('playhead')}
+                      title="Generate starting from current playhead position"
+                      style={{
+                        flex: 1,
+                        padding: '4px 2px',
+                        borderRadius: '4px',
+                        border: aiStartPos === 'playhead' ? '1px solid rgba(218, 119, 242, 0.45)' : '1px solid transparent',
+                        background: aiStartPos === 'playhead' ? 'rgba(218, 119, 242, 0.22)' : 'transparent',
+                        color: aiStartPos === 'playhead' ? '#e599f7' : '#777',
+                        fontSize: '9px',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        transition: 'all 0.15s ease'
+                      }}
+                    >
+                      ▶ Playhead
+                    </button>
+                    <button
+                      onClick={() => setAiStartPos('end')}
+                      title="Generate starting right after the end of existing music"
+                      style={{
+                        flex: 1,
+                        padding: '4px 2px',
+                        borderRadius: '4px',
+                        border: aiStartPos === 'end' ? '1px solid rgba(218, 119, 242, 0.45)' : '1px solid transparent',
+                        background: aiStartPos === 'end' ? 'rgba(218, 119, 242, 0.22)' : 'transparent',
+                        color: aiStartPos === 'end' ? '#e599f7' : '#777',
+                        fontSize: '9px',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        transition: 'all 0.15s ease'
+                      }}
+                    >
+                      ⏭ End of Music
+                    </button>
+                    <button
+                      onClick={() => setAiStartPos('start')}
+                      title="Generate starting from tick 0:00"
+                      style={{
+                        flex: 1,
+                        padding: '4px 2px',
+                        borderRadius: '4px',
+                        border: aiStartPos === 'start' ? '1px solid rgba(218, 119, 242, 0.45)' : '1px solid transparent',
+                        background: aiStartPos === 'start' ? 'rgba(218, 119, 242, 0.22)' : 'transparent',
+                        color: aiStartPos === 'start' ? '#e599f7' : '#777',
+                        fontSize: '9px',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        transition: 'all 0.15s ease'
+                      }}
+                    >
+                      ⏮ 0:00 (Start)
+                    </button>
+                  </div>
+                </div>
+
+                {/* 2. Destination Track */}
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '3px' }}>
+                    <span style={{ fontSize: '9.5px', color: '#aaa', fontWeight: 600 }}>Destination Track</span>
+                    <span style={{ fontSize: '8.5px', color: '#666', maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {generationDestinationMode === 'current' ? (activeTrack?.name || 'Active Track') : '+ New Track'}
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', gap: '3px', background: 'rgba(0,0,0,0.35)', padding: '2px', borderRadius: '5px' }}>
+                    <button
+                      onClick={() => setGenerationDestinationMode('current')}
+                      title="Place generated notes into the currently active track"
+                      style={{
+                        flex: 1,
+                        padding: '4px 2px',
+                        borderRadius: '4px',
+                        border: generationDestinationMode === 'current' ? '1px solid rgba(77, 171, 247, 0.45)' : '1px solid transparent',
+                        background: generationDestinationMode === 'current' ? 'rgba(77, 171, 247, 0.22)' : 'transparent',
+                        color: generationDestinationMode === 'current' ? '#4dabf7' : '#777',
+                        fontSize: '9px',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        transition: 'all 0.15s ease'
+                      }}
+                    >
+                      Current Track
+                    </button>
+                    <button
+                      onClick={() => setGenerationDestinationMode('new')}
+                      title="Automatically create a new track and place generated notes there"
+                      style={{
+                        flex: 1,
+                        padding: '4px 2px',
+                        borderRadius: '4px',
+                        border: generationDestinationMode === 'new' ? '1px solid rgba(77, 171, 247, 0.45)' : '1px solid transparent',
+                        background: generationDestinationMode === 'new' ? 'rgba(77, 171, 247, 0.22)' : 'transparent',
+                        color: generationDestinationMode === 'new' ? '#4dabf7' : '#777',
+                        fontSize: '9px',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        transition: 'all 0.15s ease'
+                      }}
+                    >
+                      ➕ New Track
+                    </button>
+                  </div>
+                </div>
+
+                {/* 3. Write Mode */}
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '3px' }}>
+                    <span style={{ fontSize: '9.5px', color: '#aaa', fontWeight: 600 }}>Write Behavior</span>
+                    <span style={{ fontSize: '8.5px', color: '#666' }}>
+                      {aiWriteMode === 'overdub' ? 'Merge with existing notes' : 'Overwrite region'}
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', gap: '3px', background: 'rgba(0,0,0,0.35)', padding: '2px', borderRadius: '5px' }}>
+                    <button
+                      onClick={() => setAiWriteMode('overdub')}
+                      title="Overdub: merge generated notes with any existing notes on the track"
+                      style={{
+                        flex: 1,
+                        padding: '4px 2px',
+                        borderRadius: '4px',
+                        border: aiWriteMode === 'overdub' ? '1px solid rgba(105, 219, 124, 0.45)' : '1px solid transparent',
+                        background: aiWriteMode === 'overdub' ? 'rgba(105, 219, 124, 0.22)' : 'transparent',
+                        color: aiWriteMode === 'overdub' ? '#69db7c' : '#777',
+                        fontSize: '9px',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        transition: 'all 0.15s ease'
+                      }}
+                    >
+                      ➕ Overdub (Merge)
+                    </button>
+                    <button
+                      onClick={() => setAiWriteMode('replace')}
+                      title="Replace: clear existing notes in the target region before placing new notes"
+                      style={{
+                        flex: 1,
+                        padding: '4px 2px',
+                        borderRadius: '4px',
+                        border: aiWriteMode === 'replace' ? '1px solid rgba(255, 107, 107, 0.45)' : '1px solid transparent',
+                        background: aiWriteMode === 'replace' ? 'rgba(255, 107, 107, 0.22)' : 'transparent',
+                        color: aiWriteMode === 'replace' ? '#ff6b6b' : '#777',
+                        fontSize: '9px',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        transition: 'all 0.15s ease'
+                      }}
+                    >
+                      ✂ Replace Region
+                    </button>
+                  </div>
+                </div>
+              </div>
+
               <SliderRow
                 label="Creativity"
                 value={aiTemperature}
@@ -6201,17 +6620,43 @@ export default function LeftPane() {
                 label="Gen Length"
                 value={aiLength}
                 min={16}
-                max={256}
+                max={1024}
                 step={16}
-                suffix=" steps"
+                suffix={` steps (${Math.round(aiLength / 16)} Bars)`}
                 color="#be4bdb"
                 onChange={v => setAiLength(v)}
               />
+              {/* Quick length presets */}
+              <div style={{ display: 'flex', gap: '3px', marginBottom: '8px' }}>
+                {[
+                  { b: 1, s: 16 }, { b: 2, s: 32 }, { b: 4, s: 64 }, { b: 8, s: 128 },
+                  { b: 16, s: 256 }, { b: 32, s: 512 }, { b: 64, s: 1024 }
+                ].map(item => (
+                  <button
+                    key={item.b}
+                    onClick={() => setAiLength(item.s)}
+                    style={{
+                      flex: 1,
+                      padding: '3px 0',
+                      borderRadius: '4px',
+                      border: '1px solid',
+                      borderColor: aiLength === item.s ? '#be4bdb' : 'rgba(255,255,255,0.08)',
+                      background: aiLength === item.s ? 'rgba(190, 75, 219, 0.25)' : 'rgba(255,255,255,0.03)',
+                      color: aiLength === item.s ? '#fff' : '#888',
+                      fontSize: '9px',
+                      fontWeight: 700,
+                      cursor: 'pointer'
+                    }}
+                  >
+                    {item.b}B
+                  </button>
+                ))}
+              </div>
               <SliderRow
                 label="Seed Memory"
                 value={aiSeedBars}
                 min={0}
-                max={8}
+                max={16}
                 step={1}
                 suffix=" bars"
                 color="#9c36b5"
@@ -6250,8 +6695,8 @@ export default function LeftPane() {
                 </StopPropSelect>
               </div>
 
-              <div style={{ fontSize: '9px', color: '#555', marginTop: '6px', fontStyle: 'italic', borderTop: '1px solid rgba(255,255,255,0.03)', paddingTop: '6px' }}>
-                Will hallucinate <b>{Math.round(aiLength / 16)} bars</b> of new music by studying <b>{aiSeedBars} bars</b> of your work.
+              <div style={{ fontSize: '9px', color: '#666', marginTop: '6px', fontStyle: 'italic', borderTop: '1px solid rgba(255,255,255,0.04)', paddingTop: '6px', lineHeight: 1.4 }}>
+                Will {aiWriteMode === 'replace' ? <span style={{ color: '#ff8787' }}>replace</span> : <span style={{ color: '#8ce99a' }}>overdub</span>} <b>{Math.round(aiLength / 16)} bars</b> into <b>{generationDestinationMode === 'new' ? 'a new track' : (activeTrack?.name || 'current track')}</b> starting at <b>{aiStartPos === 'playhead' ? `Playhead (Bar ${Math.floor(playheadPosition / 768) + 1})` : aiStartPos === 'end' ? 'End of Music' : '0:00 (Start)'}</b> (studying {aiSeedBars} bars of seed notes).
               </div>
             </div>
 
@@ -6274,6 +6719,27 @@ export default function LeftPane() {
               onMouseLeave={e => !isAiLoading && (e.currentTarget.style.background = 'transparent')}
             >
               {isAiLoading ? 'THINKING...' : (activeTrack?.instrument === 'synth' ? 'HALLUCINATE MELODY' : 'GENERATE NEURAL GROOVE')}
+            </button>
+
+            <button
+              onClick={handleGenerateFullArrangement}
+              disabled={isAiLoading}
+              style={{
+                background: 'linear-gradient(135deg, rgba(218, 119, 242, 0.15), rgba(77, 171, 247, 0.15))',
+                border: '1px solid rgba(218, 119, 242, 0.35)',
+                borderRadius: '8px',
+                padding: '7px',
+                color: '#e599f7',
+                fontSize: '9.5px',
+                fontWeight: 800,
+                letterSpacing: '0.06em',
+                cursor: isAiLoading ? 'not-allowed' : 'pointer',
+                transition: 'all 0.15s ease'
+              }}
+              onMouseEnter={e => !isAiLoading && (e.currentTarget.style.background = 'linear-gradient(135deg, rgba(218, 119, 242, 0.25), rgba(77, 171, 247, 0.25))')}
+              onMouseLeave={e => !isAiLoading && (e.currentTarget.style.background = 'linear-gradient(135deg, rgba(218, 119, 242, 0.15), rgba(77, 171, 247, 0.15))')}
+            >
+              ⚡ GENERATE FULL ARRANGEMENT (SYNTH + DRUMS)
             </button>
 
             {activeTrack?.instrument === 'synth' && (

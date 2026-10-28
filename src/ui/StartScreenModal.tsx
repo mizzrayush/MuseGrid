@@ -1,10 +1,11 @@
 import { useState, useEffect, useMemo } from 'react'
-import { useStore, saveRecentProject, removeRecentProject, clearAllRecentProjects, type RecentProjectItem, type ScaleLock } from '../engine/store'
+import { useStore, removeRecentProject, clearAllRecentProjects, type RecentProjectItem, type ScaleLock } from '../engine/store'
 import { DAW_TEMPLATES, getUserTemplates, saveUserTemplate, deleteUserTemplate, buildPreviewPattern, type DawTemplate } from '../utils/dawTemplates'
 import { selectAndReadFile, parseProjectPayload } from '../utils/fileDialog'
 import { AppSlider } from './AppSlider'
 import { generateAiMelody, generateAiDrums, generateAutoHarmony } from '../utils/aiLab'
 import { audioEngine } from '../engine/AudioEngine'
+import { SYNTH_PRESETS, DRUM_KITS, type SynthPreset, type DrumKit } from '../utils/instruments'
 import {
   IconMuseLogo, IconNewFile, IconOpen, IconSparkles, IconMusic, IconDrum,
   IconX, IconSearch, IconZap, IconLayers, IconTrash, IconAlertTriangle, IconPlus
@@ -85,15 +86,19 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
     return localStorage.getItem('musegrid_show_start_screen') !== 'false'
   })
 
-  // AI Generator Form State
-  const [aiMode, setAiMode] = useState<'full' | 'melody' | 'drums' | 'bach'>('full')
+  // AI Generator Form State - Maximum Flexibility
+  const [aiMode, setAiMode] = useState<'full' | 'melody' | 'drums' | 'trio' | 'bach'>('full')
   const [aiMood, setAiMood] = useState('Cyberpunk Synth')
   const [aiBpm, setAiBpm] = useState(120)
   const [aiScaleRoot, setAiScaleRoot] = useState(2) // D
   const [aiScaleMode, setAiScaleMode] = useState('minor')
-  const [aiBars, setAiBars] = useState<2 | 4 | 8 | 16>(4)
+  const [aiBars, setAiBars] = useState<number>(4)
   const [aiTemperature, setAiTemperature] = useState(1.0)
   const [aiDensity, setAiDensity] = useState(0.85)
+  const [aiOctaveShift, setAiOctaveShift] = useState<number>(0)
+  const [aiSynthPreset, setAiSynthPreset] = useState<SynthPreset>('bright')
+  const [aiDrumKit, setAiDrumKit] = useState<DrumKit>('tight')
+  const [aiLoop, setAiLoop] = useState<boolean>(true)
   const [aiGenerating, setAiGenerating] = useState(false)
   const [aiStatusText, setAiStatusText] = useState('')
 
@@ -387,6 +392,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
     openProjectInTab({
       name: tmpl.title,
       isDirty: hasTemplateNotes,
+      previewSnippet: tmpl.description,
       projectData: {
         projectName: tmpl.title,
         projectFilePath: null,
@@ -397,13 +403,6 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
         activeTrackId: tmpl.tracks[0]?.id || 'track_synth',
         sharedPanX: 0
       }
-    })
-
-    saveRecentProject({
-      name: tmpl.title,
-      bpm: tmpl.bpm,
-      trackCount: tmpl.tracks.length,
-      previewSnippet: tmpl.description
     })
 
     setIsStartScreenOpen(false)
@@ -456,12 +455,6 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
                 projectName: pName
               }
             })
-            saveRecentProject({
-              name: pName,
-              filePath: res.filePath,
-              bpm: parsed.bpm || 120,
-              trackCount: (parsed.tracks || []).length
-            })
             setIsStartScreenOpen(false)
             if (onProjectLoaded) onProjectLoaded()
             enterDawFullscreen()
@@ -513,7 +506,8 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
       audioEngine.resetForNewProject()
 
       const ticksPerBar = 768
-      const totalSteps = aiBars * 16 // 16 steps per bar
+      const clampedBars = Math.max(1, Math.min(64, Math.round(aiBars || 4)))
+      const totalSteps = clampedBars * 16 // 16 steps per bar
 
       const scaleConfig: ScaleLock = {
         enabled: true,
@@ -534,7 +528,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
         soloed: false,
         color: '#da77f2',
         collapsed: true,
-        synthPreset: aiMood.includes('Pluck') ? 'pluck' : (aiMood.includes('Piano') ? 'piano' : 'bright'),
+        synthPreset: aiSynthPreset,
         delayTime: 0.25,
         delayFeedback: 0.3
       }
@@ -549,14 +543,29 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
         soloed: false,
         color: '#ff922b',
         collapsed: true,
-        drumKit: aiMood.includes('Trap') ? '808' : (aiMood.includes('Techno') ? 'tight' : 'acoustic'),
+        drumKit: aiDrumKit,
         delayTime: 0.25,
         delayFeedback: 0.15
       }
 
+      const bassTrack = {
+        id: 'track_bass',
+        name: 'AI Deep Bass',
+        instrument: 'synth' as const,
+        volume: 0.9,
+        pan: 0,
+        muted: false,
+        soloed: false,
+        color: '#339af0',
+        collapsed: true,
+        synthPreset: 'bass' as const,
+        delayTime: 0.15,
+        delayFeedback: 0.1
+      }
+
       const tracksToUse: any[] = []
 
-      if (aiMode === 'full' || aiMode === 'melody') {
+      if (aiMode === 'full' || aiMode === 'melody' || aiMode === 'trio') {
         tracksToUse.push(synthTrack)
         setAiStatusText('Synthesizing melody hooks with MusicRNN...')
         const melody = await generateAiMelody(
@@ -564,7 +573,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
           totalSteps,
           aiTemperature,
           aiDensity,
-          0,
+          aiOctaveShift,
           scaleConfig,
           0
         )
@@ -580,7 +589,31 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
         })
       }
 
-      if (aiMode === 'full' || aiMode === 'drums') {
+      if (aiMode === 'trio') {
+        tracksToUse.push(bassTrack)
+        setAiStatusText('Composing bassline with Neural RNN...')
+        const bassNotes = await generateAiMelody(
+          [],
+          totalSteps,
+          Math.max(0.4, aiTemperature * 0.75),
+          aiDensity * 0.75,
+          -2,
+          scaleConfig,
+          0
+        )
+        bassNotes.forEach((n, idx) => {
+          generatedNotes.push({
+            id: `ai_b_${idx}_${Date.now()}`,
+            trackId: 'track_bass',
+            time: n.time,
+            duration: Math.max(48, n.duration),
+            pitch: Math.min(48, Math.max(24, n.pitch - 12)),
+            velocity: Math.round(n.velocity * 0.95)
+          })
+        })
+      }
+
+      if (aiMode === 'full' || aiMode === 'drums' || aiMode === 'trio') {
         tracksToUse.push(drumTrack)
         setAiStatusText('Generating rhythmic grooves with Drums RNN...')
         const drums = await generateAiDrums(
@@ -645,30 +678,24 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
         })
       }
 
-      // Load state into new tab
+      // Load state into new tab - openProjectInTab will automatically record it to recent projects ONCE!
       openProjectInTab({
-        name: `AI - ${aiMood} (${aiBars} Bars)`,
+        name: `AI - ${aiMood} (${clampedBars} Bars)`,
         isDirty: true,
+        previewSnippet: `Generated with Magenta AI (${clampedBars} bars • ${generatedNotes.length} notes)`,
         projectData: {
-          projectName: `AI - ${aiMood} (${aiBars} Bars)`,
+          projectName: `AI - ${aiMood} (${clampedBars} Bars)`,
           projectFilePath: null,
           bpm: aiBpm,
           scaleLock: scaleConfig,
           tracks: tracksToUse,
           notes: generatedNotes,
           activeTrackId: tracksToUse[0]?.id || 'track_synth',
-          loopEnabled: true,
+          loopEnabled: aiLoop,
           loopStart: 0,
-          loopEnd: aiBars * ticksPerBar,
+          loopEnd: clampedBars * ticksPerBar,
           sharedPanX: 0
         }
-      })
-
-      saveRecentProject({
-        name: `AI - ${aiMood}`,
-        bpm: aiBpm,
-        trackCount: tracksToUse.length,
-        previewSnippet: `Generated with Magenta AI (${aiBars} bars)`
       })
 
       setIsStartScreenOpen(false)
@@ -1579,9 +1606,10 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
                   <label style={{ fontSize: '11.5px', fontWeight: 700, color: '#aaa', letterSpacing: '0.4px', display: 'block', marginBottom: '8px', textTransform: 'uppercase' }}>
                     1. Generation mode
                   </label>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '10px' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: '8px' }}>
                     {[
                       { id: 'full', label: 'Full Production', sub: 'Melody + Drums', icon: <IconMusic size={15} color="#da77f2" /> },
+                      { id: 'trio', label: 'Full Trio Band', sub: 'Lead + Bass + Drums', icon: <IconZap size={15} color="#20c997" /> },
                       { id: 'melody', label: 'Melody Hook', sub: 'MusicRNN', icon: <IconMusic size={15} color="#4dabf7" /> },
                       { id: 'drums', label: 'Rhythm Groove', sub: 'Drums RNN', icon: <IconDrum size={15} color="#ff922b" /> },
                       { id: 'bach', label: 'Bach Polyphony', sub: 'Coconet 4-Part', icon: <IconLayers size={15} color="#ffd43b" /> }
@@ -1590,25 +1618,25 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
                         key={item.id}
                         onClick={() => setAiMode(item.id as any)}
                         style={{
-                          padding: '12px 8px',
+                          padding: '10px 6px',
                           borderRadius: '12px',
                           border: '1px solid',
                           borderColor: aiMode === item.id ? '#da77f2' : 'rgba(255,255,255,0.08)',
-                          background: aiMode === item.id ? 'rgba(218, 119, 242, 0.14)' : 'rgba(255,255,255,0.025)',
+                          background: aiMode === item.id ? 'rgba(218, 119, 242, 0.16)' : 'rgba(255,255,255,0.025)',
                           color: aiMode === item.id ? '#fff' : '#aaa',
                           textAlign: 'center',
                           cursor: 'pointer',
                           display: 'flex',
                           flexDirection: 'column',
                           alignItems: 'center',
-                          gap: '5px',
+                          gap: '4px',
                           transition: 'all 0.15s',
                           boxShadow: aiMode === item.id ? '0 0 16px rgba(218, 119, 242, 0.15)' : 'none'
                         }}
                       >
                         {item.icon}
-                        <span style={{ fontSize: '12px', fontWeight: 700, whiteSpace: 'nowrap' }}>{item.label}</span>
-                        <span style={{ fontSize: '9.5px', color: '#888', whiteSpace: 'nowrap' }}>{item.sub}</span>
+                        <span style={{ fontSize: '11px', fontWeight: 700, whiteSpace: 'nowrap' }}>{item.label}</span>
+                        <span style={{ fontSize: '9px', color: '#888', whiteSpace: 'nowrap' }}>{item.sub}</span>
                       </button>
                     ))}
                   </div>
@@ -1617,36 +1645,42 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
                 {/* Mood Presets */}
                 <div>
                   <label style={{ fontSize: '11.5px', fontWeight: 700, color: '#aaa', letterSpacing: '0.4px', display: 'block', marginBottom: '8px', textTransform: 'uppercase' }}>
-                    2. Genre & mood
+                    2. Genre & mood presets
                   </label>
                   <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
                     {[
-                      'Cyberpunk Synth', 'Dark Trap 808', 'Melodic Techno', 'Dreamy Lo-Fi',
-                      'Classical Chamber', 'Funky Syncopation', 'Acid Groove', 'Ambient Glass'
-                    ].map(m => (
+                      { mood: 'Cyberpunk Synth', bpm: 128, mode: 'minor', synth: 'bright', kit: 'tight' },
+                      { mood: 'Dark Trap 808', bpm: 140, mode: 'minor', synth: 'pluck', kit: 'eightOhEight' },
+                      { mood: 'Melodic Techno', bpm: 126, mode: 'minor', synth: 'warm', kit: 'tight' },
+                      { mood: 'Dreamy Lo-Fi', bpm: 82, mode: 'major', synth: 'piano', kit: 'acoustic' },
+                      { mood: 'Classical Chamber', bpm: 96, mode: 'major', synth: 'piano', kit: 'acoustic' },
+                      { mood: 'Funky Syncopation', bpm: 112, mode: 'dorian', synth: 'pluck', kit: 'classic' },
+                      { mood: 'Acid Groove', bpm: 132, mode: 'pentatonicMinor', synth: 'bright', kit: 'tight' },
+                      { mood: 'Ambient Glass', bpm: 68, mode: 'lydian', synth: 'glass', kit: 'acoustic' }
+                    ].map(item => (
                       <button
-                        key={m}
+                        key={item.mood}
                         onClick={() => {
-                          setAiMood(m)
-                          if (m.includes('Trap')) { setAiBpm(140); setAiScaleMode('minor') }
-                          else if (m.includes('Techno')) { setAiBpm(126); setAiScaleMode('minor') }
-                          else if (m.includes('Lo-Fi')) { setAiBpm(82); setAiScaleMode('major') }
-                          else if (m.includes('Ambient')) { setAiBpm(68); setAiScaleMode('lydian') }
+                          setAiMood(item.mood)
+                          setAiBpm(item.bpm)
+                          setAiScaleMode(item.mode)
+                          setAiSynthPreset(item.synth as SynthPreset)
+                          setAiDrumKit(item.kit as DrumKit)
                         }}
                         style={{
                           padding: '6px 14px',
                           borderRadius: '20px',
                           border: '1px solid',
-                          borderColor: aiMood === m ? '#da77f2' : 'rgba(255,255,255,0.08)',
-                          background: aiMood === m ? 'rgba(218,119,242,0.18)' : 'rgba(255,255,255,0.025)',
-                          color: aiMood === m ? '#fff' : '#888',
+                          borderColor: aiMood === item.mood ? '#da77f2' : 'rgba(255,255,255,0.08)',
+                          background: aiMood === item.mood ? 'rgba(218,119,242,0.18)' : 'rgba(255,255,255,0.025)',
+                          color: aiMood === item.mood ? '#fff' : '#888',
                           fontSize: '11px',
                           fontWeight: 600,
                           cursor: 'pointer',
                           transition: 'all 0.15s'
                         }}
                       >
-                        {m}
+                        {item.mood}
                       </button>
                     ))}
                   </div>
@@ -1726,26 +1760,48 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
                   </div>
                 </div>
 
-                {/* Length & Parameters */}
+                {/* Length & Creativity & Density (Maximum Flexibility) */}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '16px', background: 'rgba(0,0,0,0.25)', padding: '14px 18px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.06)' }}>
                   <div>
-                    <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '6px' }}>
-                      Length: <strong style={{ color: '#fff' }}>{aiBars} Bars</strong>
-                    </label>
-                    <div style={{ display: 'flex', gap: '4px' }}>
-                      {[2, 4, 8, 16].map(b => (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                      <label style={{ fontSize: '11px', fontWeight: 600, color: '#888' }}>
+                        Length: <strong style={{ color: '#da77f2' }}>{aiBars} Bars</strong> ({aiBars * 16} steps)
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={64}
+                        value={aiBars}
+                        onChange={e => setAiBars(Math.max(1, Math.min(64, Number(e.target.value) || 1)))}
+                        style={{
+                          width: '52px',
+                          padding: '2px 6px',
+                          background: '#181924',
+                          border: '1px solid rgba(255,255,255,0.15)',
+                          borderRadius: '5px',
+                          color: '#fff',
+                          fontSize: '11px',
+                          fontWeight: 700,
+                          textAlign: 'center',
+                          outline: 'none'
+                        }}
+                      />
+                    </div>
+                    {/* Quick bar preset buttons */}
+                    <div style={{ display: 'flex', gap: '3px', marginBottom: '8px' }}>
+                      {[1, 2, 4, 8, 16, 32, 64].map(b => (
                         <button
                           key={b}
-                          onClick={() => setAiBars(b as any)}
+                          onClick={() => setAiBars(b)}
                           style={{
                             flex: 1,
-                            padding: '6px 0',
-                            borderRadius: '6px',
+                            padding: '4px 0',
+                            borderRadius: '5px',
                             border: '1px solid',
                             borderColor: aiBars === b ? '#da77f2' : 'rgba(255,255,255,0.08)',
-                            background: aiBars === b ? 'rgba(218,119,242,0.18)' : 'rgba(255,255,255,0.02)',
-                            color: aiBars === b ? '#da77f2' : '#888',
-                            fontSize: '11.5px',
+                            background: aiBars === b ? 'rgba(218,119,242,0.22)' : 'rgba(255,255,255,0.02)',
+                            color: aiBars === b ? '#fff' : '#888',
+                            fontSize: '9.5px',
                             fontWeight: 700,
                             cursor: 'pointer',
                             transition: 'all 0.15s'
@@ -1755,32 +1811,41 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
                         </button>
                       ))}
                     </div>
+                    <AppSlider
+                      min={1}
+                      max={64}
+                      step={1}
+                      value={aiBars}
+                      onChange={setAiBars}
+                      color="#da77f2"
+                    />
                   </div>
 
                   <div>
                     <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '6px' }}>
-                      Creativity: <strong style={{ color: '#fff' }}>{aiTemperature.toFixed(2)}</strong>
+                      Creativity (Temperature): <strong style={{ color: '#fff' }}>{aiTemperature.toFixed(2)}</strong>
                     </label>
                     <AppSlider
-                      min={0.4}
-                      max={1.4}
+                      min={0.1}
+                      max={2.0}
                       step={0.05}
                       value={aiTemperature}
                       onChange={setAiTemperature}
                       color="#da77f2"
                     />
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9.5px', color: '#666', marginTop: '4px' }}>
-                      <span>Tight</span>
-                      <span>Wild</span>
+                      <span>Cohesive / Tight</span>
+                      <span>1.0</span>
+                      <span>Wild / High Energy</span>
                     </div>
                   </div>
 
                   <div>
                     <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '6px' }}>
-                      Density: <strong style={{ color: '#fff' }}>{Math.round(aiDensity * 100)}%</strong>
+                      Note Density: <strong style={{ color: '#fff' }}>{Math.round(aiDensity * 100)}%</strong>
                     </label>
                     <AppSlider
-                      min={0.3}
+                      min={0.1}
                       max={1.0}
                       step={0.05}
                       value={aiDensity}
@@ -1788,9 +1853,100 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
                       color="#da77f2"
                     />
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9.5px', color: '#666', marginTop: '4px' }}>
-                      <span>Sparse</span>
-                      <span>Intense</span>
+                      <span>Minimalist / Space</span>
+                      <span>Dense Rhythms</span>
                     </div>
+                  </div>
+                </div>
+
+                {/* Sound Engine Customization & Loop Options */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '12px', background: 'rgba(0,0,0,0.18)', padding: '12px 16px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.06)' }}>
+                  <div>
+                    <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '4px' }}>
+                      Lead Synth Preset
+                    </label>
+                    <select
+                      value={aiSynthPreset}
+                      onChange={e => setAiSynthPreset(e.target.value as SynthPreset)}
+                      style={{
+                        width: '100%',
+                        padding: '6px 8px',
+                        background: '#181924',
+                        border: '1px solid rgba(255,255,255,0.1)',
+                        borderRadius: '6px',
+                        color: '#fff',
+                        fontSize: '11.5px',
+                        outline: 'none'
+                      }}
+                    >
+                      {SYNTH_PRESETS.map(p => (
+                        <option key={p.value} value={p.value}>{p.label}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '4px' }}>
+                      Drum Machine Engine
+                    </label>
+                    <select
+                      value={aiDrumKit}
+                      onChange={e => setAiDrumKit(e.target.value as DrumKit)}
+                      style={{
+                        width: '100%',
+                        padding: '6px 8px',
+                        background: '#181924',
+                        border: '1px solid rgba(255,255,255,0.1)',
+                        borderRadius: '6px',
+                        color: '#fff',
+                        fontSize: '11.5px',
+                        outline: 'none'
+                      }}
+                    >
+                      {DRUM_KITS.map(k => (
+                        <option key={k.value} value={k.value}>{k.label}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label style={{ fontSize: '11px', fontWeight: 600, color: '#888', display: 'block', marginBottom: '4px' }}>
+                      Melody Octave Shift
+                    </label>
+                    <div style={{ display: 'flex', gap: '3px' }}>
+                      {[-2, -1, 0, 1, 2].map(oct => (
+                        <button
+                          key={oct}
+                          onClick={() => setAiOctaveShift(oct)}
+                          style={{
+                            flex: 1,
+                            padding: '5px 0',
+                            borderRadius: '5px',
+                            border: '1px solid',
+                            borderColor: aiOctaveShift === oct ? '#4dabf7' : 'rgba(255,255,255,0.08)',
+                            background: aiOctaveShift === oct ? 'rgba(77, 171, 247, 0.2)' : 'rgba(255,255,255,0.02)',
+                            color: aiOctaveShift === oct ? '#4dabf7' : '#888',
+                            fontSize: '10px',
+                            fontWeight: 700,
+                            cursor: 'pointer'
+                          }}
+                        >
+                          {oct > 0 ? `+${oct}` : oct}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '11.5px', color: '#ccc', userSelect: 'none' }}>
+                      <input
+                        type="checkbox"
+                        checked={aiLoop}
+                        onChange={e => setAiLoop(e.target.checked)}
+                        style={{ accentColor: '#da77f2', width: '15px', height: '15px', cursor: 'pointer' }}
+                      />
+                      <span>Auto-loop generated region</span>
+                    </label>
                   </div>
                 </div>
 

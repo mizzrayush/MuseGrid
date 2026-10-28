@@ -395,12 +395,6 @@ function App() {
               }))
             }
           })
-          saveRecentProject({
-            name: pName,
-            filePath: res.filePath,
-            bpm: data.bpm || 120,
-            trackCount: data.tracks.length
-          })
           setIsInitialLaunch(false)
           ipc.invoke('set-fullscreen', true).catch(() => {})
           useStore.getState().showToast(`Opened .muztrack project (${data.tracks.length} tracks)`, 'success')
@@ -420,12 +414,6 @@ function App() {
         })
         setIsInitialLaunch(false)
         ipc.invoke('set-fullscreen', true).catch(() => {})
-        saveRecentProject({
-          name: pName,
-          filePath: res.filePath,
-          bpm: parsed.bpm || 120,
-          trackCount: (parsed.tracks || []).length
-        })
         useStore.getState().showToast(`Opened ${res.filePath.split(/[\\/]/).pop()}`, 'success')
       } catch (err) {
         console.error(err)
@@ -785,13 +773,7 @@ function App() {
 
   const handleNewProject = () => {
     setIsInitialLaunch(false)
-    openProjectInTab({ name: 'Untitled Project', isDirty: false })
-    saveRecentProject({
-      name: 'Untitled Project',
-      bpm: 120,
-      trackCount: 2,
-      previewSnippet: 'Blank Project'
-    })
+    openProjectInTab({ name: 'Untitled Project', isDirty: false, previewSnippet: 'Blank Project' })
     const ipc = (window as any).ipcRenderer
     if (ipc && typeof ipc.invoke === 'function') {
       ipc.invoke('set-fullscreen', true).catch(() => {})

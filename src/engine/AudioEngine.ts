@@ -3196,6 +3196,28 @@ class AudioEngine {
             }
           })
         }
+        if (state.bpm !== prevState.bpm) {
+          if (Math.abs(Tone.Transport.bpm.value - state.bpm) > 0.01) {
+            Tone.Transport.bpm.value = state.bpm
+          }
+          (window as any).juceAudioBridge.postCommand({ type: 'setBpm', bpm: state.bpm })
+        }
+        if (state.swing !== prevState.swing) {
+          this.applySwing(state.swing)
+        }
+        if (state.loopEnabled !== prevState.loopEnabled ||
+          state.loopStart !== prevState.loopStart ||
+          state.loopEnd !== prevState.loopEnd) {
+          this.applyLoop(state.loopEnabled, state.loopStart, state.loopEnd)
+        }
+        if (state.metronomeSettings !== prevState.metronomeSettings) {
+          this.applyMetronomeSettings(state.metronomeSettings)
+        }
+        if (state.studioSettings.masterVolume !== prevState.studioSettings.masterVolume ||
+          state.studioSettings.limiterEnabled !== prevState.studioSettings.limiterEnabled ||
+          state.studioSettings.limiterThreshold !== prevState.studioSettings.limiterThreshold) {
+          this.syncNativeMaster()
+        }
       })
       setTimeout(() => {
         const latestState = useStore.getState();
@@ -4718,8 +4740,10 @@ class AudioEngine {
   private applyLoop(enabled: boolean, start: number, end: number) {
     Tone.Transport.loop = enabled
     if (enabled) {
-      Tone.Transport.loopStart = `${start}i`
-      Tone.Transport.loopEnd = `${end}i`
+      const safeStart = Math.max(0, Math.round(start || 0))
+      const safeEnd = Math.max(safeStart + 48, Math.round(end || 768))
+      Tone.Transport.loopStart = `${safeStart}i`
+      Tone.Transport.loopEnd = `${safeEnd}i`
     }
   }
 
@@ -4744,6 +4768,8 @@ class AudioEngine {
 
       if (!state.isRecording && !state.loopEnabled && maxTicks > 0 && ticks > maxTicks + endBuffer) {
         this.stop()
+      } else if (!state.isRecording && state.loopEnabled && state.loopEnd > state.loopStart && ticks >= state.loopEnd) {
+        Tone.Transport.ticks = state.loopStart
       } else {
         if (Math.abs(Tone.Transport.bpm.value - state.bpm) > 0.01) {
           Tone.Transport.bpm.value = state.bpm

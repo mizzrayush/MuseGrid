@@ -2043,7 +2043,10 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                   color: '#ccc',
                   fontSize: '12px',
                   fontWeight: 600,
-                  cursor: 'pointer'
+                  cursor: 'pointer',
+                  boxShadow: 'none',
+                  outline: 'none',
+                  transition: 'all 0.15s ease'
                 }}
                 onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.12)'; e.currentTarget.style.color = '#fff' }}
                 onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)'; e.currentTarget.style.color = '#ccc' }}
@@ -2062,7 +2065,10 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                     color: '#ff6b8b',
                     fontSize: '12px',
                     fontWeight: 700,
-                    cursor: 'pointer'
+                    cursor: 'pointer',
+                    boxShadow: 'none',
+                    outline: 'none',
+                    transition: 'all 0.15s ease'
                   }}
                   onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255, 51, 102, 0.25)'; e.currentTarget.style.color = '#fff' }}
                   onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255, 51, 102, 0.15)'; e.currentTarget.style.color = '#ff6b8b' }}
@@ -2080,19 +2086,29 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
                     padding: '8px 16px',
                     borderRadius: '8px',
                     background: confirmModal.type === 'permanent-delete'
-                      ? 'linear-gradient(135deg, #ff3366, #e03131)'
-                      : 'linear-gradient(135deg, #f76707, #d9480f)',
-                    border: 'none',
-                    color: '#fff',
+                      ? 'rgba(255, 51, 102, 0.18)'
+                      : 'rgba(247, 103, 7, 0.18)',
+                    border: confirmModal.type === 'permanent-delete'
+                      ? '1px solid rgba(255, 51, 102, 0.35)'
+                      : '1px solid rgba(247, 103, 7, 0.35)',
+                    color: confirmModal.type === 'permanent-delete' ? '#ff6b8b' : '#ffa94d',
                     fontSize: '12px',
-                    fontWeight: 700,
+                    fontWeight: 600,
                     cursor: 'pointer',
-                    boxShadow: confirmModal.type === 'permanent-delete'
-                      ? '0 4px 15px rgba(255, 51, 102, 0.35)'
-                      : '0 4px 15px rgba(247, 103, 7, 0.35)'
+                    boxShadow: 'none',
+                    outline: 'none',
+                    transition: 'all 0.15s ease'
                   }}
-                  onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-1px)' }}
-                  onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)' }}
+                  onMouseEnter={e => {
+                    e.currentTarget.style.background = confirmModal.type === 'permanent-delete' ? '#e03131' : '#d9480f'
+                    e.currentTarget.style.color = '#fff'
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.background = confirmModal.type === 'permanent-delete'
+                      ? 'rgba(255, 51, 102, 0.18)'
+                      : 'rgba(247, 103, 7, 0.18)'
+                    e.currentTarget.style.color = confirmModal.type === 'permanent-delete' ? '#ff6b8b' : '#ffa94d'
+                  }}
                 >
                   {confirmModal.type === 'permanent-delete' ? 'Permanently Delete' : 'Move to Trash'}
                 </button>

@@ -1609,6 +1609,7 @@ export default function LeftPane() {
   const [aiSeedBars, setAiSeedBars] = useState(2)
   const [aiDensity, setAiDensity] = useState(1.0)
   const [aiOctaveShift, setAiOctaveShift] = useState(0)
+  const [aiSemitoneShift, setAiSemitoneShift] = useState(0)
   const [aiSeedPitch, setAiSeedPitch] = useState<number | 'auto'>('auto')
   const projectExportData = useStore(s => s.projectExportData)
   const setProjectExportData = useStore(s => s.setProjectExportData)
@@ -3115,7 +3116,7 @@ export default function LeftPane() {
 
       let newNotes: any[] = []
       if (track.instrument === 'synth') {
-        newNotes = await generateAiMelody(seedNotes, aiLength, aiTemperature, aiDensity, aiOctaveShift, trackScale, effectiveStartTime, aiSeedPitch)
+        newNotes = await generateAiMelody(seedNotes, aiLength, aiTemperature, aiDensity, aiOctaveShift, trackScale, effectiveStartTime, aiSeedPitch, aiSemitoneShift)
       } else {
         newNotes = await generateAiDrums(seedNotes, aiLength, aiTemperature, aiDensity, midiRemapData.drumMap, effectiveStartTime, aiSeedPitch)
       }
@@ -3253,7 +3254,7 @@ export default function LeftPane() {
         } else {
           seedNotes = synthNotes.filter(n => n.time < seedWindow).slice(0, 16)
         }
-        const melody = await generateAiMelody(seedNotes, aiLength, aiTemperature, aiDensity, aiOctaveShift, trackScale, effectiveStartTime, aiSeedPitch)
+        const melody = await generateAiMelody(seedNotes, aiLength, aiTemperature, aiDensity, aiOctaveShift, trackScale, effectiveStartTime, aiSeedPitch, aiSemitoneShift)
         melody.forEach(n => {
           toAdd.push({
             ...n,
@@ -3526,7 +3527,7 @@ export default function LeftPane() {
         }
       } else {
         const aiShift = type === 'bass' ? aiOctaveShift - 2 : aiOctaveShift
-        const generatedRoots = await generateAiMelody(seedNotes, aiLength, aiTemperature, aiDensity, aiShift, trackScale, effectiveStartTime)
+        const generatedRoots = await generateAiMelody(seedNotes, aiLength, aiTemperature, aiDensity, aiShift, trackScale, effectiveStartTime, 'auto', aiSemitoneShift)
 
         if (generatedRoots.length > 0) {
           useStore.getState().commitHistory()
@@ -6672,16 +6673,28 @@ export default function LeftPane() {
                 onChange={v => setAiDensity(v)}
               />
               {activeTrack?.instrument === 'synth' && (
-                <SliderRow
-                  label="Octave Shift"
-                  value={aiOctaveShift}
-                  min={-2}
-                  max={2}
-                  step={1}
-                  suffix=" oct"
-                  color="#cc5de8"
-                  onChange={v => setAiOctaveShift(v)}
-                />
+                <>
+                  <SliderRow
+                    label="Octave Shift"
+                    value={aiOctaveShift}
+                    min={-4}
+                    max={4}
+                    step={1}
+                    suffix=" oct"
+                    color="#cc5de8"
+                    onChange={v => setAiOctaveShift(v)}
+                  />
+                  <SliderRow
+                    label="Semitone Shift"
+                    value={aiSemitoneShift}
+                    min={-12}
+                    max={12}
+                    step={1}
+                    suffix=" st"
+                    color="#e599f7"
+                    onChange={v => setAiSemitoneShift(v)}
+                  />
+                </>
               )}
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
                 <span style={{ fontSize: '11px', color: '#aaa' }}>Seed / Dummy Note</span>
@@ -10780,8 +10793,27 @@ for (let channel = 0; channel < input.length; channel++) {
                                       }
                                     }
                                     input.click()
+                                  } else if (val === 'physical') {
+                                    commitHistory()
+                                    updateTrack(track.id, {
+                                      synthPreset: 'physical',
+                                      pmModelType: track.pmModelType || 'string',
+                                      pmStringStiffness: track.pmStringStiffness ?? 0.5,
+                                      pmStringDecay: track.pmStringDecay ?? 0.7,
+                                      pmPluckHardness: track.pmPluckHardness ?? 0.6,
+                                      pmBridgeTransmission: track.pmBridgeTransmission ?? 0.3
+                                    })
+                                    setTimeout(() => audioEngine.createInstrument(track.id, 'synth'), 50)
+                                    useStore.getState().showToast('Physical Modeling Engine Activated', 'success')
+                                  } else if (val === 'vocal') {
+                                    commitHistory()
+                                    updateTrack(track.id, { synthPreset: 'vocal' })
+                                    setTimeout(() => audioEngine.createInstrument(track.id, 'synth'), 50)
+                                    useStore.getState().showToast('Vocal / Singing Synth Activated', 'success')
                                   } else {
+                                    commitHistory()
                                     updateTrack(track.id, { synthPreset: val as SynthPreset })
+                                    setTimeout(() => audioEngine.createInstrument(track.id, 'synth'), 50)
                                   }
                                 }}
                                 style={{ width: '100%', background: '#12141c', color: '#00e6ff', border: '1px solid rgba(0, 230, 255, 0.25)', borderRadius: '4px', padding: '5px', fontSize: '11px', outline: 'none' }}
@@ -10802,23 +10834,18 @@ for (let channel = 0; channel < input.length; channel++) {
                                     </option>
                                   </optgroup>
                                 )}
-                                <optgroup label="── DEFAULT SOUNDS ──" style={{ background: '#0a0b10', color: '#888', fontWeight: 800 }}>
-                                  {track.synthPreset === 'physical' ? (
-                                    <>
-                                      <option value="physical" style={{ background: '#12141c', color: '#e0e0e0' }}>Physically Modeled</option>
-                                      <option value="import-muzins" style={{ background: '#12141c', color: '#e0e0e0' }}>Load from Device (.muzins)...</option>
-                                    </>
-                                  ) : (
-                                    <>
-                                      {SYNTH_PRESETS.filter(preset => preset.value !== 'physical').map(preset => (
-                                        <option key={preset.value} value={preset.value} style={{ background: '#12141c', color: '#e0e0e0' }}>{preset.label}</option>
-                                      ))}
-                                      {track.customMuxins && (
-                                        <option value="custom" style={{ background: '#12141c', color: '#e0e0e0' }}>Custom: {track.customMuxins.name}</option>
-                                      )}
-                                      <option value="import-muzins" style={{ background: '#12141c', color: '#e0e0e0' }}>Load from Device (.muzins)...</option>
-                                    </>
+                                <optgroup label="── STANDARD SYNTH PRESETS ──" style={{ background: '#0a0b10', color: '#00e6ff', fontWeight: 800 }}>
+                                  {SYNTH_PRESETS.filter(preset => preset.value !== 'physical' && preset.value !== 'vocal').map(preset => (
+                                    <option key={preset.value} value={preset.value} style={{ background: '#12141c', color: '#e0e0e0' }}>{preset.label}</option>
+                                  ))}
+                                  {track.customMuxins && (
+                                    <option value="custom" style={{ background: '#12141c', color: '#e0e0e0' }}>Custom: {track.customMuxins.name}</option>
                                   )}
+                                  <option value="import-muzins" style={{ background: '#12141c', color: '#e0e0e0' }}>Load from Device (.muzins)...</option>
+                                </optgroup>
+                                <optgroup label="── SPECIALIZED ACOUSTIC & VOCAL ENGINES ──" style={{ background: '#0a0b10', color: '#da77f2', fontWeight: 800 }}>
+                                  <option value="physical" style={{ background: '#12141c', color: '#4dabf7' }}>⚡ Physical Modeling (String / Wind / Perc)</option>
+                                  <option value="vocal" style={{ background: '#12141c', color: '#69db7c' }}>🎤 Vocal / Singing Synth (Formant Vowel)</option>
                                 </optgroup>
                               </StopPropSelect>
                               {track.vst3InstrumentId && (

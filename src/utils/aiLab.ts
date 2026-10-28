@@ -165,7 +165,8 @@ export async function generateAiMelody(
   octaveShift: number = 0,
   scale?: ScaleLock,
   playheadPosition?: number,
-  customSeedPitch?: number | 'auto'
+  customSeedPitch?: number | 'auto',
+  semitoneShift: number = 0
 ): Promise<Omit<Note, 'id' | 'trackId'>[]> {
   const currentScale = scale || useStore.getState().scaleLock
 
@@ -215,7 +216,7 @@ export async function generateAiMelody(
       return result.notes
         .filter(() => Math.random() < density)
         .map((n) => {
-          let pitch = (n.pitch || 60) + (octaveShift * 12)
+          let pitch = (n.pitch || 60) + (octaveShift * 12) + semitoneShift
           if (currentScale.enabled) {
             pitch = snapToScale(pitch, currentScale.root, currentScale.mode, currentScale.customIntervals)
           }
@@ -223,7 +224,7 @@ export async function generateAiMelody(
           return {
             time: Math.max(0, startTime + ((n.quantizedStartStep || 0) * 48)),
             duration: Math.max(24, ((n.quantizedEndStep || 0) - (n.quantizedStartStep || 0)) * 48),
-            pitch: Math.max(0, Math.min(95, pitch)),
+            pitch: Math.max(12, Math.min(108, pitch)),
             velocity: Math.floor(Math.min(127, Math.max(40, 80 + Math.random() * 30)))
           }
         })
@@ -241,7 +242,7 @@ export async function generateAiMelody(
   for (let s = 0; s < steps; s++) {
     if (Math.random() > density) continue
     const iv = intervals[Math.floor(Math.random() * intervals.length)]
-    let pitch = 60 + (currentScale.root || 0) + iv + (octaveShift * 12)
+    let pitch = 60 + (currentScale.root || 0) + iv + (octaveShift * 12) + semitoneShift
     // Add contour based on temperature
     if (Math.random() < temperature * 0.45) {
       pitch += Math.random() > 0.5 ? 2 : -2
@@ -253,7 +254,7 @@ export async function generateAiMelody(
     fallbackNotes.push({
       time: startTick + (s * stepTicks),
       duration: noteDuration,
-      pitch: Math.max(24, Math.min(90, pitch)),
+      pitch: Math.max(12, Math.min(108, pitch)),
       velocity: Math.floor(75 + Math.random() * 35)
     })
   }

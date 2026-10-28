@@ -967,7 +967,21 @@ export const MidiEditSection: React.FC<MidiEditSectionProps> = ({ activeTrack })
       {activeTab === 'pitch' && !isDrum && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
           {/* Octave & Semitone Transpose */}
-          <span style={{ fontSize: '10px', color: '#aaa', fontWeight: 700 }}>TRANSPOSE SUITE</span>
+          <span style={{ fontSize: '10px', color: '#aaa', fontWeight: 700 }}>TRANSPOSE SUITE (OCTAVES & SEMITONES)</span>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '4px' }}>
+            <button onClick={() => handleTranspose(24)} title="Two Octaves Up (+24 semitones)" style={actionBtnStyle('#cc5de8')}>
+              +2 Oct
+            </button>
+            <button onClick={() => handleTranspose(-24)} title="Two Octaves Down (-24 semitones)" style={actionBtnStyle('#cc5de8')}>
+              -2 Oct
+            </button>
+            <button onClick={() => handleTranspose(36)} title="Three Octaves Up (+36 semitones)" style={actionBtnStyle('#9c36b5')}>
+              +3 Oct
+            </button>
+            <button onClick={() => handleTranspose(-36)} title="Three Octaves Down (-36 semitones)" style={actionBtnStyle('#9c36b5')}>
+              -3 Oct
+            </button>
+          </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '4px' }}>
             <button onClick={() => handleTranspose(12)} title="Octave Up (Shift+Up)" style={actionBtnStyle('#da77f2')}>
               +1 Oct
@@ -975,10 +989,10 @@ export const MidiEditSection: React.FC<MidiEditSectionProps> = ({ activeTrack })
             <button onClick={() => handleTranspose(-12)} title="Octave Down (Shift+Down)" style={actionBtnStyle('#da77f2')}>
               -1 Oct
             </button>
-            <button onClick={() => handleTranspose(1)} title="Semitone Up (Ctrl+Up)" style={actionBtnStyle('#4dabf7')}>
+            <button onClick={() => handleTranspose(1)} title="Semitone Up (Ctrl+Up / Up)" style={actionBtnStyle('#4dabf7')}>
               +1 Semi
             </button>
-            <button onClick={() => handleTranspose(-1)} title="Semitone Down (Ctrl+Down)" style={actionBtnStyle('#4dabf7')}>
+            <button onClick={() => handleTranspose(-1)} title="Semitone Down (Ctrl+Down / Down)" style={actionBtnStyle('#4dabf7')}>
               -1 Semi
             </button>
           </div>
@@ -1005,9 +1019,10 @@ export const MidiEditSection: React.FC<MidiEditSectionProps> = ({ activeTrack })
               <SliderRow
                 label="Custom Semi"
                 value={transposeSliderVal}
-                min={-24}
-                max={24}
+                min={-48}
+                max={48}
                 step={1}
+                suffix=" st"
                 color="#da77f2"
                 onChange={setTransposeSliderVal}
               />

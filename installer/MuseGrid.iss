@@ -23,7 +23,7 @@ DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 OutputDir=..\release
 OutputBaseFilename=MuseGrid-Native-Setup-{#MyAppVersion}
-SetupIconFile=..\icon.ico
+SetupIconFile=..\assets\icon.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -48,7 +48,7 @@ Source: "..\bin\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\bin\dist\*"; DestDir: "{app}\dist"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; Microsoft Edge WebView2 Offline Runtime Installer (extracted and run ONLY if WebView2 is missing on host PC)
-Source: "..\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; DestDir: "{tmp}"; Flags: ignoreversion; Check: not IsWebView2Installed
+Source: "..\assets\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; DestDir: "{tmp}"; Flags: ignoreversion; Check: not IsWebView2Installed
 
 
 [Icons]

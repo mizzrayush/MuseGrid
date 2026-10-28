@@ -12,8 +12,10 @@ if (fs.existsSync(distDir)) {
   fs.cpSync(distDir, binDistDir, { recursive: true })
 }
 
+const assetIcon = path.join(projectRoot, 'assets', 'icon.ico')
 const rootIcon = path.join(projectRoot, 'icon.ico')
 const binIcon = path.join(projectRoot, 'bin', 'icon.ico')
-if (fs.existsSync(rootIcon)) {
-  fs.copyFileSync(rootIcon, binIcon)
+const sourceIcon = fs.existsSync(assetIcon) ? assetIcon : rootIcon
+if (fs.existsSync(sourceIcon)) {
+  fs.copyFileSync(sourceIcon, binIcon)
 }

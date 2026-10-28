@@ -27,7 +27,7 @@ const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL']
 function getIconPath() {
   return app.isPackaged
     ? path.join(process.resourcesPath, 'icon.ico')
-    : path.join(__dirname, '../icon.ico')
+    : path.join(__dirname, '../assets/icon.ico')
 }
 
 function createWindow() {

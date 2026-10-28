@@ -25,15 +25,15 @@
     "directories": {
       "output": "release"
     },
-    "icon": "icon.ico",
+    "icon": "assets/icon.ico",
     "extraResources": [
       {
-        "from": "icon.ico",
+        "from": "assets/icon.ico",
         "to": "icon.ico"
       }
     ],
     "win": {
-      "icon": "icon.ico",
+      "icon": "assets/icon.ico",
       "target": [
         "nsis",
         "portable"
@@ -45,9 +45,9 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "MuseGrid",
-      "installerIcon": "icon.ico",
-      "uninstallerIcon": "icon.ico",
-      "installerHeaderIcon": "icon.ico"
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico"
     }
   },
   "dependencies": {

@@ -25,7 +25,7 @@ if not exist "bin\public" mkdir "bin\public"
 copy /Y "native\build\MuseGrid_artefacts\Release\MuseGrid.exe" "bin\MuseGrid.exe" >nul
 xcopy /E /I /Y "dist\*" "bin\dist\" >nul
 xcopy /E /I /Y "public\*" "bin\public\" >nul
-copy /Y "icon.ico" "bin\icon.ico" >nul
+copy /Y "assets\icon.ico" "bin\icon.ico" >nul
 
 echo ========================================================
 echo Build complete: bin\MuseGrid.exe (JUCE 8 Standalone)

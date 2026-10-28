@@ -18,9 +18,10 @@ bin/
 release/
 dist-electron/
 
-# Local AI model weights (large binaries, not source)
+# Local AI model weights and heavy runtime installers (large binaries, not source)
 public/ai_models/
 MicrosoftEdgeWebView2RuntimeInstallerX64.exe
+assets/MicrosoftEdgeWebView2RuntimeInstallerX64.exe
 
 # Local scratch + audit output
 scratch/

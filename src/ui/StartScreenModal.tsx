@@ -592,7 +592,8 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
           time: 0,
           duration: 96,
           pitch: aiScaleRoot + 60,
-          velocity: 90
+          velocity: 90,
+          instrument: 0
         }]
         const harmony = await generateAutoHarmony(seedNote)
         harmony.voice1.forEach((n: any, idx: number) => {
@@ -651,7 +652,8 @@ export default function StartScreenModal({ onNewProject, onOpenProject, isInitia
       showToast(`Generated ${generatedNotes.length} notes across ${tracksToUse.length} tracks!`, 'success')
     } catch (err: any) {
       console.error('AI Generation Failed:', err)
-      showToast('AI Generation failed. Check console for details.', 'error')
+      const errDetail = err?.message ? `: ${err.message}` : ''
+      showToast(`AI Generation failed${errDetail}`, 'error')
     } finally {
       setAiGenerating(false)
       setAiStatusText('')

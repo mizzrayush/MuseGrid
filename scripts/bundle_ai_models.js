@@ -50,6 +50,14 @@ async function bundleMagentaModels() {
       continue
     }
 
+    const configUrl = `${MAGENTA_BASE}/${model}/config.json`
+    const configPath = path.join(modelDir, 'config.json')
+    try {
+      await downloadFile(configUrl, configPath)
+    } catch (e) {
+      // Model might not have a config.json (e.g. coconet, transcription)
+    }
+
     const manifestStr = fs.readFileSync(manifestPath, 'utf8')
     const manifest = JSON.parse(manifestStr)
 

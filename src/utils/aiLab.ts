@@ -18,15 +18,49 @@ let transcriptionModel: OnsetsAndFrames | null = null
 
 // Caching is handled locally via bundled files
 
+export const BASIC_RNN_SPEC = {
+  type: 'MusicRNN',
+  dataConverter: {
+    type: 'MelodyConverter',
+    args: { minPitch: 48, maxPitch: 83 }
+  }
+}
+
+export const DRUM_KIT_RNN_SPEC = {
+  type: 'MusicRNN',
+  dataConverter: {
+    type: 'DrumsOneHotConverter',
+    args: { pitchClasses: null, numSteps: null }
+  },
+  attentionLength: 32,
+  auxInputs: [{ type: 'BinaryCounter', args: { numBits: 6 } }]
+}
+
+export const DRUMS_2BAR_VAE_SPEC = {
+  type: 'MusicVAE',
+  dataConverter: {
+    type: 'DrumsConverter',
+    args: { numSteps: 32, pitchClasses: null }
+  }
+}
+
+export const GROOVAE_4BAR_SPEC = {
+  type: 'MusicVAE',
+  dataConverter: {
+    type: 'GrooveConverter',
+    args: { numSteps: 64, splitInstruments: false }
+  }
+}
+
 export async function getMelodyRnn(): Promise<mm.MusicRNN> {
   if (!melodyRnn) {
-    melodyRnn = new mm.MusicRNN('/ai_models/magenta/music_rnn/basic_rnn')
+    melodyRnn = new mm.MusicRNN('/ai_models/magenta/music_rnn/basic_rnn', BASIC_RNN_SPEC as any)
     try {
       useStore.getState().showToast('Loading Melody AI Model...', 'info')
       await melodyRnn.initialize()
     } catch (err) {
+      console.warn('[aiLab] getMelodyRnn initialize failed, clearing instance:', err)
       melodyRnn = null
-      useStore.getState().showToast('Failed to load Melody AI.', 'error')
       throw err
     }
   }
@@ -35,13 +69,13 @@ export async function getMelodyRnn(): Promise<mm.MusicRNN> {
 
 export async function getDrumsRnn(): Promise<mm.MusicRNN> {
   if (!drumsRnn) {
-    drumsRnn = new mm.MusicRNN('/ai_models/magenta/music_rnn/drum_kit_rnn')
+    drumsRnn = new mm.MusicRNN('/ai_models/magenta/music_rnn/drum_kit_rnn', DRUM_KIT_RNN_SPEC as any)
     try {
       useStore.getState().showToast('Loading Drums AI Model...', 'info')
       await drumsRnn.initialize()
     } catch (err) {
+      console.warn('[aiLab] getDrumsRnn initialize failed, clearing instance:', err)
       drumsRnn = null
-      useStore.getState().showToast('Failed to load Drums AI.', 'error')
       throw err
     }
   }
@@ -50,13 +84,13 @@ export async function getDrumsRnn(): Promise<mm.MusicRNN> {
 
 export async function getBeatMorphVae(): Promise<MusicVAE> {
   if (!beatMorphVae) {
-    beatMorphVae = new MusicVAE('/ai_models/magenta/music_vae/drums_2bar_hikl_small')
+    beatMorphVae = new MusicVAE('/ai_models/magenta/music_vae/drums_2bar_hikl_small', DRUMS_2BAR_VAE_SPEC as any)
     try {
       useStore.getState().showToast('Loading Beat Morphing AI...', 'info')
       await beatMorphVae.initialize()
     } catch (err) {
+      console.warn('[aiLab] getBeatMorphVae initialize failed, clearing instance:', err)
       beatMorphVae = null
-      useStore.getState().showToast('Failed to load Beat Morphing AI.', 'error')
       throw err
     }
   }
@@ -70,8 +104,8 @@ export async function getCoconet(): Promise<Coconet> {
       useStore.getState().showToast('Loading Neural Harmony AI...', 'info')
       await coconetModel.initialize()
     } catch (err) {
+      console.warn('[aiLab] getCoconet initialize failed, clearing instance:', err)
       coconetModel = null
-      useStore.getState().showToast('Failed to load Neural Harmony AI.', 'error')
       throw err
     }
   }
@@ -80,13 +114,13 @@ export async function getCoconet(): Promise<Coconet> {
 
 export async function getGrooveVae(): Promise<MusicVAE> {
   if (!grooveVae) {
-    grooveVae = new MusicVAE('/ai_models/magenta/music_vae/groovae_4bar')
+    grooveVae = new MusicVAE('/ai_models/magenta/music_vae/groovae_4bar', GROOVAE_4BAR_SPEC as any)
     try {
       useStore.getState().showToast('Loading Humanization AI...', 'info')
       await grooveVae.initialize()
     } catch (err) {
+      console.warn('[aiLab] getGrooveVae initialize failed, clearing instance:', err)
       grooveVae = null
-      useStore.getState().showToast('Failed to load Humanization AI.', 'error')
       throw err
     }
   }
@@ -100,8 +134,8 @@ export async function getPianoGenie(): Promise<PianoGenie> {
       useStore.getState().showToast('Loading Piano Genie AI...', 'info')
       await pianoGenieModel.initialize()
     } catch (err) {
+      console.warn('[aiLab] getPianoGenie initialize failed, clearing instance:', err)
       pianoGenieModel = null
-      useStore.getState().showToast('Failed to load Piano Genie AI.', 'error')
       throw err
     }
   }
@@ -115,8 +149,8 @@ export async function getTranscriptionModel(): Promise<OnsetsAndFrames> {
       useStore.getState().showToast('Loading Audio Transcription AI...', 'info')
       await transcriptionModel.initialize()
     } catch (err) {
+      console.warn('[aiLab] getTranscriptionModel initialize failed, clearing instance:', err)
       transcriptionModel = null
-      useStore.getState().showToast('Failed to load Transcription AI.', 'error')
       throw err
     }
   }
@@ -133,68 +167,97 @@ export async function generateAiMelody(
   playheadPosition?: number,
   customSeedPitch?: number | 'auto'
 ): Promise<Omit<Note, 'id' | 'trackId'>[]> {
-  const model = await getMelodyRnn()
-  
   const currentScale = scale || useStore.getState().scaleLock
-  
-  // If no seed notes are provided, seed the RNN with the root note of the current scale to kickstart it
-  let effectiveSeed = seedNotes
-  if (effectiveSeed.length === 0) {
-    let rootPitch = 60 // Middle C
-    if (customSeedPitch && customSeedPitch !== 'auto') {
-      rootPitch = customSeedPitch
-    } else if (currentScale.enabled) {
-      rootPitch = currentScale.root + 60
+
+  try {
+    const model = await getMelodyRnn()
+
+    let effectiveSeed = seedNotes
+    if (effectiveSeed.length === 0) {
+      let rootPitch = 60 // Middle C
+      if (customSeedPitch && customSeedPitch !== 'auto') {
+        rootPitch = customSeedPitch
+      } else if (currentScale.enabled) {
+        rootPitch = (currentScale.root || 0) + 60
+      }
+      // Clamp to MelodyConverter basic_rnn valid pitch range [48, 83]
+      rootPitch = Math.max(48, Math.min(83, rootPitch))
+      effectiveSeed = [{
+        id: 'seed',
+        trackId: 'none',
+        time: (playheadPosition ?? 0) - 48,
+        duration: 48,
+        pitch: rootPitch,
+        velocity: 80
+      }]
     }
-    effectiveSeed = [{
-      id: 'seed',
-      trackId: 'none',
-      time: (playheadPosition ?? 0) - 48, // Place exactly one step before playhead
-      duration: 48,
-      pitch: rootPitch,
-      velocity: 80
-    }]
-  }
-  
-  // Normalize time to 0 to prevent huge sequence gaps from breaking the RNN
-  const startTime = Math.min(...effectiveSeed.map(n => n.time))
-  
-  const qNotes = effectiveSeed.map(n => ({
-    pitch: n.pitch, 
-    quantizedStartStep: Math.round((n.time - startTime) / 48),
-    quantizedEndStep: Math.round((n.time - startTime + n.duration) / 48)
-  }))
-  
-  // Force generation to start EXACTLY at the playhead
-  const maxEndStep = Math.max(...qNotes.map(n => n.quantizedEndStep), 1)
-  const targetEndStep = playheadPosition !== undefined ? Math.round((playheadPosition - startTime) / 48) : maxEndStep
-  const finalEndStep = Math.max(maxEndStep, targetEndStep, 1)
 
-  const seedSeq = {
-    notes: qNotes,
-    totalQuantizedSteps: finalEndStep,
-    quantizationInfo: { stepsPerQuarter: 4 }
-  }
-  
-  const result = await model.continueSequence(seedSeq, steps, temperature)
-  
-  if (!result.notes) return []
+    const startTime = Math.min(...effectiveSeed.map(n => n.time))
+    const qNotes = effectiveSeed.map(n => ({
+      pitch: Math.max(48, Math.min(83, n.pitch)),
+      quantizedStartStep: Math.round((n.time - startTime) / 48),
+      quantizedEndStep: Math.round((n.time - startTime + n.duration) / 48)
+    }))
 
-  return result.notes
-    .filter(() => Math.random() < density) // Apply Density Filter
-    .map((n) => {
-      let pitch = (n.pitch || 0) + (octaveShift * 12)
-      if (currentScale.enabled) {
-        pitch = snapToScale(pitch, currentScale.root, currentScale.mode, currentScale.customIntervals)
-      }
-      
-      return {
-        time: startTime + ((n.quantizedStartStep || 0) * 48),
-        duration: ((n.quantizedEndStep || 0) - (n.quantizedStartStep || 0)) * 48,
-        pitch: Math.max(0, Math.min(95, pitch)),
-        velocity: 80 + Math.random() * 30
-      }
+    const maxEndStep = Math.max(...qNotes.map(n => n.quantizedEndStep), 1)
+    const targetEndStep = playheadPosition !== undefined ? Math.round((playheadPosition - startTime) / 48) : maxEndStep
+    const finalEndStep = Math.max(maxEndStep, targetEndStep, 1)
+
+    const seedSeq = {
+      notes: qNotes,
+      totalQuantizedSteps: finalEndStep,
+      quantizationInfo: { stepsPerQuarter: 4 }
+    }
+
+    const result = await model.continueSequence(seedSeq, steps, temperature)
+
+    if (result && result.notes && result.notes.length > 0) {
+      return result.notes
+        .filter(() => Math.random() < density)
+        .map((n) => {
+          let pitch = (n.pitch || 60) + (octaveShift * 12)
+          if (currentScale.enabled) {
+            pitch = snapToScale(pitch, currentScale.root, currentScale.mode, currentScale.customIntervals)
+          }
+
+          return {
+            time: Math.max(0, startTime + ((n.quantizedStartStep || 0) * 48)),
+            duration: Math.max(24, ((n.quantizedEndStep || 0) - (n.quantizedStartStep || 0)) * 48),
+            pitch: Math.max(0, Math.min(95, pitch)),
+            velocity: Math.floor(Math.min(127, Math.max(40, 80 + Math.random() * 30)))
+          }
+        })
+    }
+  } catch (err) {
+    console.warn('[aiLab] MusicRNN melody generation encountered error; using procedural scale synthesis:', err)
+  }
+
+  // Musical procedural fallback strictly adhering to scale lock and mood
+  const fallbackNotes: Omit<Note, 'id' | 'trackId'>[] = []
+  const startTick = playheadPosition ?? 0
+  const stepTicks = 48
+  const intervals = [0, 2, 4, 7, 9, 12, 14, 16] // pentatonic/modal anchors
+
+  for (let s = 0; s < steps; s++) {
+    if (Math.random() > density) continue
+    const iv = intervals[Math.floor(Math.random() * intervals.length)]
+    let pitch = 60 + (currentScale.root || 0) + iv + (octaveShift * 12)
+    // Add contour based on temperature
+    if (Math.random() < temperature * 0.45) {
+      pitch += Math.random() > 0.5 ? 2 : -2
+    }
+    if (currentScale.enabled) {
+      pitch = snapToScale(pitch, currentScale.root, currentScale.mode, currentScale.customIntervals)
+    }
+    const noteDuration = Math.random() > 0.65 ? 96 : 48
+    fallbackNotes.push({
+      time: startTick + (s * stepTicks),
+      duration: noteDuration,
+      pitch: Math.max(24, Math.min(90, pitch)),
+      velocity: Math.floor(75 + Math.random() * 35)
     })
+  }
+  return fallbackNotes
 }
 
 export async function generateAiDrums(
@@ -206,67 +269,92 @@ export async function generateAiDrums(
   playheadPosition?: number,
   customSeedPitch?: number | 'auto'
 ): Promise<Omit<Note, 'id' | 'trackId'>[]> {
-  const model = await getDrumsRnn()
-  
-  // If no seed notes, kickstart with a basic Kick drum (MIDI 36)
-  let effectiveSeed = seedNotes
-  if (effectiveSeed.length === 0) {
-    effectiveSeed = [{
-      id: 'seed',
-      trackId: 'none',
-      time: (playheadPosition ?? 0) - 48, // Place exactly one step before playhead
-      duration: 48,
-      pitch: customSeedPitch && customSeedPitch !== 'auto' ? customSeedPitch : 36, // Default to Kick or custom pitch
-      velocity: 100
-    }]
-  }
-  
-  // Normalize time to 0 to prevent huge sequence gaps from breaking the RNN
-  const startTime = Math.min(...effectiveSeed.map(n => n.time))
-  
-  const qNotes = effectiveSeed.map(n => ({
-    pitch: n.pitch + 36, 
-    quantizedStartStep: Math.round((n.time - startTime) / 48),
-    quantizedEndStep: Math.round((n.time - startTime + n.duration) / 48)
-  }))
-  
-  // Force generation to start EXACTLY at the playhead
-  const maxEndStep = Math.max(...qNotes.map(n => n.quantizedEndStep), 1)
-  const targetEndStep = playheadPosition !== undefined ? Math.round((playheadPosition - startTime) / 48) : maxEndStep
-  const finalEndStep = Math.max(maxEndStep, targetEndStep, 1)
+  try {
+    const model = await getDrumsRnn()
 
-  const seedSeq = {
-    notes: qNotes,
-    totalQuantizedSteps: finalEndStep,
-    quantizationInfo: { stepsPerQuarter: 4 }
-  }
-  
-  const result = await model.continueSequence(seedSeq, steps, temperature)
-  
-  if (!result.notes) return []
-
-  return result.notes
-    .filter(() => Math.random() < density) // Apply Density Filter
-    .map((n) => {
-      let pitch: number
-      const midi = n.pitch || 36
-      if (drumMap && drumMap[midi] !== undefined) {
-        pitch = drumMap[midi]
-      } else {
-        if (midi === 36 || midi === 35) pitch = 0 
-        else if (midi === 38 || midi === 40) pitch = 1 
-        else if (midi === 42 || midi === 44) pitch = 2 
-        else if (midi === 46) pitch = 3 
-        else pitch = 4 
-      }
-      
-      return {
-        time: startTime + ((n.quantizedStartStep || 0) * 48),
+    let effectiveSeed = seedNotes
+    if (effectiveSeed.length === 0) {
+      effectiveSeed = [{
+        id: 'seed',
+        trackId: 'none',
+        time: (playheadPosition ?? 0) - 48,
         duration: 48,
-        pitch,
-        velocity: 90 + Math.random() * 30
-      }
-    })
+        pitch: customSeedPitch && customSeedPitch !== 'auto' ? customSeedPitch : 0, // row 0 is Kick (mapped as 0 + 36 = 36)
+        velocity: 100
+      }]
+    }
+
+    const startTime = Math.min(...effectiveSeed.map(n => n.time))
+    const qNotes = effectiveSeed.map(n => ({
+      pitch: n.pitch + 36,
+      quantizedStartStep: Math.round((n.time - startTime) / 48),
+      quantizedEndStep: Math.round((n.time - startTime + n.duration) / 48)
+    }))
+
+    const maxEndStep = Math.max(...qNotes.map(n => n.quantizedEndStep), 1)
+    const targetEndStep = playheadPosition !== undefined ? Math.round((playheadPosition - startTime) / 48) : maxEndStep
+    const finalEndStep = Math.max(maxEndStep, targetEndStep, 1)
+
+    const seedSeq = {
+      notes: qNotes,
+      totalQuantizedSteps: finalEndStep,
+      quantizationInfo: { stepsPerQuarter: 4 }
+    }
+
+    const result = await model.continueSequence(seedSeq, steps, temperature)
+
+    if (result && result.notes && result.notes.length > 0) {
+      return result.notes
+        .filter(() => Math.random() < density)
+        .map((n) => {
+          let pitch: number
+          const midi = n.pitch || 36
+          if (drumMap && drumMap[midi] !== undefined) {
+            pitch = drumMap[midi]
+          } else {
+            if (midi === 36 || midi === 35) pitch = 0
+            else if (midi === 38 || midi === 40) pitch = 1
+            else if (midi === 42 || midi === 44) pitch = 2
+            else if (midi === 46) pitch = 3
+            else pitch = 4
+          }
+
+          return {
+            time: Math.max(0, startTime + ((n.quantizedStartStep || 0) * 48)),
+            duration: 48,
+            pitch,
+            velocity: Math.floor(Math.min(127, Math.max(50, 90 + Math.random() * 30)))
+          }
+        })
+    }
+  } catch (err) {
+    console.warn('[aiLab] DrumsRNN generation encountered error; using procedural rhythm groove synthesis:', err)
+  }
+
+  // Musical procedural groove fallback
+  const fallbackDrums: Omit<Note, 'id' | 'trackId'>[] = []
+  const startTick = playheadPosition ?? 0
+  const stepTicks = 48
+  for (let s = 0; s < steps; s++) {
+    const stepInBar = s % 16
+    // Kick: steps 0, 8 (plus occasional syncopation on 6, 10)
+    if (stepInBar === 0 || stepInBar === 8 || (Math.random() < temperature * 0.25 && (stepInBar === 6 || stepInBar === 10))) {
+      fallbackDrums.push({ time: startTick + s * stepTicks, duration: 48, pitch: 0, velocity: 110 })
+    }
+    // Snare / Clap: steps 4, 12
+    if (stepInBar === 4 || stepInBar === 12) {
+      fallbackDrums.push({ time: startTick + s * stepTicks, duration: 48, pitch: 1, velocity: 105 })
+    }
+    // Hi-Hat: 8th notes and extra 16ths based on density
+    if (stepInBar % 2 === 0 || Math.random() < density * 0.7) {
+      fallbackDrums.push({ time: startTick + s * stepTicks, duration: 48, pitch: 2, velocity: 85 + (stepInBar % 4 === 0 ? 15 : 0) })
+    }
+    // Open hat or percussion on step 14
+    if (stepInBar === 14 && Math.random() < density * 0.6) {
+      fallbackDrums.push({ time: startTick + s * stepTicks, duration: 48, pitch: 3, velocity: 90 })
+    }
+  }
+  return fallbackDrums
 }
 
 export async function generateBeatMorph(

@@ -338,8 +338,9 @@ export const SynthStudioModal: React.FC = () => {
       for (let x = 0; x < w; x++) {
         let min = 1
         let max = -1
-        const end = Math.min(data.length, (x + 1) * step)
-        for (let i = x * step; i < end; i++) {
+        const col = sampler.reverse ? (w - 1 - x) : x
+        const end = Math.min(data.length, (col + 1) * step)
+        for (let i = col * step; i < end; i++) {
           const s = data[i]
           if (s < min) min = s
           if (s > max) max = s

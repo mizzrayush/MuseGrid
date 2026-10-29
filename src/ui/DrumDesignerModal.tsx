@@ -26,6 +26,23 @@ import {
   type EnvelopeCurveType
 } from '../utils/envelopeCurves'
 
+// Reversed buffer cache for drum sample playback & audition
+const reversedBufferCache = new WeakMap<AudioBuffer, AudioBuffer>()
+function getReversedAudioBuffer(audioCtx: AudioContext, original: AudioBuffer): AudioBuffer {
+  const cached = reversedBufferCache.get(original)
+  if (cached) return cached
+  const rev = audioCtx.createBuffer(original.numberOfChannels, original.length, original.sampleRate)
+  for (let ch = 0; ch < original.numberOfChannels; ch++) {
+    const src = original.getChannelData(ch)
+    const dst = rev.getChannelData(ch)
+    for (let i = 0, j = original.length - 1; i < original.length; i++, j--) {
+      dst[i] = src[j]
+    }
+  }
+  reversedBufferCache.set(original, rev)
+  return rev
+}
+
 // 16 Pads configuration matching MPC bottom-to-top layout
 interface PadDefinition {
   pitch: number
@@ -174,6 +191,12 @@ export const DrumDesignerModal: React.FC = () => {
   const [padModes, setPadModes] = useState<Record<number, 'synth' | 'sample'>>({})
   const [padSamples, setPadSamples] = useState<Record<number, DrumPadSample>>({})
   const [padBuffers, setPadBuffers] = useState<Map<number, AudioBuffer>>(new Map())
+  const padModesRef = useRef(padModes)
+  padModesRef.current = padModes
+  const padSamplesRef = useRef(padSamples)
+  padSamplesRef.current = padSamples
+  const padBuffersRef = useRef(padBuffers)
+  padBuffersRef.current = padBuffers
   const [dragOverPad, setDragOverPad] = useState<number | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const fileTargetPitchRef = useRef<number>(0)
@@ -318,7 +341,13 @@ export const DrumDesignerModal: React.FC = () => {
       setActivePadTriggers(prev => ({ ...prev, [pitch]: false }))
     }, 120)
 
-    // Trigger audio — read from overrides or latest refs to avoid stale closure
+    // Bump hit transient for canvas visualization if this is current pad
+    if (pitch === selectedPitch) {
+      hitTransientRef.current = 1.0
+      sampleHitTransientRef.current = 1.0
+    }
+
+    // Trigger audio parameters — read from overrides or latest refs
     const pitchOffset = (overrides?.pitchOffset !== undefined ? overrides.pitchOffset : (padPitchesRef.current[pitch] ?? 0)) + (targetTrack.transpose ?? 0)
     const detune = overrides?.detune !== undefined ? overrides.detune : (padDetunesRef.current[pitch] ?? 0)
     const slide = overrides?.slide !== undefined ? overrides.slide : (padSlidesRef.current[pitch] ?? 0)
@@ -327,6 +356,83 @@ export const DrumDesignerModal: React.FC = () => {
     const resonance = overrides?.resonance !== undefined ? overrides.resonance : (padResonancesRef.current[pitch] ?? DEFAULT_RESONANCES[pitch] ?? 4000)
     const decay = overrides?.decay !== undefined ? overrides.decay : (padDecaysRef.current[pitch] ?? DEFAULT_DECAYS[pitch] ?? 0.3)
 
+    // Direct WebAudio Audition for Sample Mode (Instant preview for recorded voice / loaded sample)
+    const isSampleMode = (padModesRef.current[pitch] === 'sample') || (targetTrack.drumPadModes?.[pitch] === 'sample')
+    const sampleBuffer = padBuffersRef.current.get(pitch)
+    const sampleConfig = padSamplesRef.current[pitch] || targetTrack.drumPadSamples?.[pitch]
+
+    if (isSampleMode && sampleBuffer) {
+      try {
+        const audioCtx = Tone.getContext().rawContext as AudioContext
+        if (audioCtx.state === 'suspended') {
+          void audioCtx.resume()
+        }
+        const now = audioCtx.currentTime
+
+        // Reversal handling
+        const bufToPlay = sampleConfig?.reverse
+          ? getReversedAudioBuffer(audioCtx, sampleBuffer)
+          : sampleBuffer
+
+        const source = audioCtx.createBufferSource()
+        source.buffer = bufToPlay
+
+        // Playback rate from tuning semitones + fineTune cents + track transpose
+        const tuningSemitones = (sampleConfig?.tuning ?? 0) + pitchOffset
+        const fineTuneCents = (sampleConfig?.fineTune ?? 0) + detune
+        const totalSemitones = tuningSemitones + (fineTuneCents / 100)
+        const rate = Math.max(0.05, Math.min(16.0, Math.pow(2, totalSemitones / 12)))
+        source.playbackRate.setValueAtTime(rate, now)
+
+        const gainNode = audioCtx.createGain()
+        const sampleVol = sampleConfig?.volume !== undefined ? sampleConfig.volume : 1.0
+        const peakGain = Math.max(0.0001, Math.min(2.5, vel * sampleVol))
+        gainNode.gain.setValueAtTime(peakGain, now)
+
+        // Envelope decay
+        const bufDuration = bufToPlay.duration / rate
+        const decayTime = sampleConfig?.decay ?? (overrides?.decay ?? padDecaysRef.current[pitch] ?? bufDuration)
+        const effectiveDuration = Math.min(bufDuration, decayTime)
+        if (effectiveDuration < bufDuration) {
+          gainNode.gain.setValueAtTime(peakGain, now + Math.max(0.005, effectiveDuration * 0.75))
+          gainNode.gain.exponentialRampToValueAtTime(0.0001, now + effectiveDuration)
+        }
+
+        // Stereo Panning
+        let outputNode: AudioNode = gainNode
+        const panVal = Math.max(-1, Math.min(1, sampleConfig?.pan ?? 0))
+        if (panVal !== 0 && (audioCtx as any).createStereoPanner) {
+          const panner = (audioCtx as any).createStereoPanner()
+          panner.pan.setValueAtTime(panVal, now)
+          gainNode.connect(panner)
+          outputNode = panner
+        }
+
+        outputNode.connect(audioCtx.destination)
+
+        // Trimming offset slices
+        const startOffset = Math.max(0, Math.min(0.99, sampleConfig?.startOffset ?? 0))
+        const endOffset = Math.max(startOffset + 0.01, Math.min(1.0, sampleConfig?.endOffset ?? 1.0))
+        const startTimeInBuf = startOffset * bufToPlay.duration
+        const playDuration = ((endOffset - startOffset) * bufToPlay.duration) / rate
+
+        source.connect(gainNode)
+        source.start(now, startTimeInBuf, Math.min(playDuration, effectiveDuration + 0.05))
+
+        source.onended = () => {
+          try {
+            source.disconnect()
+            gainNode.disconnect()
+            if (outputNode !== gainNode) outputNode.disconnect()
+          } catch (_) {}
+        }
+        return
+      } catch (err) {
+        console.warn('Direct pad sample audition failed, falling back to audioEngine:', err)
+      }
+    }
+
+    // Fallback or Physical Synth Mode: Play through AudioEngine
     audioEngine.playNote(
       targetTrack.id,
       'drum',
@@ -347,12 +453,6 @@ export const DrumDesignerModal: React.FC = () => {
         decay
       }
     )
-
-    // Bump hit transient for canvas visualization if this is current pad
-    if (pitch === selectedPitch) {
-      hitTransientRef.current = 1.0
-      sampleHitTransientRef.current = 1.0
-    }
   }, [targetTrack, selectedPitch])
 
   const handleLoadSampleFile = async (pitch: number, file: File) => {
@@ -1000,16 +1100,17 @@ export const DrumDesignerModal: React.FC = () => {
         const midY = height / 2
         const ampScale = (height / 2) * 0.88
 
-        // Draw waveform peaks
+        // Draw waveform peaks (horizontally reversed when reverse mode is active)
+        const isReversed = !!currentSample?.reverse
         for (let i = 0; i < samplePeaks.length; i++) {
           const x = i * barW
-          const p = samplePeaks[i]
+          const p = samplePeaks[isReversed ? (samplePeaks.length - 1 - i) : i]
           const topY = midY + p.min * ampScale
           const botY = midY + p.max * ampScale
           const inRange = x >= startX && x <= endX
 
           ctx.fillStyle = inRange
-            ? (currentSample?.reverse ? '#da77f2' : '#00e6ff')
+            ? (isReversed ? '#da77f2' : '#00e6ff')
             : 'rgba(255, 255, 255, 0.12)'
 
           ctx.fillRect(x, topY, Math.max(1, barW - 0.5), Math.max(1.5, botY - topY))
@@ -1964,16 +2065,16 @@ export const DrumDesignerModal: React.FC = () => {
               <div
                 style={{
                   display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
+                  flexDirection: 'column',
                   background: 'rgba(255, 255, 255, 0.03)',
                   border: '1px solid rgba(255, 255, 255, 0.08)',
                   borderRadius: '8px',
-                  padding: '8px 12px',
-                  gap: '10px'
+                  padding: '10px 12px',
+                  gap: '8px'
                 }}
               >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}>
+                {/* Row 1: Dropdown Selector */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%' }}>
                   <IconWaveform size={14} color={currentPadMode === 'sample' ? '#00e6ff' : '#aaa'} />
                   <span style={{ fontSize: '11px', fontWeight: 800, color: '#aaa', whiteSpace: 'nowrap' }}>
                     PAD SOUND:
@@ -1996,12 +2097,11 @@ export const DrumDesignerModal: React.FC = () => {
                       color: currentPadMode === 'sample' ? '#00e6ff' : '#ffffff',
                       border: '1px solid rgba(255, 255, 255, 0.15)',
                       borderRadius: '6px',
-                      padding: '5px 8px',
+                      padding: '6px 10px',
                       fontSize: '11px',
                       fontWeight: 700,
                       cursor: 'pointer',
                       flex: 1,
-                      maxWidth: '300px',
                       outline: 'none'
                     }}
                   >
@@ -2017,14 +2117,15 @@ export const DrumDesignerModal: React.FC = () => {
                   </select>
                 </div>
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                {/* Row 2: Action Buttons (Load, Record Mic, Clear) */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                   <button
                     onClick={() => {
                       fileTargetPitchRef.current = selectedPitch
                       fileInputRef.current?.click()
                     }}
                     style={{
-                      padding: '5px 10px',
+                      padding: '5px 12px',
                       borderRadius: '6px',
                       background: 'rgba(255, 255, 255, 0.06)',
                       border: '1px solid rgba(255, 255, 255, 0.12)',
@@ -2034,9 +2135,12 @@ export const DrumDesignerModal: React.FC = () => {
                       cursor: 'pointer',
                       display: 'flex',
                       alignItems: 'center',
-                      gap: '5px'
+                      gap: '5px',
+                      transition: 'all 0.15s ease'
                     }}
                     title="Choose and load your own WAV or MP3 audio file"
+                    onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.12)' }}
+                    onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)' }}
                   >
                     <IconUpload size={12} color="#fff" />
                     Load Sample
@@ -2044,7 +2148,7 @@ export const DrumDesignerModal: React.FC = () => {
                   <button
                     onClick={isRecordingMic ? stopMicRecording : startMicRecording}
                     style={{
-                      padding: '5px 10px',
+                      padding: '5px 12px',
                       borderRadius: '6px',
                       background: isRecordingMic ? 'rgba(255, 77, 77, 0.22)' : 'rgba(255, 77, 77, 0.08)',
                       border: `1px solid ${isRecordingMic ? '#ff4d4d' : 'rgba(255, 77, 77, 0.35)'}`,
@@ -2067,7 +2171,7 @@ export const DrumDesignerModal: React.FC = () => {
                     <button
                       onClick={() => handleClearSample(selectedPitch)}
                       style={{
-                        padding: '5px 8px',
+                        padding: '5px 10px',
                         borderRadius: '6px',
                         background: 'rgba(255, 77, 77, 0.1)',
                         border: '1px solid rgba(255, 77, 77, 0.25)',
@@ -2077,8 +2181,11 @@ export const DrumDesignerModal: React.FC = () => {
                         cursor: 'pointer',
                         display: 'flex',
                         alignItems: 'center',
-                        gap: '4px'
+                        gap: '4px',
+                        transition: 'all 0.15s ease'
                       }}
+                      onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255, 77, 77, 0.2)' }}
+                      onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255, 77, 77, 0.1)' }}
                       title="Reset pad back to physical synth"
                     >
                       <IconTrash size={12} color="#ff6b6b" />

@@ -4660,13 +4660,37 @@ class AudioEngine {
     const track = state.tracks.find(t => t.id === trackId)
     if (!track) return
 
-    const drum = this.drums.get(trackId)
+    let drum = this.drums.get(trackId)
+    if (!drum) {
+      drum = new DrumMachine(track.drumKit || 'classic')
+      drum.drumDecays = track.drumDecays
+      drum.drumOctaves = track.drumOctaves
+      drum.drumResonances = track.drumResonances
+      drum.drumPitches = track.drumPitches
+      drum.drumDetunes = track.drumDetunes
+      drum.drumSlides = track.drumSlides
+      drum.drumSlideTimes = track.drumSlideTimes
+      try {
+        const rack = this.getRack(trackId)
+        drum.connect(rack.input)
+      } catch (_) {}
+      this.drums.set(trackId, drum)
+    }
+
     if (sample) {
-      if (drum) {
-        if (buffer) drum.setPadBuffer(pitch, buffer)
-        drum.padSamples[pitch] = sample
-        drum.padModes[pitch] = 'sample'
+      if (buffer) {
+        drum.setPadBuffer(pitch, buffer)
+      } else if (sample.audioBase64) {
+        const ctx = Tone.getContext().rawContext as AudioContext
+        fetch(sample.audioBase64)
+          .then(r => r.arrayBuffer())
+          .then(ab => ctx.decodeAudioData(ab))
+          .then(decoded => drum!.setPadBuffer(pitch, decoded))
+          .catch(e => console.warn(`Failed to decode drum sample for pad ${pitch}:`, e))
       }
+      drum.padSamples[pitch] = sample
+      drum.padModes[pitch] = 'sample'
+
       const existingSamples = track.drumPadSamples || {}
       const existingModes = track.drumPadModes || {}
       state.updateTrack(trackId, {
@@ -4674,11 +4698,10 @@ class AudioEngine {
         drumPadModes: { ...existingModes, [pitch]: 'sample' }
       })
     } else {
-      if (drum) {
-        drum.padAudioBuffers.delete(pitch)
-        delete drum.padSamples[pitch]
-        drum.padModes[pitch] = 'synth'
-      }
+      drum.padAudioBuffers.delete(pitch)
+      delete drum.padSamples[pitch]
+      drum.padModes[pitch] = 'synth'
+
       const existingSamples = { ...(track.drumPadSamples || {}) }
       delete existingSamples[pitch]
       const existingModes = { ...(track.drumPadModes || {}), [pitch]: 'synth' as const }
@@ -4694,10 +4717,16 @@ class AudioEngine {
     const track = state.tracks.find(t => t.id === trackId)
     if (!track) return
 
-    const drum = this.drums.get(trackId)
-    if (drum) {
-      drum.padModes[pitch] = mode
+    let drum = this.drums.get(trackId)
+    if (!drum) {
+      drum = new DrumMachine(track.drumKit || 'classic')
+      try {
+        const rack = this.getRack(trackId)
+        drum.connect(rack.input)
+      } catch (_) {}
+      this.drums.set(trackId, drum)
     }
+    drum.padModes[pitch] = mode
     const existingModes = track.drumPadModes || {}
     state.updateTrack(trackId, {
       drumPadModes: { ...existingModes, [pitch]: mode }
@@ -5657,10 +5686,17 @@ class AudioEngine {
     const playTime = time !== undefined ? time : Tone.now()
 
     if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
-      (window as any).juceAudioBridge.postCommand(
-        buildNativeNoteOnCommand({ trackId, type, pitch, duration, velocity, detune, pitchEnd, noteData, track })
-      );
-      return;
+      const pitchNum = typeof pitch === 'number' ? pitch : Tone.Frequency(pitch).toMidi()
+      const isCustomDrumSample = (type === 'drum' || track?.instrument === 'drum') && (
+        track?.drumPadModes?.[pitchNum] === 'sample' || !!(track?.drumPadSamples?.[pitchNum])
+      )
+
+      if (!isCustomDrumSample) {
+        (window as any).juceAudioBridge.postCommand(
+          buildNativeNoteOnCommand({ trackId, type, pitch, duration, velocity, detune, pitchEnd, noteData, track })
+        );
+        return;
+      }
     }
 
     // VST3 instrument overrides are hosted by JUCE only. Tone keeps the track sound.
@@ -6165,6 +6201,26 @@ class AudioEngine {
         }
       } else {
         drum = this.drums.get(trackId)
+        if (!drum && track) {
+          drum = new DrumMachine(track.drumKit || 'classic')
+          drum.drumDecays = track.drumDecays
+          drum.drumOctaves = track.drumOctaves
+          drum.drumResonances = track.drumResonances
+          drum.drumPitches = track.drumPitches
+          drum.drumDetunes = track.drumDetunes
+          drum.drumSlides = track.drumSlides
+          drum.drumSlideTimes = track.drumSlideTimes
+          if (track.drumPadModes) drum.padModes = { ...track.drumPadModes }
+          if (track.drumPadSamples) {
+            drum.padSamples = { ...track.drumPadSamples }
+            this.syncDrumPadSampleBuffers(drum, track.drumPadSamples)
+          }
+          try {
+            const rack = this.getRack(trackId)
+            drum.connect(rack.input)
+          } catch (_) {}
+          this.drums.set(trackId, drum)
+        }
       }
 
       if (drum) {

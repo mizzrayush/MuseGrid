@@ -1345,6 +1345,7 @@ export default function LeftPane() {
   const updateTrackFXSetting = useStore(s => s.updateTrackFXSetting)
   const updateTrackFXModulator = useStore(s => s.updateTrackFXModulator)
   const loopTrack = useStore(s => s.loopTrack)
+  const micSettings = useStore(s => s.micSettings)
 
   const customFxConfigs = useStore(s => s.customFxConfigs)
   const addCustomFxConfig = useStore(s => s.addCustomFxConfig)

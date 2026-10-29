@@ -116,7 +116,7 @@ export const ProjectTabBar: React.FC<ProjectTabBarProps> = ({ onRequestCloseTab 
         display: 'flex',
         alignItems: 'center',
         minWidth: 0,
-        maxWidth: 'clamp(180px, 32vw, 480px)',
+        maxWidth: 'clamp(140px, 22vw, 320px)',
         flex: '0 1 auto',
         overflow: 'hidden'
       }}
@@ -334,9 +334,9 @@ export const ProjectTabBar: React.FC<ProjectTabBarProps> = ({ onRequestCloseTab 
                       ? '0 2px 8px rgba(0, 0, 0, 0.25)'
                       : 'none',
                   color: isActive ? '#ffffff' : isHovered ? '#c9d1d9' : '#8b92a5',
-                  flex: isClosing ? '0 0 0px' : '0 1 125px',
-                  minWidth: isClosing ? '0px' : '36px',
-                  maxWidth: isClosing ? '0px' : '130px',
+                  flex: isClosing ? '0 0 0px' : '0 1 110px',
+                  minWidth: isClosing ? '0px' : '40px',
+                  maxWidth: isClosing ? '0px' : '110px',
                   opacity: isClosing ? 0 : 1,
                   transform: isClosing ? 'scale(0.8) translateY(-4px)' : isActive ? 'translateY(0)' : 'translateY(1px)',
                   overflow: 'hidden',

@@ -32,7 +32,7 @@ import {
   IconSettings, IconSpeaker, IconMidi, IconSync, IconChevronLeft,
   IconX, IconVolume, IconVolumeX, IconTimeline, IconTarget, IconMic,
   IconPlus, IconSave, IconWand, IconPlay, IconCopy, IconList, IconColumns, IconAlign,
-  IconAlertTriangle, IconInfo, IconZap, IconSliders, IconCheck, IconPiano, IconLayers
+  IconAlertTriangle, IconInfo, IconZap, IconSliders, IconCheck, IconPiano, IconLayers,
 } from './Icons'
 import { MathInput } from './MathInput'
 import { calculateFourierPartials } from '../utils/mathWaveform'
@@ -192,6 +192,140 @@ function Section({ title, info, children, defaultOpen = false }: { title: React.
       }}>
         <div style={{ minHeight: 0 }}>
           <div style={{ padding: '0 20px 14px' }}>{children}</div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function MasterGroupSection({
+  title,
+  icon,
+  badge,
+  accentColor = '#00e6ff',
+  children,
+  defaultOpen = false
+}: {
+  title: string
+  icon: React.ReactNode
+  badge?: React.ReactNode
+  accentColor?: string
+  children: React.ReactNode
+  defaultOpen?: boolean
+}) {
+  const [open, setOpen] = useState(defaultOpen)
+
+  return (
+    <div style={{
+      marginBottom: '8px',
+      borderRadius: '8px',
+      border: `1px solid ${open ? accentColor + '44' : 'rgba(255, 255, 255, 0.08)'}`,
+      background: open
+        ? 'linear-gradient(180deg, rgba(20, 24, 34, 0.95) 0%, rgba(13, 15, 22, 0.98) 100%)'
+        : 'linear-gradient(180deg, rgba(17, 19, 28, 0.7) 0%, rgba(12, 14, 20, 0.8) 100%)',
+      overflow: 'hidden',
+      transition: 'all 0.22s ease',
+      boxShadow: open ? `0 4px 18px ${accentColor}15, 0 1px 3px rgba(0,0,0,0.5)` : '0 2px 6px rgba(0, 0, 0, 0.35)'
+    }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%',
+          minHeight: '40px',
+          background: open ? `${accentColor}12` : 'transparent',
+          border: 'none',
+          borderLeft: `4px solid ${open ? accentColor : 'transparent'}`,
+          color: '#ffffff',
+          cursor: 'pointer',
+          padding: '8px 14px',
+          textAlign: 'left',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          transition: 'all 0.18s ease'
+        }}
+        onMouseEnter={e => {
+          if (!open) {
+            e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)'
+            e.currentTarget.style.borderLeftColor = accentColor + '88'
+          }
+        }}
+        onMouseLeave={e => {
+          if (!open) {
+            e.currentTarget.style.background = 'transparent'
+            e.currentTarget.style.borderLeftColor = 'transparent'
+          }
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: '26px',
+            height: '26px',
+            borderRadius: '6px',
+            background: `${accentColor}20`,
+            border: `1px solid ${accentColor}44`,
+            color: accentColor,
+            flexShrink: 0
+          }}>
+            {icon}
+          </div>
+          <span style={{
+            fontSize: '11px',
+            fontWeight: 800,
+            textTransform: 'uppercase',
+            letterSpacing: '0.09em',
+            color: open ? '#ffffff' : '#e0e6ed'
+          }}>
+            {title}
+          </span>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {badge && (
+            <span style={{
+              fontSize: '9px',
+              fontWeight: 700,
+              padding: '2px 8px',
+              borderRadius: '10px',
+              background: `${accentColor}22`,
+              color: accentColor,
+              border: `1px solid ${accentColor}44`,
+              letterSpacing: '0.04em',
+              textTransform: 'uppercase'
+            }}>
+              {badge}
+            </span>
+          )}
+          <span style={{
+            color: open ? accentColor : 'rgba(255, 255, 255, 0.4)',
+            display: 'flex',
+            alignItems: 'center',
+            transform: open ? 'rotate(0deg)' : 'rotate(-90deg)',
+            transition: 'transform 0.22s cubic-bezier(0.4, 0, 0.2, 1)'
+          }}>
+            <IconChevronDown size={14} />
+          </span>
+        </div>
+      </button>
+
+      <div style={{
+        display: 'grid',
+        gridTemplateRows: open ? '1fr' : '0fr',
+        opacity: open ? 1 : 0,
+        overflow: 'hidden',
+        transition: 'grid-template-rows 0.25s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.25s cubic-bezier(0.4, 0, 0.2, 1)'
+      }}>
+        <div style={{ minHeight: 0 }}>
+          <div style={{
+            padding: '4px 6px 6px',
+            borderTop: '1px solid rgba(255, 255, 255, 0.05)',
+            background: 'rgba(0, 0, 0, 0.2)'
+          }}>
+            {children}
+          </div>
         </div>
       </div>
     </div>
@@ -4876,9 +5010,17 @@ export default function LeftPane() {
           opacity: settingsRatio === 0 ? 0 : 1,
           pointerEvents: settingsRatio === 0 ? 'none' : 'auto',
           transition: 'height 0.4s cubic-bezier(0.25, 1, 0.5, 1), opacity 0.4s cubic-bezier(0.25, 1, 0.5, 1)',
-          minHeight: 0
+          minHeight: 0,
+          padding: '6px 6px 12px'
         }}
       >
+        <MasterGroupSection
+          title="System & Tools"
+          icon={<IconSettings size={15} />}
+          accentColor="#00e6ff"
+          badge={`${Math.round(studioSettings.masterVolume * 100)}% VOL`}
+          defaultOpen={false}
+        >
         <Section title="Manage Settings" info="Preferences" defaultOpen={false}>
           <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
             <button
@@ -5619,7 +5761,15 @@ export default function LeftPane() {
             <SliderRow label="Loop End" value={loopEnd} min={loopStart + 48} max={Math.max(getMaxTicks() + 768, 3072)} step={0.1} suffix="t" color="#4dabf7" onChange={setLoopEnd} />
           </div>
         </Section>
+        </MasterGroupSection>
 
+        <MasterGroupSection
+          title="Recording & Capture"
+          icon={<IconMic size={15} />}
+          accentColor="#ff6b6b"
+          badge={isRecording ? "REC LIVE" : isStepRecording ? "STEP REC" : (activeMidiDeviceNames.length > 0 ? `${activeMidiDeviceNames.length} MIDI` : "READY")}
+          defaultOpen={false}
+        >
         <Section title="Click" info={`${metronomeSettings.volume} dB`} defaultOpen={false}>
           <TextInputRow label="Pitch Decay" value={metronomeSettings.pitchDecay} onChange={v => updateMetronome({ pitchDecay: v })} color="#ffcc00" />
           <TextInputRow label="Octaves" value={metronomeSettings.octaves} onChange={v => updateMetronome({ octaves: v })} color="#ffcc00" />
@@ -6358,7 +6508,15 @@ export default function LeftPane() {
         >
           <MicRecordingSettingsSection />
         </Section>
+        </MasterGroupSection>
 
+        <MasterGroupSection
+          title="Composition & Grid"
+          icon={<IconTimeline size={15} />}
+          accentColor="#51cf66"
+          badge={`${timeSignature} • ${NOTE_NAMES_SHARP[scaleLock.root % 12]} ${scaleLock.mode}`}
+          defaultOpen={false}
+        >
         <Section title="Grid" defaultOpen={false}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
             <span style={{ fontSize: '12px', color: '#aaa' }}>Time Signature</span>
@@ -7449,7 +7607,15 @@ export default function LeftPane() {
             </div>
           </div>
         </Section>
+        </MasterGroupSection>
 
+        <MasterGroupSection
+          title="Sound Design & Instruments"
+          icon={<IconPiano size={15} />}
+          accentColor="#ff9900"
+          badge={activeTrack ? activeTrack.instrument.toUpperCase() : "STUDIO"}
+          defaultOpen={false}
+        >
         <Section title="Instrument Lab" defaultOpen={false}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
             {/* Header Switch Tabs */}
@@ -9932,7 +10098,15 @@ export default function LeftPane() {
             </div>
           </div>
         </Section>
+        </MasterGroupSection>
 
+        <MasterGroupSection
+          title="Plugins, DSP & Groups"
+          icon={<IconZap size={15} />}
+          accentColor="#da77f2"
+          badge={vst3Plugins.length > 0 ? `${vst3Plugins.length} VST3` : "FX & BUS"}
+          defaultOpen={false}
+        >
         <Section title="Custom FX Builder" defaultOpen={false}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
 
@@ -10801,6 +10975,7 @@ for (let channel = 0; channel < input.length; channel++) {
             </button>
           </div>
         </Section>
+        </MasterGroupSection>
       </div>
 
       <div

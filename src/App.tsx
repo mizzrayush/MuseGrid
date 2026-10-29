@@ -876,34 +876,37 @@ function App() {
           overflow: 'hidden'
         }}>
           {/* Top Header / Studio Pro Transport Deck */}
-          <div className="glass-panel" style={{ height: '54px', width: '100%', boxSizing: 'border-box', overflow: 'visible', position: 'relative', display: 'flex', alignItems: 'center', padding: '0 14px', gap: '10px', borderBottom: '1px solid rgba(255, 255, 255, 0.06)', zIndex: 100 }}>
+          <div className="glass-panel" style={{ height: '54px', width: '100%', maxWidth: '100vw', boxSizing: 'border-box', overflow: 'hidden', position: 'relative', display: 'flex', alignItems: 'center', padding: '0 12px', gap: '8px', borderBottom: '1px solid rgba(255, 255, 255, 0.06)', zIndex: 100 }}>
             
-            {/* Top-Left Corner Brand Icon */}
-            <div
-              onClick={() => useStore.getState().openStartTab()}
-              title="MuseGrid Studio (Return to Start Screen)"
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '8px',
-                cursor: 'pointer',
-                userSelect: 'none',
-                flexShrink: 0,
-                transition: 'opacity 0.15s ease'
-              }}
-              onMouseEnter={e => { e.currentTarget.style.opacity = '0.85' }}
-              onMouseLeave={e => { e.currentTarget.style.opacity = '1' }}
-            >
-              <IconMuseLogo size={22} />
-              <span style={{ fontSize: '13px', fontWeight: 800, color: '#fff', letterSpacing: '-0.3px' }}>
-                MUSE<span style={{ color: '#4dabf7' }}>GRID</span>
-              </span>
+            {/* Left Header Section: Brand + Project Tabs Strip */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: '0 1 auto', overflow: 'hidden' }}>
+              {/* Top-Left Corner Brand Icon */}
+              <div
+                onClick={() => useStore.getState().openStartTab()}
+                title="MuseGrid Studio (Return to Start Screen)"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  cursor: 'pointer',
+                  userSelect: 'none',
+                  flexShrink: 0,
+                  transition: 'opacity 0.15s ease'
+                }}
+                onMouseEnter={e => { e.currentTarget.style.opacity = '0.85' }}
+                onMouseLeave={e => { e.currentTarget.style.opacity = '1' }}
+              >
+                <IconMuseLogo size={22} />
+                <span style={{ fontSize: '13px', fontWeight: 800, color: '#fff', letterSpacing: '-0.3px' }}>
+                  MUSE<span style={{ color: '#4dabf7' }}>GRID</span>
+                </span>
+              </div>
+
+              <div style={{ width: '1px', height: '18px', background: 'rgba(255, 255, 255, 0.08)', flexShrink: 0 }} />
+
+              {/* Project Tabs Strip */}
+              <ProjectTabBar onRequestCloseTab={handleRequestCloseTab} />
             </div>
-
-            <div style={{ width: '1px', height: '18px', background: 'rgba(255, 255, 255, 0.08)', flexShrink: 0 }} />
-
-            {/* Project Tabs Strip */}
-            <ProjectTabBar onRequestCloseTab={handleRequestCloseTab} />
 
         {activeTabId !== 'start' ? (
           <>

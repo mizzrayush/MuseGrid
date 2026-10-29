@@ -347,7 +347,7 @@ export default function ImportAudioModal() {
 
   // Interactive note blob editor states & refs
   const [selectedBlobIndex, setSelectedBlobIndex] = useState<number | null>(null)
-  const [dragMode, setDragMode] = useState<'move' | 'resize-left' | 'resize-right' | 'pan' | null>(null)
+  const [dragMode, setDragMode] = useState<'move' | 'resize-left' | 'resize-right' | 'pan' | 'scrub' | null>(null)
   const [dragStartInfo, setDragStartInfo] = useState<{
     mouseX: number
     mouseY: number
@@ -1061,14 +1061,37 @@ export default function ImportAudioModal() {
         initialBlob: pitchBlobs[hit.index]
       })
       lastPlayedPitchRef.current = pitchBlobs[hit.index].pitch
-    } else {
-      // Empty space: region selection OR seeking playhead
+      return
+    }
+
+    // If Alt key is held down, allow regional highlight selection
+    if (e.altKey) {
       setSelectedBlobIndex(null)
-      const clickTime = xToTime(x, canvas.width, duration)
+      const clickTime = Math.max(0, Math.min(duration, xToTime(x, canvas.width, duration)))
       setSelectionStart(clickTime)
       setSelectionEnd(clickTime)
       setIsSelectingRegion(true)
+      return
     }
+
+    // Normal click on waveform: Immediately seek playhead & enable click-drag scrubbing!
+    setSelectedBlobIndex(null)
+    setSelectionStart(null)
+    setSelectionEnd(null)
+    const clickTime = Math.max(0, Math.min(duration, xToTime(x, canvas.width, duration)))
+    setPlaybackTime(clickTime)
+    playbackOffsetRef.current = clickTime
+    if (isPlayingAudio) {
+      startPlayback(clickTime)
+    }
+
+    setDragMode('scrub')
+    setDragStartInfo({
+      mouseX: x,
+      mouseY: y,
+      blobIndex: -1,
+      initialBlob: { pitch: 0, startTime: clickTime, duration: 0, amplitude: 0 }
+    })
   }
 
   const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1078,8 +1101,20 @@ export default function ImportAudioModal() {
     const { x, y } = getCanvasCoords(e)
     const duration = audioBuffer.duration
 
-    // If dragging a blob
-    if (dragStartInfo && dragMode) {
+    // If scrubbing the audio playhead with mouse held down
+    if (dragMode === 'scrub') {
+      isClickRef.current = false
+      const scrubTime = Math.max(0, Math.min(duration, xToTime(x, canvas.width, duration)))
+      setPlaybackTime(scrubTime)
+      playbackOffsetRef.current = scrubTime
+      if (isPlayingAudio) {
+        startPlayback(scrubTime)
+      }
+      return
+    }
+
+    // If dragging a note blob
+    if (dragStartInfo && dragMode && dragMode !== 'pan') {
       isClickRef.current = false
       const deltaX = x - dragStartInfo.mouseX
       const deltaY = y - dragStartInfo.mouseY
@@ -1087,14 +1122,6 @@ export default function ImportAudioModal() {
 
       const updated = [...pitchBlobs]
       const initial = dragStartInfo.initialBlob
-
-      if (dragMode === 'pan') {
-        const panDelta = xToTime(dragStartInfo.mouseX, canvas.width, duration) - xToTime(x, canvas.width, duration)
-        setPanOffset(Math.max(0, Math.min(panOffset + panDelta, duration - duration / zoom)))
-        // Update drag start X so delta is relative
-        setDragStartInfo({ ...dragStartInfo, mouseX: x })
-        return
-      }
 
       if (isDrumTrack) {
         if (dragMode === 'move') {
@@ -1151,25 +1178,36 @@ export default function ImportAudioModal() {
       }
 
       setPitchBlobs(updated)
+      return
     }
-    // If drawing regional selection
-    else if (isSelectingRegion && selectionStart !== null) {
+
+    // If panning viewport
+    if (dragMode === 'pan' && dragStartInfo) {
       isClickRef.current = false
-      const clickTime = (x / canvas.width) * duration
-      setSelectionEnd(clickTime)
+      const panDelta = xToTime(dragStartInfo.mouseX, canvas.width, duration) - xToTime(x, canvas.width, duration)
+      setPanOffset(Math.max(0, Math.min(panOffset + panDelta, duration - duration / zoom)))
+      setDragStartInfo({ ...dragStartInfo, mouseX: x })
+      return
     }
-    // If hovering (update mouse cursor style)
-    else {
-      const hit = findBlobAtMouse(x, y, canvas.width, canvas.height, duration)
-      if (hit) {
-        if (hit.part === 'resize-left' || hit.part === 'resize-right') {
-          canvas.style.cursor = 'ew-resize'
-        } else {
-          canvas.style.cursor = 'move'
-        }
+
+    // If drawing regional selection with Alt key
+    if (isSelectingRegion && selectionStart !== null) {
+      isClickRef.current = false
+      const clickTime = Math.max(0, Math.min(duration, xToTime(x, canvas.width, duration)))
+      setSelectionEnd(clickTime)
+      return
+    }
+
+    // Hovering with no mouse buttons held down: DO NOT MOVE PLAYHEAD
+    const hit = findBlobAtMouse(x, y, canvas.width, canvas.height, duration)
+    if (hit) {
+      if (hit.part === 'resize-left' || hit.part === 'resize-right') {
+        canvas.style.cursor = 'ew-resize'
       } else {
-        canvas.style.cursor = 'crosshair'
+        canvas.style.cursor = 'move'
       }
+    } else {
+      canvas.style.cursor = 'pointer'
     }
   }
 
@@ -1180,31 +1218,22 @@ export default function ImportAudioModal() {
     const { x } = getCanvasCoords(e)
     const duration = audioBuffer.duration
 
+    if (dragMode === 'scrub') {
+      const clickTime = Math.max(0, Math.min(duration, xToTime(x, canvas.width, duration)))
+      setPlaybackTime(clickTime)
+      playbackOffsetRef.current = clickTime
+    }
+
     if (dragStartInfo) {
-      if (dragMode === 'pan') {
-        isClickRef.current = false // Prevent seek on pan release
-      }
       setDragStartInfo(null)
       setDragMode(null)
     }
 
     if (isSelectingRegion) {
       setIsSelectingRegion(false)
-      // If drag distance was extremely small, treat as seek or clear selection
       if (selectionStart !== null && selectionEnd !== null && Math.abs(selectionStart - selectionEnd) < 0.05) {
         setSelectionStart(null)
         setSelectionEnd(null)
-      }
-    }
-
-    // Seek playback on empty space single click
-    if (isClickRef.current) {
-      const clickTime = xToTime(x, canvas.width, duration)
-      if (isPlayingAudio) {
-        startPlayback(clickTime)
-      } else {
-        setPlaybackTime(clickTime)
-        playbackOffsetRef.current = clickTime
       }
     }
   }
@@ -1257,8 +1286,8 @@ export default function ImportAudioModal() {
         canvas.height = clientHeight
       }
 
-      // Clear background
-      ctx.fillStyle = '#0f1015'
+      // Clear background to deep studio obsidian
+      ctx.fillStyle = '#0b0c10'
       ctx.fillRect(0, 0, canvas.width, canvas.height)
 
       if (!audioBuffer) {
@@ -1273,188 +1302,283 @@ export default function ImportAudioModal() {
 
       const duration = audioBuffer.duration
 
-    // 1. Draw regional selection overlay first (background layer)
-    if (selectionStart !== null && selectionEnd !== null) {
-      const sStart = Math.min(selectionStart, selectionEnd)
-      const sEnd = Math.max(selectionStart, selectionEnd)
-      const xStart = (sStart / duration) * canvas.width
-      const xWidth = ((sEnd - sStart) / duration) * canvas.width
+      // Coordinate converter respecting zoom and pan offset
+      const toX = (t: number) => ((t - panOffset) / duration) * canvas.width * zoom
 
-      ctx.fillStyle = 'rgba(218, 119, 242, 0.08)' // Translucent purple highlight
-      ctx.fillRect(xStart, 0, xWidth, canvas.height)
+      // Draw subtle background time grid lines
+      const visibleDuration = duration / zoom
+      const stepSec = visibleDuration > 30 ? 5 : visibleDuration > 10 ? 2 : visibleDuration > 4 ? 1 : visibleDuration > 1 ? 0.5 : 0.1
+      const firstTick = Math.floor(panOffset / stepSec) * stepSec
+      ctx.strokeStyle = 'rgba(255,255,255,0.035)'
+      ctx.lineWidth = 1
+      for (let t = firstTick; t <= panOffset + visibleDuration; t += stepSec) {
+        const tx = toX(t)
+        if (tx >= 0 && tx <= canvas.width) {
+          ctx.beginPath()
+          ctx.moveTo(tx, 0)
+          ctx.lineTo(tx, canvas.height)
+          ctx.stroke()
+        }
+      }
 
-      ctx.strokeStyle = 'rgba(218, 119, 242, 0.25)'
+      // 1. Draw regional selection overlay if active
+      if (selectionStart !== null && selectionEnd !== null) {
+        const sStart = Math.min(selectionStart, selectionEnd)
+        const sEnd = Math.max(selectionStart, selectionEnd)
+        const xStart = toX(sStart)
+        const xWidth = toX(sEnd) - xStart
+
+        ctx.fillStyle = 'rgba(218, 119, 242, 0.12)'
+        ctx.fillRect(xStart, 0, xWidth, canvas.height)
+
+        ctx.strokeStyle = '#da77f2'
+        ctx.lineWidth = 1.5
+        ctx.beginPath()
+        ctx.moveTo(xStart, 0)
+        ctx.lineTo(xStart, canvas.height)
+        ctx.moveTo(xStart + xWidth, 0)
+        ctx.lineTo(xStart + xWidth, canvas.height)
+        ctx.stroke()
+      }
+
+      // 2. Draw high-contrast, luminous Audio Waveform Contour
+      const channelData = audioBuffer.getChannelData(0)
+      const midY = canvas.height / 2
+      const ampScale = midY * 0.82
+
+      // Waveform center baseline
+      ctx.strokeStyle = 'rgba(0, 230, 255, 0.22)'
       ctx.lineWidth = 1
       ctx.beginPath()
-      ctx.moveTo(xStart, 0)
-      ctx.lineTo(xStart, canvas.height)
-      ctx.moveTo(xStart + xWidth, 0)
-      ctx.lineTo(xStart + xWidth, canvas.height)
+      ctx.moveTo(0, midY)
+      ctx.lineTo(canvas.width, midY)
       ctx.stroke()
-    }
 
-    // 2. Draw the underlying audio waveform contour
-    ctx.fillStyle = 'rgba(255,255,255,0.03)'
-    const channelData = audioBuffer.getChannelData(0)
-    const step = Math.ceil(channelData.length / canvas.width)
-    const midY = canvas.height / 2
+      // Vertical neon gradient for waveform body
+      const waveGrad = ctx.createLinearGradient(0, midY - ampScale, 0, midY + ampScale)
+      waveGrad.addColorStop(0, 'rgba(0, 230, 255, 0.65)')    // neon cyan peak
+      waveGrad.addColorStop(0.35, 'rgba(0, 190, 245, 0.45)')
+      waveGrad.addColorStop(0.5, 'rgba(77, 171, 247, 0.30)')  // center body
+      waveGrad.addColorStop(0.65, 'rgba(0, 190, 245, 0.45)')
+      waveGrad.addColorStop(1, 'rgba(0, 230, 255, 0.65)')
 
-    ctx.beginPath()
-    for (let x = 0; x < canvas.width; x++) {
-      let min = 1.0
-      let max = -1.0
-      for (let j = 0; j < step; j++) {
-        const val = channelData[x * step + j] || 0
-        if (val < min) min = val
-        if (val > max) max = val
+      ctx.fillStyle = waveGrad
+      const samplesPerPixel = channelData.length / (canvas.width * zoom)
+      const startSampleOffset = (panOffset / duration) * channelData.length
+
+      for (let x = 0; x < canvas.width; x++) {
+        const sStart = Math.max(0, Math.floor(startSampleOffset + x * samplesPerPixel))
+        const sEnd = Math.min(channelData.length, Math.ceil(startSampleOffset + (x + 1) * samplesPerPixel))
+        let min = 0
+        let max = 0
+        if (sStart < channelData.length && sEnd > 0) {
+          for (let s = sStart; s < sEnd; s++) {
+            const val = channelData[s] || 0
+            if (val < min) min = val
+            if (val > max) max = val
+          }
+        }
+        const barHeight = Math.max(2, (max - min) * ampScale)
+        const barY = midY + (min * ampScale)
+        ctx.fillRect(x, barY, 1, barHeight)
       }
-      ctx.fillRect(x, midY + (min * midY * 0.7), 1, Math.max(1, (max - min) * midY * 0.7))
-    }
 
-    if (isDrumTrack) {
-      // Draw 16 horizontal drum lanes
-      const laneHeight = canvas.height / 16
-      
-      // Draw grid lines and labels
-      for (let i = 0; i < 16; i++) {
-        const y = canvas.height - (i * laneHeight) - laneHeight
-        const filter = drumPieceFilters.find(f => f.pitch === i)
+      // Top peak crisp contour line for high-definition studio visibility
+      ctx.strokeStyle = 'rgba(0, 230, 255, 0.85)'
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      let contourStarted = false
+      for (let x = 0; x < canvas.width; x += 2) {
+        const sStart = Math.max(0, Math.floor(startSampleOffset + x * samplesPerPixel))
+        const sEnd = Math.min(channelData.length, Math.ceil(startSampleOffset + (x + 2) * samplesPerPixel))
+        let max = 0
+        if (sStart < channelData.length && sEnd > 0) {
+          for (let s = sStart; s < sEnd; s++) {
+            const val = channelData[s] || 0
+            if (val > max) max = val
+          }
+        }
+        const py = midY - (max * ampScale)
+        if (!contourStarted) {
+          ctx.moveTo(x, py)
+          contourStarted = true
+        } else {
+          ctx.lineTo(x, py)
+        }
+      }
+      ctx.stroke()
+
+      // 3. Drum Lanes & Hits OR Pitch Blobs
+      if (isDrumTrack) {
+        // Draw 16 horizontal drum lanes
+        const laneHeight = canvas.height / 16
         
-        ctx.strokeStyle = 'rgba(255,255,255,0.025)'
+        // Draw grid lines and labels
+        for (let i = 0; i < 16; i++) {
+          const y = canvas.height - (i * laneHeight) - laneHeight
+          const filter = drumPieceFilters.find(f => f.pitch === i)
+          
+          ctx.strokeStyle = 'rgba(255,255,255,0.03)'
+          ctx.lineWidth = 1
+          ctx.beginPath()
+          ctx.moveTo(0, y + laneHeight)
+          ctx.lineTo(canvas.width, y + laneHeight)
+          ctx.stroke()
+          
+          // Draw label background sidebar
+          ctx.fillStyle = 'rgba(11, 12, 16, 0.92)'
+          ctx.fillRect(0, y, 92, laneHeight)
+          
+          // Draw separate vertical divider line
+          ctx.strokeStyle = 'rgba(255,255,255,0.08)'
+          ctx.beginPath()
+          ctx.moveTo(92, y)
+          ctx.lineTo(92, y + laneHeight)
+          ctx.stroke()
+          
+          // Text label
+          ctx.fillStyle = filter?.enabled ? (filter.color || '#fff') : '#555'
+          ctx.font = 'bold 9px Outfit, sans-serif'
+          ctx.textAlign = 'left'
+          ctx.fillText(filter?.name || '', 8, y + laneHeight / 2 + 3)
+        }
+
+        // Draw percussive hits
+        pitchBlobs.forEach((blob, idx) => {
+          const xStart = toX(blob.startTime)
+          const xWidth = Math.max(12, (blob.duration / duration) * canvas.width * zoom)
+          if (xStart + xWidth < 0 || xStart > canvas.width) return
+
+          const y = canvas.height - (blob.pitch * laneHeight) - laneHeight
+          const filter = drumPieceFilters.find(f => f.pitch === blob.pitch)
+          const color = filter?.color || '#da77f2'
+          
+          const isSelected = selectedBlobIndex === idx
+          
+          ctx.save()
+          if (isSelected) {
+            ctx.fillStyle = 'rgba(0, 230, 255, 0.7)'
+            ctx.strokeStyle = '#00e6ff'
+            ctx.lineWidth = 2
+            ctx.shadowColor = '#00e6ff'
+            ctx.shadowBlur = 8
+          } else {
+            ctx.fillStyle = color + '66' // Translucent percussive color
+            ctx.strokeStyle = color
+            ctx.lineWidth = 1.5
+            ctx.shadowColor = color
+            ctx.shadowBlur = 6
+          }
+          
+          ctx.beginPath()
+          ctx.roundRect(xStart, y + 2, xWidth, laneHeight - 4, 3)
+          ctx.fill()
+          ctx.stroke()
+          ctx.restore()
+        })
+
+      } else {
+        // Render horizontal grid lines representing note pitches
+        ctx.strokeStyle = 'rgba(255,255,255,0.03)'
+        ctx.lineWidth = 1
+        const noteHeight = 12
+        const totalPitches = 48 // Focus on range C2 to C6
+        const minMidi = 36 // C2
+
+        for (let i = 0; i < totalPitches; i++) {
+          const y = canvas.height - (i * noteHeight) - 20
+          ctx.beginPath()
+          ctx.moveTo(0, y)
+          ctx.lineTo(canvas.width, y)
+          ctx.stroke()
+
+          // Pitch labels
+          if ((minMidi + i) % 12 === 0) {
+            ctx.fillStyle = 'rgba(255,255,255,0.2)'
+            ctx.font = '8px monospace'
+            ctx.fillText(`C${Math.floor((minMidi + i) / 12) - 1}`, 5, y - 2)
+          }
+        }
+
+        // Draw Melodyne Pitch Blobs
+        pitchBlobs.forEach((blob, idx) => {
+          const xStart = toX(blob.startTime)
+          const xWidth = Math.max(12, (blob.duration / duration) * canvas.width * zoom)
+          if (xStart + xWidth < 0 || xStart > canvas.width) return
+
+          const pitchIndex = (blob.pitch + transposeSemitones) - minMidi
+          const y = canvas.height - (pitchIndex * noteHeight) - 20
+
+          // Skip drawing if out of canvas viewport bounds
+          if (y < 0 || y > canvas.height) return
+
+          const isSelected = selectedBlobIndex === idx
+
+          // Melodyne bubble neon pill style
+          ctx.save()
+          if (isSelected) {
+            ctx.fillStyle = 'rgba(0, 230, 255, 0.65)' // Neon cyan for selected
+            ctx.strokeStyle = '#00e6ff'
+            ctx.lineWidth = 2
+            ctx.shadowColor = '#00e6ff'
+            ctx.shadowBlur = 8
+          } else {
+            ctx.fillStyle = 'rgba(218,119,242,0.55)' // Purple neon tint
+            ctx.strokeStyle = '#da77f2'
+            ctx.lineWidth = 1.5
+            ctx.shadowColor = '#da77f2'
+            ctx.shadowBlur = 6
+          }
+
+          // Draw beautiful pill shape
+          const radius = 4
+          ctx.beginPath()
+          ctx.roundRect(xStart, y - 5, xWidth, 10, radius)
+          ctx.fill()
+          ctx.stroke()
+          ctx.restore()
+        })
+      }
+
+      // 4. Draw the real-time sweeping playhead with glow & indicator badge
+      const playheadX = toX(playbackTime)
+      if (playheadX >= 0 && playheadX <= canvas.width) {
+        ctx.save()
+        ctx.strokeStyle = '#00e6ff' // Bright neon cyan
+        ctx.lineWidth = 2
+        ctx.shadowColor = '#00e6ff'
+        ctx.shadowBlur = 10
+        ctx.beginPath()
+        ctx.moveTo(playheadX, 0)
+        ctx.lineTo(playheadX, canvas.height)
+        ctx.stroke()
+
+        // Top triangle pointer cap
+        ctx.fillStyle = '#00e6ff'
+        ctx.beginPath()
+        ctx.moveTo(playheadX - 6, 0)
+        ctx.lineTo(playheadX + 6, 0)
+        ctx.lineTo(playheadX, 9)
+        ctx.closePath()
+        ctx.fill()
+
+        // Time indicator tag
+        const timeStr = `${playbackTime.toFixed(2)}s`
+        ctx.font = 'bold 9px monospace'
+        const tw = ctx.measureText(timeStr).width
+        const bx = Math.min(canvas.width - tw - 12, Math.max(6, playheadX - tw / 2))
+        ctx.fillStyle = 'rgba(10, 12, 18, 0.88)'
+        ctx.strokeStyle = '#00e6ff'
         ctx.lineWidth = 1
         ctx.beginPath()
-        ctx.moveTo(0, y + laneHeight)
-        ctx.lineTo(canvas.width, y + laneHeight)
-        ctx.stroke()
-        
-        // Draw label background sidebar
-        ctx.fillStyle = 'rgba(15,16,21,0.85)'
-        ctx.fillRect(0, y, 92, laneHeight)
-        
-        // Draw separate vertical divider line
-        ctx.strokeStyle = 'rgba(255,255,255,0.06)'
-        ctx.beginPath()
-        ctx.moveTo(92, y)
-        ctx.lineTo(92, y + laneHeight)
-        ctx.stroke()
-        
-        // Text label
-        ctx.fillStyle = filter?.enabled ? (filter.color || '#fff') : '#555'
-        ctx.font = 'bold 9px Outfit, sans-serif'
-        ctx.textAlign = 'left'
-        ctx.fillText(filter?.name || '', 8, y + laneHeight / 2 + 3)
-      }
-
-      // Draw percussive hits
-      ctx.shadowBlur = 0
-      pitchBlobs.forEach((blob, idx) => {
-        const xStart = (blob.startTime / duration) * canvas.width
-        const xWidth = (blob.duration / duration) * canvas.width
-        const y = canvas.height - (blob.pitch * laneHeight) - laneHeight
-        const filter = drumPieceFilters.find(f => f.pitch === blob.pitch)
-        const color = filter?.color || '#da77f2'
-        
-        const isSelected = selectedBlobIndex === idx
-        
-        ctx.save()
-        if (isSelected) {
-          ctx.fillStyle = 'rgba(77,171,247,0.6)'
-          ctx.strokeStyle = '#4dabf7'
-          ctx.lineWidth = 2
-          ctx.shadowColor = '#4dabf7'
-          ctx.shadowBlur = 8
-        } else {
-          ctx.fillStyle = color + '55' // Translucent percussive color
-          ctx.strokeStyle = color
-          ctx.lineWidth = 1.5
-          ctx.shadowColor = color
-          ctx.shadowBlur = 6
-        }
-        
-        ctx.beginPath()
-        ctx.roundRect(xStart, y + 2, Math.max(12, xWidth), laneHeight - 4, 3)
+        ctx.roundRect(bx - 4, 11, tw + 8, 14, 3)
         ctx.fill()
         ctx.stroke()
+        ctx.fillStyle = '#00e6ff'
+        ctx.fillText(timeStr, bx, 22)
+
         ctx.restore()
-      })
-
-    } else {
-      // Render horizontal grid lines representing note pitches
-      ctx.strokeStyle = 'rgba(255,255,255,0.03)'
-      ctx.lineWidth = 1
-      const noteHeight = 12
-      const totalPitches = 48 // Focus on range C2 to C6
-      const minMidi = 36 // C2
-
-      for (let i = 0; i < totalPitches; i++) {
-        const y = canvas.height - (i * noteHeight) - 20
-        ctx.beginPath()
-        ctx.moveTo(0, y)
-        ctx.lineTo(canvas.width, y)
-        ctx.stroke()
-
-        // Pitch labels
-        if ((minMidi + i) % 12 === 0) {
-          ctx.fillStyle = 'rgba(255,255,255,0.15)'
-          ctx.font = '8px monospace'
-          ctx.fillText(`C${Math.floor((minMidi + i) / 12) - 1}`, 5, y - 2)
-        }
       }
-
-      // Draw Melodyne Pitch Blobs
-      ctx.shadowBlur = 0
-
-      pitchBlobs.forEach((blob, idx) => {
-        const xStart = (blob.startTime / duration) * canvas.width
-        const xWidth = (blob.duration / duration) * canvas.width
-        const pitchIndex = (blob.pitch + transposeSemitones) - minMidi
-        const y = canvas.height - (pitchIndex * noteHeight) - 20
-
-        // Skip drawing if out of canvas viewport bounds
-        if (y < 0 || y > canvas.height) return
-
-        const isSelected = selectedBlobIndex === idx
-
-        // Melodyne bubble neon pill style
-        ctx.save()
-        if (isSelected) {
-          ctx.fillStyle = 'rgba(77,171,247,0.55)' // Neon blue for selected
-          ctx.strokeStyle = '#4dabf7'
-          ctx.lineWidth = 2
-          ctx.shadowColor = '#4dabf7'
-          ctx.shadowBlur = 8
-        } else {
-          ctx.fillStyle = 'rgba(218,119,242,0.45)' // Purple neon tint
-          ctx.strokeStyle = '#da77f2'
-          ctx.lineWidth = 1.5
-          ctx.shadowColor = '#da77f2'
-          ctx.shadowBlur = 6
-        }
-
-        // Draw beautiful pill shape
-        const radius = 4
-        ctx.beginPath()
-        ctx.roundRect(xStart, y - 5, Math.max(12, xWidth), 10, radius)
-        ctx.fill()
-        ctx.stroke()
-        ctx.restore()
-      })
-    }
-
-    // 4. Draw the real-time sweeping playhead
-    if (playbackTime > 0) {
-      const playheadX = (playbackTime / duration) * canvas.width
-      ctx.save()
-      ctx.strokeStyle = '#4dabf7' // Bright neon blue
-      ctx.lineWidth = 1.5
-      ctx.shadowColor = '#4dabf7'
-      ctx.shadowBlur = 6
-      ctx.beginPath()
-      ctx.moveTo(playheadX, 0)
-      ctx.lineTo(playheadX, canvas.height)
-      ctx.stroke()
-      ctx.restore()
-    }
     }
 
     draw() // Initial draw
@@ -1470,7 +1594,7 @@ export default function ImportAudioModal() {
       resizeObserver.disconnect()
       if (animationFrameId) cancelAnimationFrame(animationFrameId)
     }
-  }, [audioBuffer, pitchBlobs, selectionStart, selectionEnd, selectedBlobIndex, playbackTime, isDrumTrack, drumPieceFilters, transposeSemitones, mountTick])
+  }, [audioBuffer, pitchBlobs, selectionStart, selectionEnd, selectedBlobIndex, playbackTime, isDrumTrack, drumPieceFilters, transposeSemitones, mountTick, zoom, panOffset])
 
   // Inject converted MIDI Notes onto the Synth Grid
   const handleAddToGrid = () => {
@@ -1758,7 +1882,7 @@ export default function ImportAudioModal() {
             )}
             <canvas
               ref={canvasRef}
-              style={{ width: '100%', height: '100%', display: 'block', cursor: dragMode === 'pan' || isSelectingRegion ? 'grabbing' : 'crosshair' }}
+              style={{ width: '100%', height: '100%', display: 'block', cursor: dragMode === 'pan' ? 'grabbing' : dragMode === 'scrub' ? 'col-resize' : 'pointer' }}
               onMouseDown={handleCanvasMouseDown}
               onMouseMove={handleCanvasMouseMove}
               onMouseUp={handleCanvasMouseUp}
@@ -1769,44 +1893,89 @@ export default function ImportAudioModal() {
 
             {/* Zoom Controls Overlay */}
             {audioBuffer && (
-              <div style={{ position: 'absolute', top: '16px', right: '16px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10 }}>
+              <div
+                onMouseDown={e => e.stopPropagation()}
+                onMouseUp={e => e.stopPropagation()}
+                style={{ position: 'absolute', top: '16px', right: '16px', display: 'flex', flexDirection: 'column', gap: '6px', zIndex: 25 }}
+              >
                 <button
                   onMouseDown={e => e.stopPropagation()}
-                  onClick={() => setZoom(Math.min(zoom * 1.5, 50))}
-                  style={{ width: '24px', height: '24px', borderRadius: '4px', background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.2)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', backdropFilter: 'blur(4px)' }}
+                  onMouseUp={e => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setZoom(z => Math.min(z * 1.5, 50))
+                  }}
+                  style={{ width: '28px', height: '28px', borderRadius: '6px', background: 'rgba(20, 22, 32, 0.9)', border: '1px solid rgba(0, 230, 255, 0.35)', color: '#00e6ff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', backdropFilter: 'blur(8px)', fontSize: '15px', fontWeight: 800, boxShadow: '0 4px 12px rgba(0,0,0,0.5)', transition: 'all 0.15s ease' }}
+                  onMouseEnter={e => { e.currentTarget.style.background = 'rgba(0, 230, 255, 0.2)'; e.currentTarget.style.borderColor = '#00e6ff' }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'rgba(20, 22, 32, 0.9)'; e.currentTarget.style.borderColor = 'rgba(0, 230, 255, 0.35)' }}
+                  title="Zoom In"
                 >+</button>
                 <button
                   onMouseDown={e => e.stopPropagation()}
-                  onClick={() => { setZoom(Math.max(zoom / 1.5, 1)); if (zoom / 1.5 <= 1) setPanOffset(0); }}
-                  style={{ width: '24px', height: '24px', borderRadius: '4px', background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.2)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', backdropFilter: 'blur(4px)' }}
+                  onMouseUp={e => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setZoom(z => {
+                      const next = Math.max(z / 1.5, 1)
+                      if (next <= 1) setPanOffset(0)
+                      return next
+                    })
+                  }}
+                  style={{ width: '28px', height: '28px', borderRadius: '6px', background: 'rgba(20, 22, 32, 0.9)', border: '1px solid rgba(0, 230, 255, 0.35)', color: '#00e6ff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', backdropFilter: 'blur(8px)', fontSize: '15px', fontWeight: 800, boxShadow: '0 4px 12px rgba(0,0,0,0.5)', transition: 'all 0.15s ease' }}
+                  onMouseEnter={e => { e.currentTarget.style.background = 'rgba(0, 230, 255, 0.2)'; e.currentTarget.style.borderColor = '#00e6ff' }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'rgba(20, 22, 32, 0.9)'; e.currentTarget.style.borderColor = 'rgba(0, 230, 255, 0.35)' }}
+                  title="Zoom Out"
                 >−</button>
+                {zoom > 1 && (
+                  <button
+                    onMouseDown={e => e.stopPropagation()}
+                    onMouseUp={e => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setZoom(1)
+                      setPanOffset(0)
+                    }}
+                    style={{ padding: '3px 6px', borderRadius: '4px', background: 'rgba(20, 22, 32, 0.9)', border: '1px solid rgba(255,255,255,0.2)', color: '#aaa', fontSize: '9px', fontWeight: 700, cursor: 'pointer', textAlign: 'center' }}
+                    title="Reset Zoom (1x)"
+                  >
+                    1x
+                  </button>
+                )}
               </div>
             )}
 
             {/* Playback Controls & Action Deck overlay */}
             {audioBuffer && (
-              <div style={{
-                position: 'absolute',
-                bottom: '16px',
-                left: '50%',
-                transform: 'translateX(-50%)',
-                background: 'rgba(20, 21, 28, 0.85)',
-                backdropFilter: 'blur(10px)',
-                border: '1px solid rgba(255,255,255,0.08)',
-                borderRadius: '30px',
-                padding: '8px 16px',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '12px',
-                boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-                zIndex: 5
-              }}>
+              <div
+                onMouseDown={e => e.stopPropagation()}
+                onMouseUp={e => e.stopPropagation()}
+                style={{
+                  position: 'absolute',
+                  bottom: '16px',
+                  left: '50%',
+                  transform: 'translateX(-50%)',
+                  background: 'rgba(16, 18, 26, 0.92)',
+                  backdropFilter: 'blur(12px)',
+                  border: '1px solid rgba(0, 230, 255, 0.25)',
+                  borderRadius: '30px',
+                  padding: '8px 18px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '12px',
+                  boxShadow: '0 8px 32px rgba(0,0,0,0.65)',
+                  zIndex: 25
+                }}
+              >
                 {/* Play/Stop Toggle */}
                 {isPlayingAudio ? (
                   <button
                     onMouseDown={e => e.stopPropagation()}
-                    onClick={stopPlayback}
-                    style={{ background: 'rgba(255,80,80,0.15)', border: '1px solid rgba(255,80,80,0.3)', borderRadius: '50%', width: '32px', height: '32px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#ff6b6b', cursor: 'pointer', transition: 'all 0.15s' }}
+                    onMouseUp={e => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      stopPlayback()
+                    }}
+                    style={{ background: 'rgba(255,80,80,0.18)', border: '1px solid rgba(255,80,80,0.4)', borderRadius: '50%', width: '34px', height: '34px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#ff6b6b', cursor: 'pointer', transition: 'all 0.15s' }}
                     onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.05)'}
                     onMouseLeave={e => e.currentTarget.style.transform = 'scale(1)'}
                     title="Stop Playback"
@@ -1816,11 +1985,15 @@ export default function ImportAudioModal() {
                 ) : (
                   <button
                     onMouseDown={e => e.stopPropagation()}
-                    onClick={() => startPlayback(playbackTime)}
-                    style={{ background: 'rgba(77,171,247,0.15)', border: '1px solid rgba(77,171,247,0.3)', borderRadius: '50%', width: '32px', height: '32px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#4dabf7', cursor: 'pointer', transition: 'all 0.15s' }}
+                    onMouseUp={e => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      startPlayback(playbackTime)
+                    }}
+                    style={{ background: 'rgba(0,230,255,0.18)', border: '1px solid rgba(0,230,255,0.45)', borderRadius: '50%', width: '34px', height: '34px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#00e6ff', cursor: 'pointer', transition: 'all 0.15s', boxShadow: '0 0 10px rgba(0,230,255,0.2)' }}
                     onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.05)'}
                     onMouseLeave={e => e.currentTarget.style.transform = 'scale(1)'}
-                    title="Start Playback"
+                    title="Start Playback from Current Playhead"
                   >
                     <IconPlay size={14} style={{ marginLeft: '2px' }} />
                   </button>
@@ -1829,7 +2002,7 @@ export default function ImportAudioModal() {
                 <div style={{ height: '16px', width: '1px', background: 'rgba(255,255,255,0.15)' }} />
 
                 {/* Time Info */}
-                <span style={{ fontSize: '10px', color: '#aaa', fontFamily: 'monospace', fontWeight: 600 }}>
+                <span style={{ fontSize: '11px', color: '#00e6ff', fontFamily: 'monospace', fontWeight: 700 }}>
                   {playbackTime.toFixed(2)}s / {audioBuffer.duration.toFixed(2)}s
                 </span>
 

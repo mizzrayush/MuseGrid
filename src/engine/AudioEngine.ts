@@ -3594,6 +3594,7 @@ class AudioEngine {
         }
       })
       try { lastNode.connect(channel) } catch (_) {}
+      try { channel.connect(this.masterLimiter) } catch (_) {}
     } catch (_) {}
 
     const rack = {
@@ -3638,7 +3639,7 @@ class AudioEngine {
     return cmd
   }
 
-  private syncSynthSampler(track: Track) {
+  syncSynthSampler(track: Track) {
     const existing = this.samplers.get(track.id)
     if (track.synthMode !== 'sampler' || !track.synthSampler) {
       if (existing) {
@@ -3654,6 +3655,17 @@ class AudioEngine {
     } else {
       existing.updateConfig(track.synthSampler)
     }
+  }
+
+  setTrackSamplerConfig(trackId: string, cfg: SynthSamplerConfig) {
+    const track = useStore.getState().tracks.find(t => t.id === trackId)
+    if (!track) return
+    const updatedTrack: Track = {
+      ...track,
+      synthMode: 'sampler',
+      synthSampler: { ...cfg }
+    }
+    this.syncSynthSampler(updatedTrack)
   }
 
   getSynthSampler(trackId: string): ChromaticSampler | undefined {
@@ -3989,6 +4001,35 @@ class AudioEngine {
         signature: nativeChain.signature,
         effects: JSON.stringify(nativeChain.effects)
       });
+
+      // Keep WebAudio rack channel and sample engines ready and wired
+      // so custom drum samples, mic recordings, and chromatic samplers play in native mode
+      try {
+        const rack = this.getRack(track.id)
+        rack.channel.volume.value = Tone.gainToDb(Math.max(0.0001, effective.volume))
+        setTrackChannelPan(rack.channel, track.pan)
+        rack.channel.mute = effective.muted
+        rack.channel.solo = effective.soloed
+        try { rack.channel.connect(this.masterLimiter) } catch (_) {}
+
+        if (track.synthMode === 'sampler') {
+          this.syncSynthSampler(track)
+        }
+        if (track.drumPadSamples && Object.keys(track.drumPadSamples).length > 0) {
+          let drum = this.drums.get(track.id)
+          if (!drum) {
+            drum = new DrumMachine(track.drumKit || 'classic')
+            try { drum.connect(rack.input) } catch (_) {}
+            this.drums.set(track.id, drum)
+          }
+          drum.padSamples = { ...track.drumPadSamples }
+          if (track.drumPadModes) drum.padModes = { ...track.drumPadModes }
+          this.syncDrumPadSampleBuffers(drum, track.drumPadSamples)
+        }
+      } catch (err) {
+        console.warn("Native mode WebAudio rack sync warning:", err)
+      }
+
       return; // Handled natively in JUCE C++! Avoid running WebAudio graph.
     }
 
@@ -5672,8 +5713,11 @@ class AudioEngine {
       const isCustomDrumSample = (type === 'drum' || track?.instrument === 'drum') && (
         track?.drumPadModes?.[pitchNum] === 'sample' || !!(track?.drumPadSamples?.[pitchNum])
       )
+      const isCustomSynthSampler = (type === 'synth' || track?.instrument === 'synth') && (
+        track?.synthMode === 'sampler' || !!(track?.synthSampler?.audioBase64)
+      )
 
-      if (!isCustomDrumSample) {
+      if (!isCustomDrumSample && !isCustomSynthSampler) {
         (window as any).juceAudioBridge.postCommand(
           buildNativeNoteOnCommand({ trackId, type, pitch, duration, velocity, detune, pitchEnd, noteData, track })
         );
@@ -5803,7 +5847,11 @@ class AudioEngine {
     velocity = finalVelocity
 
     if (type === 'synth') {
-      const sampler = this.samplers.get(trackId)
+      let sampler = this.samplers.get(trackId)
+      if (!sampler && track?.synthMode === 'sampler' && track.synthSampler) {
+        this.syncSynthSampler(track)
+        sampler = this.samplers.get(trackId)
+      }
       if (sampler && track?.synthMode === 'sampler' && !instrumentOverride) {
         try {
           const midi = typeof pitch === 'number'
@@ -6202,6 +6250,10 @@ class AudioEngine {
             drum.connect(rack.input)
           } catch (_) {}
           this.drums.set(trackId, drum)
+        } else if (drum && track?.drumPadSamples && Object.keys(track.drumPadSamples).length > 0) {
+          drum.padSamples = { ...track.drumPadSamples }
+          if (track.drumPadModes) drum.padModes = { ...track.drumPadModes }
+          this.syncDrumPadSampleBuffers(drum, track.drumPadSamples)
         }
       }
 

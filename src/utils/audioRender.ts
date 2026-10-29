@@ -135,6 +135,18 @@ interface DrumSlideOptions {
   customCurve?: string
 }
 
+function getReversedAudioBuffer(ctx: BaseAudioContext, src: AudioBuffer): AudioBuffer {
+  const rev = ctx.createBuffer(src.numberOfChannels, src.length, src.sampleRate)
+  for (let ch = 0; ch < src.numberOfChannels; ch++) {
+    const inData = src.getChannelData(ch)
+    const outData = rev.getChannelData(ch)
+    for (let i = 0, j = src.length - 1; i < src.length; i++, j--) {
+      outData[i] = inData[j]
+    }
+  }
+  return rev
+}
+
 /**
  * One drum hit in the offline bounce. The arguments carry exactly what the live engine hands to
  * DrumMachine.triggerAttackRelease - tuning offset, slide, pad tone, output trim and expression -
@@ -158,7 +170,8 @@ function triggerDrum(
   },
   output?: DrumOutputOptions,
   ticksPerSecond = 192,
-  mod?: DrumHitModulation
+  mod?: DrumHitModulation,
+  sampleBuffersCache?: Map<string, AudioBuffer>
 ): void {
   const kit = drumKitOverride ?? track.drumKit ?? DEFAULT_DRUM_KIT
   const tight = kit === 'tight'
@@ -206,6 +219,59 @@ function triggerDrum(
       g.connect(input)
     }
     dest = g
+  }
+
+  // Sample-based Pad Playback in Offline Render
+  const padSample = track.drumPadSamples?.[pitch]
+  const padMode = track.drumPadModes?.[pitch] || (padSample ? 'sample' : 'synth')
+  const sampleBuf = sampleBuffersCache?.get(`drum:${track.id}:${pitch}`)
+  if (padMode === 'sample' && padSample && sampleBuf) {
+    const rawCtx = Tone.getContext().rawContext as AudioContext
+    const bufToPlay = padSample.reverse ? getReversedAudioBuffer(rawCtx, sampleBuf) : sampleBuf
+    const now = time
+
+    const tuningSemitones = (padSample.tuning ?? 0) + pitchOffset
+    const fineTuneCents = (padSample.fineTune ?? 0)
+    const totalSemitones = tuningSemitones + (fineTuneCents / 100)
+    const rate = Math.max(0.05, Math.min(16.0, Math.pow(2, totalSemitones / 12)))
+
+    const source = rawCtx.createBufferSource()
+    source.buffer = bufToPlay
+    source.playbackRate.setValueAtTime(rate, now)
+
+    const gainNode = rawCtx.createGain()
+    const sampleVol = padSample.volume !== undefined ? padSample.volume : 1.0
+    const peakGain = Math.max(0.0001, Math.min(2.5, velocity * sampleVol))
+    gainNode.gain.setValueAtTime(peakGain, now)
+
+    const bufDuration = bufToPlay.duration / rate
+    const decayTime = padSample.decay ?? (padCustom?.decay ?? track.drumDecays?.[pitch] ?? bufDuration)
+    const effectiveDuration = Math.min(bufDuration, decayTime)
+    if (effectiveDuration < bufDuration) {
+      gainNode.gain.setValueAtTime(peakGain, now + Math.max(0.005, effectiveDuration * 0.75))
+      gainNode.gain.exponentialRampToValueAtTime(0.0001, now + effectiveDuration)
+    }
+
+    let outNode: AudioNode = gainNode
+    const panVal = Math.max(-1, Math.min(1, (padSample.pan ?? 0) + (output?.pan ?? 0)))
+    if (panVal !== 0 && (rawCtx as any).createStereoPanner) {
+      const panner = (rawCtx as any).createStereoPanner()
+      panner.pan.setValueAtTime(panVal, now)
+      gainNode.connect(panner)
+      outNode = panner
+    }
+
+    const targetDest: AudioNode = (dest as any).input ? (dest as any).input : (dest as any)
+    outNode.connect(targetDest)
+    source.connect(gainNode)
+
+    const startOffset = Math.max(0, Math.min(0.99, padSample.startOffset ?? 0))
+    const endOffset = Math.max(startOffset + 0.01, Math.min(1.0, padSample.endOffset ?? 1.0))
+    const startTimeInBuf = startOffset * bufToPlay.duration
+    const playDuration = ((endOffset - startOffset) * bufToPlay.duration) / rate
+
+    source.start(now, startTimeInBuf, Math.min(playDuration, effectiveDuration + 0.05))
+    return
   }
 
   let defaultDecay = getDecayDefaultByPitch(pitch)
@@ -650,7 +716,14 @@ function createSynthFromMuzins(muxins: any): Tone.PolySynth {
   return new Tone.PolySynth(SynthClass, config)
 }
 
-function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppState, trackInput: Tone.Gain, options: RenderOptions): void {
+function renderTrackNotesWithTransform(
+  track: Track,
+  notes: Note[],
+  state: AppState,
+  trackInput: Tone.Gain,
+  options: RenderOptions,
+  sampleBuffersCache?: Map<string, AudioBuffer>
+): void {
   const totalTranspose = (options.octaveOffset * 12) + options.semitoneOffset + (track.transpose ?? 0)
 
   // Use track-specific targetTempo if defined, otherwise use global state BPM
@@ -848,6 +921,92 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
           console.error("Offline physical render error:", e)
         }
         return
+      }
+
+      // Chromatic Sampler in Offline Render
+      const isSampler = track.synthMode === 'sampler' && track.synthSampler && !note.instrumentOverride
+      if (isSampler) {
+        const sampleBuf = sampleBuffersCache?.get(`synth:${track.id}`)
+        if (sampleBuf && track.synthSampler) {
+          try {
+            const cfg = track.synthSampler
+            const rawCtx = Tone.getContext().rawContext as AudioContext
+            const now = start
+
+            const semis = (playback.pitch - (cfg.rootNote || 60)) + (cfg.tuning || 0) + totalTranspose + (cfg.fineTune || 0) / 100 + (noteDetune / 100)
+            const rate = Math.max(0.05, Math.min(16.0, Math.pow(2, semis / 12)))
+
+            const bufToPlay = cfg.reverse ? getReversedAudioBuffer(rawCtx, sampleBuf) : sampleBuf
+            const durationBuf = bufToPlay.duration
+            const startN = Math.max(0, Math.min(0.99, cfg.startOffset ?? 0))
+            const endN = Math.max(startN + 0.01, Math.min(1.0, cfg.endOffset ?? 1.0))
+            const regionStart = (cfg.reverse ? 1 - endN : startN) * durationBuf
+            const regionEnd = (cfg.reverse ? 1 - startN : endN) * durationBuf
+            const regionSec = Math.max(0.005, regionEnd - regionStart)
+
+            const source = rawCtx.createBufferSource()
+            source.buffer = bufToPlay
+            source.playbackRate.setValueAtTime(rate, now)
+
+            if (glideSemis && glideSeconds > 0) {
+              const targetSemis = (playback.pitch + glideSemis - (cfg.rootNote || 60)) + (cfg.tuning || 0) + totalTranspose + (cfg.fineTune || 0) / 100 + (noteDetune / 100)
+              const targetRate = Math.max(0.05, Math.min(16.0, Math.pow(2, targetSemis / 12)))
+              if (Math.abs(targetRate - rate) > 1e-6) {
+                if (glideCurveLut && glideCurveLut.length >= 2) {
+                  const steps = Math.max(8, Math.min(120, Math.round(glideSeconds * 60)))
+                  for (let i = 1; i <= steps; i++) {
+                    const t = i / steps
+                    const pos = t * (glideCurveLut.length - 1)
+                    const i0 = Math.floor(pos)
+                    const i1 = Math.min(i0 + 1, glideCurveLut.length - 1)
+                    const shape = glideCurveLut[i0] + (glideCurveLut[i1] - glideCurveLut[i0]) * (pos - i0)
+                    source.playbackRate.setValueAtTime(rate + (targetRate - rate) * shape, now + glideSeconds * t)
+                  }
+                } else {
+                  source.playbackRate.linearRampToValueAtTime(targetRate, now + glideSeconds)
+                }
+              }
+            }
+
+            const gainNode = rawCtx.createGain()
+            const targetGain = Math.max(0.0001, Math.min(2.0, (cfg.volume ?? 1.0) * velocity * autoGain))
+            const atk = Math.max(0.001, cfg.attack ?? 0.01)
+            const dec = Math.max(0.01, cfg.decay ?? 0.3)
+            const sus = Math.max(0, Math.min(1, cfg.sustain ?? 0.8))
+            const rel = Math.max(0.01, cfg.release ?? 0.2)
+
+            gainNode.gain.setValueAtTime(0, now)
+            gainNode.gain.linearRampToValueAtTime(targetGain, now + atk)
+            gainNode.gain.linearRampToValueAtTime(targetGain * sus, now + atk + dec)
+            gainNode.gain.setValueAtTime(targetGain * sus, now + duration)
+            gainNode.gain.linearRampToValueAtTime(0.0001, now + duration + rel)
+
+            let outNode: AudioNode = gainNode
+            const finalPan = Math.max(-1, Math.min(1, (cfg.pan ?? 0) + notePan))
+            if (finalPan !== 0 && (rawCtx as any).createStereoPanner) {
+              const panner = (rawCtx as any).createStereoPanner()
+              panner.pan.setValueAtTime(finalPan, now)
+              gainNode.connect(panner)
+              outNode = panner
+            }
+
+            outNode.connect(trackInput.input as GainNode)
+            source.connect(gainNode)
+
+            const loop = !!cfg.loop
+            source.loop = loop
+            if (loop) {
+              source.loopStart = regionStart
+              source.loopEnd = regionEnd
+              source.start(now, regionStart, duration + rel)
+            } else {
+              source.start(now, regionStart, Math.min(regionSec / rate, duration + rel))
+            }
+          } catch (e) {
+            console.error("Offline synth sampler render error:", e)
+          }
+          return
+        }
       }
 
       // VST3 overrides are hosted by JUCE only; the Tone bounce keeps the track synth.
@@ -1053,7 +1212,7 @@ function renderTrackNotesWithTransform(track: Track, notes: Note[], state: AppSt
     triggerDrum(note.pitch, duration, start, velocity, trackInput, track, note.instrumentOverride as DrumKit,
       drumSynthsCache, drumOffset, drumSlide,
       { octaves: laneNote.octaves, resonance: laneNote.resonance, decay: laneNote.decay },
-      drumOutput, noteTicksPerSecond, drumMod)
+      drumOutput, noteTicksPerSecond, drumMod, sampleBuffersCache)
   })
 }
 
@@ -1481,6 +1640,37 @@ export async function renderProjectAudio(state: AppState, options: RenderOptions
   const targetSampleRate = (originalContext && typeof (originalContext as any).sampleRate === 'number' && (originalContext as any).sampleRate > 0)
     ? (originalContext as any).sampleRate
     : 44100
+
+  const sampleBuffersCache = new Map<string, AudioBuffer>()
+  const rawLiveCtx = (originalContext?.rawContext || Tone.getContext().rawContext) as AudioContext
+
+  // Pre-decode all synth and drum sample buffers before starting offline render
+  for (const track of renderableTracks) {
+    if (track.synthMode === 'sampler' && track.synthSampler?.audioBase64) {
+      const uri = track.synthSampler.audioBase64
+      try {
+        const ab = await (await fetch(uri)).arrayBuffer()
+        const decoded = await rawLiveCtx.decodeAudioData(ab)
+        sampleBuffersCache.set(`synth:${track.id}`, decoded)
+      } catch (err) {
+        console.warn(`Failed to pre-decode synth sampler for track ${track.id}:`, err)
+      }
+    }
+    if (track.drumPadSamples) {
+      for (const [pStr, s] of Object.entries(track.drumPadSamples)) {
+        if (s?.audioBase64) {
+          try {
+            const ab = await (await fetch(s.audioBase64)).arrayBuffer()
+            const decoded = await rawLiveCtx.decodeAudioData(ab)
+            sampleBuffersCache.set(`drum:${track.id}:${pStr}`, decoded)
+          } catch (err) {
+            console.warn(`Failed to pre-decode drum pad sample ${pStr} on track ${track.id}:`, err)
+          }
+        }
+      }
+    }
+  }
+
   const offlineContext = new Tone.OfflineContext(2, renderDuration, targetSampleRate)
   Tone.setContext(offlineContext)
 
@@ -1779,7 +1969,7 @@ export async function renderProjectAudio(state: AppState, options: RenderOptions
     renderableTracks.forEach(track => {
       const trackNotes = renderableNotes.filter(note => note.trackId === track.id)
       scheduleTrackDPreverb(track, trackNotes, state, allFxNodes[track.id], options)
-      renderTrackNotesWithTransform(track, trackNotes, state, racks[track.id], options)
+      renderTrackNotesWithTransform(track, trackNotes, state, racks[track.id], options, sampleBuffersCache)
     })
 
     const toneBuffer = await offlineContext.render(false)

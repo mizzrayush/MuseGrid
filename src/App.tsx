@@ -876,7 +876,7 @@ function App() {
           overflow: 'hidden'
         }}>
           {/* Top Header / Studio Pro Transport Deck */}
-          <div className="glass-panel" style={{ height: '54px', display: 'flex', alignItems: 'center', padding: '0 16px', gap: '12px', borderBottom: '1px solid rgba(255, 255, 255, 0.06)', zIndex: 10 }}>
+          <div className="glass-panel" style={{ height: '54px', width: '100%', boxSizing: 'border-box', overflow: 'visible', position: 'relative', display: 'flex', alignItems: 'center', padding: '0 14px', gap: '10px', borderBottom: '1px solid rgba(255, 255, 255, 0.06)', zIndex: 100 }}>
             
             {/* Top-Left Corner Brand Icon */}
             <div
@@ -908,7 +908,7 @@ function App() {
         {activeTabId !== 'start' ? (
           <>
             {/* Central Hardware Transport Deck */}
-            <div className="transport-deck" style={{ margin: '0 auto' }}>
+            <div className="transport-deck" style={{ margin: '0 auto', flexShrink: 0 }}>
           {/* Return to Zero */}
           <button
             onClick={() => {

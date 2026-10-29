@@ -1638,7 +1638,7 @@ export const DrumDesignerModal: React.FC = () => {
               }}
             >
               <IconSave size={13} color={hasUnsavedChanges ? '#00e6ff' : '#69db7c'} />
-              {hasUnsavedChanges ? 'SAVE TO TRACK ●' : 'SAVED TO TRACK ✓'}
+              {hasUnsavedChanges ? 'SAVE TO TRACK' : 'SAVED TO TRACK'}
             </button>
 
             {/* Reset to Default Kit Button */}

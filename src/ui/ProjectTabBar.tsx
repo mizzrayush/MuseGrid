@@ -33,6 +33,14 @@ export const ProjectTabBar: React.FC<ProjectTabBarProps> = ({ onRequestCloseTab 
     setCanScrollRight(hasOverflow && el.scrollLeft + el.clientWidth < el.scrollWidth - 2)
   }, [])
 
+  const activeTabRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (activeTabRef.current) {
+      activeTabRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
+    }
+  }, [activeTabId])
+
   useEffect(() => {
     checkScroll()
     const el = scrollRef.current
@@ -107,8 +115,10 @@ export const ProjectTabBar: React.FC<ProjectTabBarProps> = ({ onRequestCloseTab 
         position: 'relative',
         display: 'flex',
         alignItems: 'center',
-        maxWidth: '520px',
-        flexShrink: 0
+        minWidth: 0,
+        maxWidth: 'clamp(180px, 32vw, 480px)',
+        flex: '0 1 auto',
+        overflow: 'hidden'
       }}
     >
       <style>{`
@@ -123,7 +133,7 @@ export const ProjectTabBar: React.FC<ProjectTabBarProps> = ({ onRequestCloseTab 
           100% {
             opacity: 1;
             transform: scale(1) translateY(0);
-            max-width: 170px;
+            max-width: 130px;
           }
         }
         @keyframes mgDotPulse {
@@ -138,299 +148,288 @@ export const ProjectTabBar: React.FC<ProjectTabBarProps> = ({ onRequestCloseTab 
         }
       `}</style>
 
-      {/* Left Sleeve Shadow Indicator */}
-      {canScrollLeft && (
-        <div
-          aria-hidden="true"
-          style={{
-            position: 'absolute',
-            left: 0,
-            top: '2px',
-            bottom: '2px',
-            width: '24px',
-            background: 'linear-gradient(to right, #0a0a0f 25%, rgba(10, 10, 15, 0))',
-            boxShadow: 'inset 6px 0 10px rgba(0, 0, 0, 0.9)',
-            pointerEvents: 'none',
-            zIndex: 6,
-            borderRadius: '6px 0 0 6px',
-            transition: 'opacity 0.2s ease'
-          }}
-        />
-      )}
-
-      {/* Scrollable Tabs Track */}
+      {/* Inner Container: Holds Scrollable Track Strictly Contained */}
       <div
-        ref={scrollRef}
-        onScroll={checkScroll}
-        onWheel={handleWheel}
         style={{
+          position: 'relative',
           display: 'flex',
           alignItems: 'center',
-          gap: '4px',
-          overflowX: 'auto',
-          maxWidth: '460px',
-          padding: '2px 2px',
-          scrollbarWidth: 'none',
-          msOverflowStyle: 'none'
+          flex: '1 1 auto',
+          minWidth: 0,
+          overflow: 'hidden'
         }}
-        className="thin-scroll"
       >
-        {/* Start Tab (shown when active or when no project tabs are open) */}
-        {(activeTabId === 'start' || openTabs.length === 0) && (
-          <div
-            onClick={() => switchTab('start')}
-            style={{
-              position: 'relative',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              padding: '4px 8px 4px 10px',
-              borderRadius: '7px',
-              fontSize: '11px',
-              fontWeight: activeTabId === 'start' ? 700 : 600,
-              cursor: 'pointer',
-              userSelect: 'none',
-              transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
-              background: activeTabId === 'start'
-                ? 'linear-gradient(180deg, rgba(77, 171, 247, 0.2) 0%, rgba(77, 171, 247, 0.08) 100%)'
-                : 'rgba(255, 255, 255, 0.02)',
-              border: activeTabId === 'start'
-                ? '1px solid rgba(77, 171, 247, 0.45)'
-                : '1px solid rgba(255, 255, 255, 0.06)',
-              boxShadow: activeTabId === 'start'
-                ? '0 3px 12px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(77, 171, 247, 0.25)'
-                : 'none',
-              color: activeTabId === 'start' ? '#ffffff' : '#8b92a5',
-              flexShrink: 0
-            }}
-            title="Start Screen (Templates, AI & Library)"
-          >
-            <IconSparkles size={11} style={{ color: activeTabId === 'start' ? '#4dabf7' : '#777', transition: 'color 0.2s' }} />
-            <span>Start</span>
-
-            {openTabs.length > 0 && (
-              <button
-                onClick={handleCloseStartTab}
-                title="Return to Active Project"
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  width: '16px',
-                  height: '16px',
-                  borderRadius: '4px',
-                  background: 'transparent',
-                  border: 'none',
-                  color: '#8899aa',
-                  cursor: 'pointer',
-                  padding: 0,
-                  marginLeft: '2px',
-                  transition: 'all 0.15s cubic-bezier(0.16, 1, 0.3, 1)'
-                }}
-                onMouseEnter={e => {
-                  e.currentTarget.style.background = 'rgba(255, 255, 255, 0.12)'
-                  e.currentTarget.style.color = '#fff'
-                  e.currentTarget.style.transform = 'scale(1.15)'
-                }}
-                onMouseLeave={e => {
-                  e.currentTarget.style.background = 'transparent'
-                  e.currentTarget.style.color = '#8899aa'
-                  e.currentTarget.style.transform = 'scale(1)'
-                }}
-              >
-                <IconX size={10} />
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* Project Tabs */}
-        {openTabs.map(tab => {
-          const isActive = activeTabId === tab.id
-          const isHovered = hoveredTabId === tab.id
-          const isClosing = closingTabIds.has(tab.id)
-
-          const tabName = isActive ? (activeProjectName || tab.name || 'Untitled') : (tab.name || 'Untitled')
-          const tabFilePath = isActive ? activeFilePath : tab.filePath
-
-          // Real-time Dirty / Unsaved Detection:
-          // Active tab reads live store state (notes & isDirty) so single-tab projects update instantaneously
-          const hasUnsavedChanges = isActive
-            ? (activeIsDirty || (!activeFilePath && activeNotesCount > 0))
-            : (tab.isDirty || (!tab.filePath && (tab.projectData?.notes?.length ?? 0) > 0))
-
-          const isSavedOnDisk = Boolean(tabFilePath) && !hasUnsavedChanges
-
-          // Status Dot colors:
-          // 1. Saved on disk: Green dot (#00e676)
-          // 2. Unsaved changes (AI notes, edits, dirty): Amber/Orange dot (#f59f00) with pulse
-          // 3. Blank empty untitled draft: Neutral muted dot (#5a627a) - never falsely marked green!
-          const dotColor = hasUnsavedChanges
-            ? '#f59f00'
-            : isSavedOnDisk
-              ? '#00e676'
-              : '#5a627a'
-
-          const dotGlow = hasUnsavedChanges
-            ? '0 0 7px rgba(245, 159, 0, 0.8)'
-            : isSavedOnDisk
-              ? '0 0 6px rgba(0, 230, 118, 0.5)'
-              : 'none'
-
-          const statusTitle = hasUnsavedChanges
-            ? 'Unsaved changes (Save to persist)'
-            : isSavedOnDisk
-              ? `Saved to disk: ${tabFilePath}`
-              : 'Untitled draft (empty)'
-
-          return (
+        {/* Scrollable Tabs Track */}
+        <div
+          ref={scrollRef}
+          onScroll={checkScroll}
+          onWheel={handleWheel}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '4px',
+            overflowX: 'auto',
+            width: '100%',
+            minWidth: 0,
+            padding: '2px 2px',
+            scrollbarWidth: 'none',
+            msOverflowStyle: 'none',
+            maskImage: canScrollLeft && canScrollRight
+              ? 'linear-gradient(to right, transparent 0px, black 16px, black calc(100% - 16px), transparent 100%)'
+              : canScrollLeft
+                ? 'linear-gradient(to right, transparent 0px, black 16px, black 100%)'
+                : canScrollRight
+                  ? 'linear-gradient(to right, black 0%, black calc(100% - 16px), transparent 100%)'
+                  : 'none',
+            WebkitMaskImage: canScrollLeft && canScrollRight
+              ? 'linear-gradient(to right, transparent 0px, black 16px, black calc(100% - 16px), transparent 100%)'
+              : canScrollLeft
+                ? 'linear-gradient(to right, transparent 0px, black 16px, black 100%)'
+                : canScrollRight
+                  ? 'linear-gradient(to right, black 0%, black calc(100% - 16px), transparent 100%)'
+                  : 'none'
+          }}
+          className="thin-scroll"
+        >
+          {/* Start Tab (shown when active or when no project tabs are open) */}
+          {(activeTabId === 'start' || openTabs.length === 0) && (
             <div
-              key={tab.id}
-              onClick={() => switchTab(tab.id)}
-              onMouseEnter={() => setHoveredTabId(tab.id)}
-              onMouseLeave={() => setHoveredTabId(null)}
+              onClick={() => switchTab('start')}
               style={{
                 position: 'relative',
                 display: 'flex',
                 alignItems: 'center',
                 gap: '6px',
-                padding: isClosing ? '4px 0' : '4px 8px 4px 10px',
+                padding: '4px 8px 4px 10px',
                 borderRadius: '7px',
                 fontSize: '11px',
-                fontWeight: isActive ? 700 : 600,
+                fontWeight: activeTabId === 'start' ? 700 : 600,
                 cursor: 'pointer',
                 userSelect: 'none',
-                transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1), max-width 0.16s ease-out, opacity 0.16s ease-out, padding 0.16s ease-out, transform 0.16s ease-out',
-                background: isActive
-                  ? 'linear-gradient(180deg, rgba(255, 255, 255, 0.09) 0%, rgba(255, 255, 255, 0.04) 100%)'
-                  : isHovered
-                    ? 'rgba(255, 255, 255, 0.05)'
-                    : 'rgba(255, 255, 255, 0.02)',
-                border: isActive
+                transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
+                background: activeTabId === 'start'
+                  ? 'linear-gradient(180deg, rgba(77, 171, 247, 0.2) 0%, rgba(77, 171, 247, 0.08) 100%)'
+                  : 'rgba(255, 255, 255, 0.02)',
+                border: activeTabId === 'start'
                   ? '1px solid rgba(77, 171, 247, 0.45)'
-                  : isHovered
-                    ? '1px solid rgba(255, 255, 255, 0.12)'
-                    : '1px solid rgba(255, 255, 255, 0.05)',
-                boxShadow: isActive
-                  ? '0 3px 12px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.1)'
-                  : isHovered
-                    ? '0 2px 8px rgba(0, 0, 0, 0.25)'
-                    : 'none',
-                color: isActive ? '#ffffff' : isHovered ? '#c9d1d9' : '#8b92a5',
-                maxWidth: isClosing ? '0px' : '170px',
-                opacity: isClosing ? 0 : 1,
-                transform: isClosing ? 'scale(0.8) translateY(-4px)' : isActive ? 'translateY(0)' : 'translateY(1px)',
-                overflow: 'hidden',
-                flexShrink: 0,
-                animation: 'mgTabEnter 0.18s cubic-bezier(0.16, 1, 0.3, 1)'
+                  : '1px solid rgba(255, 255, 255, 0.06)',
+                boxShadow: activeTabId === 'start'
+                  ? '0 3px 12px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(77, 171, 247, 0.25)'
+                  : 'none',
+                color: activeTabId === 'start' ? '#ffffff' : '#8b92a5',
+                flexShrink: 0
               }}
-              title={tabFilePath || tabName}
+              title="Start Screen (Templates, AI & Library)"
             >
+              <IconSparkles size={11} style={{ color: activeTabId === 'start' ? '#4dabf7' : '#777', transition: 'color 0.2s' }} />
+              <span>Start</span>
 
-
-              {/* Status Dot */}
-              <span
-                title={statusTitle}
-                style={{
-                  width: '6px',
-                  height: '6px',
-                  borderRadius: '50%',
-                  flexShrink: 0,
-                  background: dotColor,
-                  boxShadow: dotGlow,
-                  animation: hasUnsavedChanges ? 'mgDotPulse 2.2s infinite ease-in-out' : 'none',
-                  transition: 'background 0.25s ease, box-shadow 0.25s ease'
-                }}
-              />
-
-              {/* Title */}
-              <span
-                style={{
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  maxWidth: '105px',
-                  letterSpacing: '-0.1px'
-                }}
-              >
-                {tabName}
-              </span>
-
-              {hasUnsavedChanges && (
-                <span
+              {openTabs.length > 0 && (
+                <button
+                  onClick={handleCloseStartTab}
+                  title="Return to Active Project"
                   style={{
-                    color: '#f59f00',
-                    fontWeight: 800,
-                    fontSize: '11px',
-                    lineHeight: 1,
-                    textShadow: '0 0 6px rgba(245, 159, 0, 0.6)'
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: '16px',
+                    height: '16px',
+                    borderRadius: '4px',
+                    background: 'transparent',
+                    border: 'none',
+                    color: '#8899aa',
+                    cursor: 'pointer',
+                    padding: 0,
+                    marginLeft: '2px',
+                    transition: 'all 0.15s cubic-bezier(0.16, 1, 0.3, 1)'
                   }}
-                  title="Unsaved changes"
+                  onMouseEnter={e => {
+                    e.currentTarget.style.background = 'rgba(255, 255, 255, 0.12)'
+                    e.currentTarget.style.color = '#fff'
+                    e.currentTarget.style.transform = 'scale(1.15)'
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.background = 'transparent'
+                    e.currentTarget.style.color = '#8899aa'
+                    e.currentTarget.style.transform = 'scale(1)'
+                  }}
                 >
-                  *
-                </span>
+                  <IconX size={10} />
+                </button>
               )}
+            </div>
+          )}
 
-              {/* Close Button */}
-              <button
-                onClick={e => handleClose(e, tab)}
-                title="Close Tab"
+          {/* Project Tabs */}
+          {openTabs.map(tab => {
+            const isActive = activeTabId === tab.id
+            const isHovered = hoveredTabId === tab.id
+            const isClosing = closingTabIds.has(tab.id)
+
+            const tabName = isActive ? (activeProjectName || tab.name || 'Untitled') : (tab.name || 'Untitled')
+            const tabFilePath = isActive ? activeFilePath : tab.filePath
+
+            // Real-time Dirty / Unsaved Detection:
+            // Active tab reads live store state (notes & isDirty) so single-tab projects update instantaneously
+            const hasUnsavedChanges = isActive
+              ? (activeIsDirty || (!activeFilePath && activeNotesCount > 0))
+              : (tab.isDirty || (!tab.filePath && (tab.projectData?.notes?.length ?? 0) > 0))
+
+            const isSavedOnDisk = Boolean(tabFilePath) && !hasUnsavedChanges
+
+            // Status Dot colors:
+            // 1. Saved on disk: Green dot (#00e676)
+            // 2. Unsaved changes (AI notes, edits, dirty): Amber/Orange dot (#f59f00) with pulse
+            // 3. Blank empty untitled draft: Neutral muted dot (#5a627a) - never falsely marked green!
+            const dotColor = hasUnsavedChanges
+              ? '#f59f00'
+              : isSavedOnDisk
+                ? '#00e676'
+                : '#5a627a'
+
+            const dotGlow = hasUnsavedChanges
+              ? '0 0 7px rgba(245, 159, 0, 0.8)'
+              : isSavedOnDisk
+                ? '0 0 6px rgba(0, 230, 118, 0.5)'
+                : 'none'
+
+            const statusTitle = hasUnsavedChanges
+              ? 'Unsaved changes (Save to persist)'
+              : isSavedOnDisk
+                ? `Saved to disk: ${tabFilePath}`
+                : 'Untitled draft (empty)'
+
+            return (
+              <div
+                key={tab.id}
+                ref={isActive ? activeTabRef : undefined}
+                onClick={() => switchTab(tab.id)}
+                onMouseEnter={() => setHoveredTabId(tab.id)}
+                onMouseLeave={() => setHoveredTabId(null)}
                 style={{
+                  position: 'relative',
                   display: 'flex',
                   alignItems: 'center',
-                  justifyContent: 'center',
-                  width: '16px',
-                  height: '16px',
-                  borderRadius: '4px',
-                  background: 'transparent',
-                  border: 'none',
-                  color: isActive ? '#aaa' : '#666',
+                  gap: '6px',
+                  padding: isClosing ? '4px 0' : '4px 6px 4px 8px',
+                  borderRadius: '7px',
+                  fontSize: '11px',
+                  fontWeight: isActive ? 700 : 600,
                   cursor: 'pointer',
-                  padding: 0,
-                  marginLeft: '2px',
-                  opacity: isActive || isHovered ? 1 : 0.2,
-                  transition: 'all 0.15s cubic-bezier(0.16, 1, 0.3, 1)'
+                  userSelect: 'none',
+                  transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1), max-width 0.16s ease-out, opacity 0.16s ease-out, padding 0.16s ease-out, transform 0.16s ease-out',
+                  background: isActive
+                    ? 'linear-gradient(180deg, rgba(255, 255, 255, 0.09) 0%, rgba(255, 255, 255, 0.04) 100%)'
+                    : isHovered
+                      ? 'rgba(255, 255, 255, 0.05)'
+                      : 'rgba(255, 255, 255, 0.02)',
+                  border: isActive
+                    ? '1px solid rgba(77, 171, 247, 0.45)'
+                    : isHovered
+                      ? '1px solid rgba(255, 255, 255, 0.12)'
+                      : '1px solid rgba(255, 255, 255, 0.05)',
+                  boxShadow: isActive
+                    ? '0 3px 12px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.1)'
+                    : isHovered
+                      ? '0 2px 8px rgba(0, 0, 0, 0.25)'
+                      : 'none',
+                  color: isActive ? '#ffffff' : isHovered ? '#c9d1d9' : '#8b92a5',
+                  flex: isClosing ? '0 0 0px' : '0 1 125px',
+                  minWidth: isClosing ? '0px' : '36px',
+                  maxWidth: isClosing ? '0px' : '130px',
+                  opacity: isClosing ? 0 : 1,
+                  transform: isClosing ? 'scale(0.8) translateY(-4px)' : isActive ? 'translateY(0)' : 'translateY(1px)',
+                  overflow: 'hidden',
+                  animation: 'mgTabEnter 0.18s cubic-bezier(0.16, 1, 0.3, 1)'
                 }}
-                onMouseEnter={e => {
-                  e.currentTarget.style.background = 'rgba(255, 51, 102, 0.22)'
-                  e.currentTarget.style.color = '#ff6b8b'
-                  e.currentTarget.style.transform = 'scale(1.15)'
-                }}
-                onMouseLeave={e => {
-                  e.currentTarget.style.background = 'transparent'
-                  e.currentTarget.style.color = isActive ? '#aaa' : '#666'
-                  e.currentTarget.style.transform = 'scale(1)'
-                }}
-                onMouseDown={e => {
-                  e.currentTarget.style.transform = 'scale(0.9)'
-                }}
+                title={tabFilePath || tabName}
               >
-                <IconX size={10} />
-              </button>
-            </div>
-          )
-        })}
-      </div>
 
-      {/* Right Sleeve Shadow Indicator */}
-      {canScrollRight && (
-        <div
-          aria-hidden="true"
-          style={{
-            position: 'absolute',
-            right: '30px',
-            top: '2px',
-            bottom: '2px',
-            width: '24px',
-            background: 'linear-gradient(to left, #0a0a0f 25%, rgba(10, 10, 15, 0))',
-            boxShadow: 'inset -6px 0 10px rgba(0, 0, 0, 0.9)',
-            pointerEvents: 'none',
-            zIndex: 6,
-            borderRadius: '0 6px 6px 0',
-            transition: 'opacity 0.2s ease'
-          }}
-        />
-      )}
+                {/* Status Dot */}
+                <span
+                  title={statusTitle}
+                  style={{
+                    width: '6px',
+                    height: '6px',
+                    borderRadius: '50%',
+                    flexShrink: 0,
+                    background: dotColor,
+                    boxShadow: dotGlow,
+                    animation: hasUnsavedChanges ? 'mgDotPulse 2.2s infinite ease-in-out' : 'none',
+                    transition: 'background 0.25s ease, box-shadow 0.25s ease'
+                  }}
+                />
+
+                {/* Title */}
+                <span
+                  style={{
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    maxWidth: '75px',
+                    letterSpacing: '-0.1px'
+                  }}
+                >
+                  {tabName}
+                </span>
+
+                {hasUnsavedChanges && (
+                  <span
+                    style={{
+                      color: '#f59f00',
+                      fontWeight: 800,
+                      fontSize: '11px',
+                      lineHeight: 1,
+                      textShadow: '0 0 6px rgba(245, 159, 0, 0.6)'
+                    }}
+                    title="Unsaved changes"
+                  >
+                    *
+                  </span>
+                )}
+
+                {/* Close Button */}
+                <button
+                  onClick={e => handleClose(e, tab)}
+                  title="Close Tab"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: '16px',
+                    height: '16px',
+                    borderRadius: '4px',
+                    background: 'transparent',
+                    border: 'none',
+                    color: isActive ? '#aaa' : '#666',
+                    cursor: 'pointer',
+                    padding: 0,
+                    marginLeft: 'auto',
+                    flexShrink: 0,
+                    opacity: isActive || isHovered ? 1 : 0.2,
+                    transition: 'all 0.15s cubic-bezier(0.16, 1, 0.3, 1)'
+                  }}
+                  onMouseEnter={e => {
+                    e.currentTarget.style.background = 'rgba(255, 51, 102, 0.22)'
+                    e.currentTarget.style.color = '#ff6b8b'
+                    e.currentTarget.style.transform = 'scale(1.15)'
+                  }}
+                  onMouseLeave={e => {
+                    e.currentTarget.style.background = 'transparent'
+                    e.currentTarget.style.color = isActive ? '#aaa' : '#666'
+                    e.currentTarget.style.transform = 'scale(1)'
+                  }}
+                  onMouseDown={e => {
+                    e.currentTarget.style.transform = 'scale(0.9)'
+                  }}
+                >
+                  <IconX size={10} />
+                </button>
+              </div>
+            )
+          })}
+        </div>
+      </div>
 
       {/* Plus Button to open Start Screen / New Project */}
       <button

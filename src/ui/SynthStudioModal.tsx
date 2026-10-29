@@ -501,7 +501,7 @@ export const SynthStudioModal: React.FC = () => {
 
     audioEngine.createInstrument(targetTrack.id, 'synth')
     audioEngine.setTrackCurve(targetTrack.id, decayCurveType, decayTension, currentCurveLut)
-    if (samplerMode && sampler.sampleUri) {
+    if (samplerMode && sampler.audioBase64) {
       audioEngine.setTrackSamplerConfig(targetTrack.id, sampler)
     }
 
@@ -885,7 +885,7 @@ export const SynthStudioModal: React.FC = () => {
         const bufferToPlay = sampler.reverse ? getReversedAudioBuffer(audioCtx, samplerBuffer) : samplerBuffer
         const source = audioCtx.createBufferSource()
         source.buffer = bufferToPlay
-        const semitoneDiff = shiftedMidi - (sampler.rootNote ?? 60) + (sampler.detune ?? 0) / 100 + fineDetune / 100
+        const semitoneDiff = shiftedMidi - (sampler.rootNote ?? 60) + (sampler.tuning ?? 0) + (sampler.fineTune ?? 0) / 100 + fineDetune / 100
         source.playbackRate.value = Math.pow(2, semitoneDiff / 12)
         const gainNode = audioCtx.createGain()
         gainNode.gain.setValueAtTime(0.001, audioCtx.currentTime)
@@ -957,7 +957,7 @@ export const SynthStudioModal: React.FC = () => {
             const bufferToPlay = sampler.reverse ? getReversedAudioBuffer(audioCtx, samplerBuffer) : samplerBuffer
             const source = audioCtx.createBufferSource()
             source.buffer = bufferToPlay
-            const semitoneDiff = shiftedMidi - (sampler.rootNote ?? 60) + (sampler.detune ?? 0) / 100 + fineDetune / 100
+            const semitoneDiff = shiftedMidi - (sampler.rootNote ?? 60) + (sampler.tuning ?? 0) + (sampler.fineTune ?? 0) / 100 + fineDetune / 100
             source.playbackRate.value = Math.pow(2, semitoneDiff / 12)
             const gainNode = audioCtx.createGain()
             gainNode.gain.setValueAtTime(0.001, audioCtx.currentTime)
@@ -1212,7 +1212,7 @@ export const SynthStudioModal: React.FC = () => {
               }}
             >
               <IconSave size={13} color={hasUnsavedChanges ? '#00e6ff' : '#69db7c'} />
-              {hasUnsavedChanges ? 'SAVE TO TRACK ●' : 'SAVED TO TRACK ✓'}
+              {hasUnsavedChanges ? 'SAVE TO TRACK' : 'SAVED TO TRACK'}
             </button>
 
             {/* Reset to Default Button */}

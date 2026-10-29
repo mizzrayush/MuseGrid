@@ -2712,16 +2712,21 @@ export default function LeftPane() {
                   return hasSolo ? t.soloed : !t.muted
                 })
 
-          const isVocal = (t: Track) => (t as any).synthPreset === 'vocal' || (t.instrument === 'synth' && (t as any).synthPreset === 'vocal')
-          const vocalTracks = selectedRenderTracks.filter(isVocal)
-          const nonVocalTracks = selectedRenderTracks.filter(t => !isVocal(t))
+          const needsWebAudio = (t: Track) => (
+            (t as any).synthPreset === 'vocal' ||
+            (t.instrument === 'synth' && (t as any).synthPreset === 'vocal') ||
+            (t.instrument === 'synth' && (t.synthMode === 'sampler' || !!t.synthSampler?.audioBase64)) ||
+            (t.instrument === 'drum' && !!(t.drumPadSamples && Object.keys(t.drumPadSamples).length > 0))
+          )
+          const webAudioTracks = selectedRenderTracks.filter(needsWebAudio)
+          const nativeAudioTracks = selectedRenderTracks.filter(t => !needsWebAudio(t))
 
-          if (vocalTracks.length > 0 && nonVocalTracks.length > 0) {
-            // Render non-vocal tracks (VST3s, native instruments, drums) through JUCE C++
+          if (webAudioTracks.length > 0 && nativeAudioTracks.length > 0) {
+            // Render non-web tracks (VST3s, native instruments, standard drums) through JUCE C++
             let instrumentalBuffer: AudioBuffer | null = null
             try {
               instrumentalBuffer = await renderNativeAudioBuffer(state, {
-                trackIds: nonVocalTracks.map(t => t.id),
+                trackIds: nativeAudioTracks.map(t => t.id),
                 octaveOffset, semitoneOffset, normalize: false, autoFade: false, includeMetronome,
                 includeProceduralFx,
                 startTick: resolvedStartTick, endTick: resolvedEndTick, exportRegionMode,
@@ -2732,32 +2737,32 @@ export default function LeftPane() {
               console.warn('[Hybrid Export] Native instrumental render failed:', err)
             }
 
-            // Render vocal tracks through WebAudio 67-parameter anatomical VocalModelVoice
-            let vocalBuffer: AudioBuffer | null = null
+            // Render sample-based & vocal tracks through WebAudio offline engine
+            let webBuffer: AudioBuffer | null = null
             try {
-              vocalBuffer = await renderProjectAudio(renderState, {
-                trackIds: vocalTracks.map(t => t.id),
+              webBuffer = await renderProjectAudio(renderState, {
+                trackIds: webAudioTracks.map(t => t.id),
                 octaveOffset, semitoneOffset, normalize: false, autoFade: false, includeMetronome: false,
                 includeProceduralFx: false,
                 startTick: resolvedStartTick, endTick: resolvedEndTick, exportRegionMode,
                 exportRegions
               })
             } catch (err) {
-              console.warn('[Hybrid Export] Web vocal render failed:', err)
+              console.warn('[Hybrid Export] Web audio render failed:', err)
             }
 
-            if (instrumentalBuffer && vocalBuffer) {
-              nativeBuffer = mixAudioBuffers([instrumentalBuffer, vocalBuffer])
+            if (instrumentalBuffer && webBuffer) {
+              nativeBuffer = mixAudioBuffers([instrumentalBuffer, webBuffer])
             } else {
-              nativeBuffer = instrumentalBuffer || vocalBuffer
+              nativeBuffer = instrumentalBuffer || webBuffer
             }
 
             if (nativeBuffer) {
               if (autoFade) applyAudioBufferFadeOut(nativeBuffer, state.studioSettings.renderFadeDuration ?? 0.1)
               if (normalize) normalizeAudioBuffer(nativeBuffer, state.studioSettings.normalizationTarget ?? -1.0)
             }
-          } else if (vocalTracks.length > 0 && nonVocalTracks.length === 0) {
-            // Vocal-only mix: render directly with WebAudio 67-parameter anatomical model
+          } else if (webAudioTracks.length > 0 && nativeAudioTracks.length === 0) {
+            // WebAudio-only mix (samples, vocals): render directly with WebAudio engine
             nativeBuffer = await renderProjectAudio(renderState, {
               trackId, trackIds, octaveOffset, semitoneOffset, normalize, includeMetronome, autoFade,
               startTick: resolvedStartTick, endTick: resolvedEndTick, includeProceduralFx,
@@ -10805,7 +10810,7 @@ for (let channel = 0; channel < input.length; channel++) {
                           {track.instrument !== 'drum' ? (
                             <>
                               <StopPropSelect
-                                value={track.vst3InstrumentId ? `vst3:${track.vst3InstrumentId}` : (track.synthPreset ?? DEFAULT_SYNTH_PRESET)}
+                                value={track.vst3InstrumentId ? `vst3:${track.vst3InstrumentId}` : (track.synthMode === 'sampler' ? 'custom-sampler' : (track.synthPreset ?? DEFAULT_SYNTH_PRESET))}
                                 onChange={e => {
                                   const val = e.target.value
                                   if (val.startsWith('vst3:')) {
@@ -10891,9 +10896,30 @@ for (let channel = 0; channel < input.length; channel++) {
                                     updateTrack(track.id, { synthPreset: 'vocal' })
                                     setTimeout(() => audioEngine.createInstrument(track.id, 'synth'), 50)
                                     useStore.getState().showToast('Vocal / Singing Synth Activated', 'success')
+                                  } else if (val === 'custom-sampler') {
+                                    commitHistory()
+                                    updateTrack(track.id, {
+                                      synthPreset: 'custom',
+                                      synthMode: 'sampler'
+                                    })
+                                    if (track.synthSampler) {
+                                      audioEngine.setTrackSamplerConfig(track.id, track.synthSampler)
+                                    }
+                                    useStore.getState().showToast('Custom Sampler Mode Activated', 'success')
+                                  } else if (val === 'custom') {
+                                    commitHistory()
+                                    updateTrack(track.id, {
+                                      synthPreset: 'custom',
+                                      synthMode: 'synth'
+                                    })
+                                    setTimeout(() => audioEngine.createInstrument(track.id, 'synth'), 50)
+                                    useStore.getState().showToast('Custom Synth Mode Activated', 'success')
                                   } else {
                                     commitHistory()
-                                    updateTrack(track.id, { synthPreset: val as SynthPreset })
+                                    updateTrack(track.id, {
+                                      synthPreset: val as SynthPreset,
+                                      synthMode: 'synth'
+                                    })
                                     setTimeout(() => audioEngine.createInstrument(track.id, 'synth'), 50)
                                   }
                                 }}
@@ -10916,16 +10942,15 @@ for (let channel = 0; channel < input.length; channel++) {
                                   </optgroup>
                                 )}
                                 <optgroup label="── STANDARD SYNTH PRESETS ──" style={{ background: '#0a0b10', color: '#00e6ff', fontWeight: 800 }}>
-                                  {SYNTH_PRESETS.filter(preset => preset.value !== 'physical' && preset.value !== 'vocal').map(preset => (
+                                  {SYNTH_PRESETS.filter(preset => preset.value !== 'physical' && preset.value !== 'vocal' && preset.value !== 'custom').map(preset => (
                                     <option key={preset.value} value={preset.value} style={{ background: '#12141c', color: '#e0e0e0' }}>{preset.label}</option>
                                   ))}
                                   {track.customMuxins ? (
                                     <option value="custom" style={{ background: '#12141c', color: '#00e6ff', fontWeight: 700 }}>Custom: {track.customMuxins.name}</option>
-                                  ) : (track.synthPreset === 'custom' || track.synthMode === 'sampler') ? (
-                                    <option value="custom" style={{ background: '#12141c', color: '#00e6ff', fontWeight: 700 }}>
-                                      {track.synthMode === 'sampler' ? 'Custom Sampler (Studio)' : 'Custom Synth (Studio)'}
-                                    </option>
-                                  ) : null}
+                                  ) : (
+                                    <option value="custom" style={{ background: '#12141c', color: '#00e6ff', fontWeight: 700 }}>Custom Synth (Studio)</option>
+                                  )}
+                                  <option value="custom-sampler" style={{ background: '#12141c', color: '#00e6ff', fontWeight: 700 }}>Custom Sampler (Studio)</option>
                                   <option value="import-muzins" style={{ background: '#12141c', color: '#e0e0e0' }}>Load from Device (.muzins)...</option>
                                 </optgroup>
                                 <optgroup label="── SPECIALIZED ACOUSTIC & VOCAL ENGINES ──" style={{ background: '#0a0b10', color: '#da77f2', fontWeight: 800 }}>

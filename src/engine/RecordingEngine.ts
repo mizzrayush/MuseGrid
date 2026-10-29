@@ -37,13 +37,14 @@ const QWERTY_KEY_MAP: Record<string, number> = {
 
 class RecordingEngine {
   private midiAccess: MIDIAccess | null = null
-  private activeMidiNotes = new Map<number, {
+  private activeMidiNotes = new Map<string, {
     time: number
     pitch: number
     velocity: number
     wallTimeMs: number
     transportTick: number
     transportWasRunning: boolean
+    targetTracks: Array<{ trackId: string; soundingPitch: number }>
   }>()
   private activeQwertyNotes = new Map<string, {
     pitch: number
@@ -113,13 +114,15 @@ class RecordingEngine {
         const [status, note, velocity] = Array.from(e.data as Uint8Array)
         const isNoteOn = (status & 0xf0) === 0x90 && velocity > 0
         const isNoteOff = (status & 0xf0) === 0x80 || ((status & 0xf0) === 0x90 && velocity === 0)
+        const channel = (status & 0x0f) + 1
+        const deviceName = input.name || ''
 
         this.triggerActivityPulse()
 
         if (isNoteOn) {
-          this.handleNoteOn(note, velocity)
+          this.handleNoteOn(note, velocity, deviceName, channel)
         } else if (isNoteOff) {
-          this.handleNoteOff(note)
+          this.handleNoteOff(note, deviceName, channel)
         }
       }
     })
@@ -134,48 +137,73 @@ class RecordingEngine {
   }
 
   // --- Live Note Routing & Processing ---
-  public handleNoteOn(pitch: number, velocity: number = 100) {
+  public handleNoteOn(pitch: number, velocity: number = 100, deviceName?: string, channel?: number) {
     const state = useStore.getState()
-    const trackId = state.activeTrackId
-    if (!trackId) return
 
-    const activeTrack = state.tracks.find(t => t.id === trackId)
-    let soundingPitch = pitch
+    // Resolve matching tracks based on per-track MIDI input device & channel
+    const targetTracks = state.tracks.filter(t => {
+      const hasSpecificDevice = t.midiInputDevice && t.midiInputDevice !== 'all'
+      const hasSpecificChannel = t.midiInputChannel && t.midiInputChannel !== 'all'
 
-    // Microtonal EDO Keyboard Remap
-    if (activeTrack?.instrument === 'synth' && activeTrack.edoDivision && activeTrack.edoDivision !== 12 && state.recordEdoMappingMode !== 'off') {
-      const edo = activeTrack.edoDivision
-      const root = activeTrack.edoRootNote ?? 60
-      const stepSize = 12 / edo
-
-      if (state.recordEdoMappingMode === 'linear') {
-        const offset = pitch - root
-        soundingPitch = Math.round((root + offset * stepSize) * 1000) / 1000
-      } else if (state.recordEdoMappingMode === 'harmonic') {
-        const dist = pitch - root
-        const nearestStep = Math.round(dist / stepSize)
-        soundingPitch = Math.round((root + nearestStep * stepSize) * 1000) / 1000
+      if (hasSpecificDevice || hasSpecificChannel) {
+        if (deviceName !== undefined && channel !== undefined) {
+          const devMatch = !hasSpecificDevice || t.midiInputDevice === deviceName
+          const chMatch = !hasSpecificChannel || t.midiInputChannel === channel
+          return devMatch && chMatch
+        }
+        // If triggered via UI/QWERTY (no device/channel), route to track if active
+        return t.id === state.activeTrackId
       }
-    } else {
-      // Scale conformance if enabled
-      const effectiveScale = activeTrack?.scaleOverride || state.scaleLock
-      if ((state.recordScaleConform || state.scaleLock.enabled) && activeTrack?.instrument === 'synth' && effectiveScale.enabled && (!activeTrack.edoDivision || activeTrack.edoDivision === 12)) {
-        soundingPitch = snapToScale(soundingPitch, effectiveScale.root, effectiveScale.mode, effectiveScale.customIntervals)
+
+      // Default (Omni / All): only active track receives
+      return t.id === state.activeTrackId
+    })
+
+    if (targetTracks.length === 0) return
+
+    const soundingTargets: Array<{ trackId: string; soundingPitch: number }> = []
+
+    for (const track of targetTracks) {
+      let soundingPitch = pitch
+
+      // Microtonal EDO Keyboard Remap
+      if (track.instrument === 'synth' && track.edoDivision && track.edoDivision !== 12 && state.recordEdoMappingMode !== 'off') {
+        const edo = track.edoDivision
+        const root = track.edoRootNote ?? 60
+        const stepSize = 12 / edo
+
+        if (state.recordEdoMappingMode === 'linear') {
+          const offset = pitch - root
+          soundingPitch = Math.round((root + offset * stepSize) * 1000) / 1000
+        } else if (state.recordEdoMappingMode === 'harmonic') {
+          const dist = pitch - root
+          const nearestStep = Math.round(dist / stepSize)
+          soundingPitch = Math.round((root + nearestStep * stepSize) * 1000) / 1000
+        }
+      } else {
+        // Scale conformance if enabled
+        const effectiveScale = track.scaleOverride || state.scaleLock
+        if ((state.recordScaleConform || state.scaleLock.enabled) && track.instrument === 'synth' && effectiveScale.enabled && (!track.edoDivision || track.edoDivision === 12)) {
+          soundingPitch = snapToScale(soundingPitch, effectiveScale.root, effectiveScale.mode, effectiveScale.customIntervals)
+        }
       }
+
+      const { synthLowerOctave, synthUpperOctave } = state
+      const lowestPitch = (synthLowerOctave + 1) * 12
+      const highestPitch = (synthUpperOctave + 1) * 12 + 11
+      soundingPitch = Math.max(lowestPitch, Math.min(highestPitch, soundingPitch))
+      soundingPitch = Math.round(soundingPitch * 1000) / 1000
+
+      audioEngine.triggerLiveNote(track.id, soundingPitch, velocity)
+      soundingTargets.push({ trackId: track.id, soundingPitch })
     }
 
-    const { synthLowerOctave, synthUpperOctave } = state
-    const lowestPitch = (synthLowerOctave + 1) * 12
-    const highestPitch = (synthUpperOctave + 1) * 12 + 11
-    soundingPitch = Math.max(lowestPitch, Math.min(highestPitch, soundingPitch))
-    soundingPitch = Math.round(soundingPitch * 1000) / 1000
-
-    audioEngine.triggerLiveNote(trackId, soundingPitch, velocity)
+    const primarySoundingPitch = soundingTargets[0]?.soundingPitch ?? pitch
 
     // --- STEP RECORDING MODE ---
     if (state.isStepRecording) {
       this.stepHeldKeys.add(pitch)
-      this.stepChordNotes.set(pitch, { pitch: soundingPitch, velocity })
+      this.stepChordNotes.set(pitch, { pitch: primarySoundingPitch, velocity })
 
       if (this.stepReleaseDebounceTimer) {
         clearTimeout(this.stepReleaseDebounceTimer)
@@ -195,25 +223,50 @@ class RecordingEngine {
     const nowMs = performance.now()
     const transportTick = Tone.Transport.ticks
     const transportWasRunning = Tone.Transport.state === 'started'
+    const noteKey = (deviceName !== undefined && channel !== undefined)
+      ? `${deviceName}#${channel}#${pitch}`
+      : `any#any#${pitch}`
 
-    this.activeMidiNotes.set(pitch, {
+    this.activeMidiNotes.set(noteKey, {
       time: transportTick,
-      pitch: soundingPitch,
+      pitch,
       velocity,
       wallTimeMs: nowMs,
       transportTick,
-      transportWasRunning
+      transportWasRunning,
+      targetTracks: soundingTargets
     })
   }
 
-  public handleNoteOff(pitch: number) {
+  public handleNoteOff(pitch: number, deviceName?: string, channel?: number) {
     const state = useStore.getState()
-    const trackId = state.activeTrackId
 
-    const pending = this.activeMidiNotes.get(pitch)
+    let noteKey = (deviceName !== undefined && channel !== undefined)
+      ? `${deviceName}#${channel}#${pitch}`
+      : `any#any#${pitch}`
+
+    let pending = this.activeMidiNotes.get(noteKey)
+    if (!pending) {
+      // Fallback search across map for matching pitch
+      for (const [k, v] of this.activeMidiNotes.entries()) {
+        if (v.pitch === pitch || k.endsWith(`#${pitch}`)) {
+          noteKey = k
+          pending = v
+          break
+        }
+      }
+    }
+
     const stepPending = this.stepChordNotes.get(pitch)
-    if (trackId) {
-      audioEngine.releaseLiveNote(trackId, pending ? pending.pitch : (stepPending ? stepPending.pitch : pitch))
+    if (pending) {
+      for (const target of pending.targetTracks) {
+        audioEngine.releaseLiveNote(target.trackId, target.soundingPitch)
+      }
+    } else {
+      const activeTrackId = state.activeTrackId
+      if (activeTrackId) {
+        audioEngine.releaseLiveNote(activeTrackId, stepPending ? stepPending.pitch : pitch)
+      }
     }
 
     // --- STEP RECORDING MODE ---
@@ -222,7 +275,6 @@ class RecordingEngine {
 
       if (state.stepRecordAdvanceMode === 'release') {
         if (this.stepHeldKeys.size === 0 && this.stepChordNotes.size > 0) {
-          // All keys of chord released! Use small debounce window so slightly unsynced finger releases don't fragment
           if (this.stepReleaseDebounceTimer) clearTimeout(this.stepReleaseDebounceTimer)
           const debounceMs = Math.min(80, Math.max(25, Math.round(state.stepRecordChordSensitivityMs * 0.4)))
           this.stepReleaseDebounceTimer = setTimeout(() => {
@@ -236,13 +288,12 @@ class RecordingEngine {
     }
 
     if (!pending) return
-    this.activeMidiNotes.delete(pitch)
+    this.activeMidiNotes.delete(noteKey)
 
     const nowMs = performance.now()
     const rawEnd = Tone.Transport.ticks
     let time = pending.time
     let end = rawEnd
-    let finalPitch = pending.pitch
     const durationMs = Math.max(30, nowMs - pending.wallTimeMs)
 
     // Calculate duration in ticks (using real elapsed ms if transport was paused)
@@ -263,22 +314,10 @@ class RecordingEngine {
       duration = Math.max(state.snapResolution, end - time)
     }
 
-    // 2. Scale Conformance (for standard 12-TET tracks)
-    const activeTrack = state.tracks.find(t => t.id === trackId)
-    const effectiveScale = activeTrack?.scaleOverride || state.scaleLock
-    if ((state.recordScaleConform || state.scaleLock.enabled) && activeTrack?.instrument === 'synth' && effectiveScale.enabled && (!activeTrack.edoDivision || activeTrack.edoDivision === 12)) {
-      finalPitch = snapToScale(finalPitch, effectiveScale.root, effectiveScale.mode, effectiveScale.customIntervals)
-    }
-
-    const { synthLowerOctave, synthUpperOctave } = state
-    const lowestPitch = (synthLowerOctave + 1) * 12
-    const highestPitch = (synthUpperOctave + 1) * 12 + 11
-    finalPitch = Math.max(lowestPitch, Math.min(highestPitch, finalPitch))
-    finalPitch = Math.round(finalPitch * 1000) / 1000
-
-    // 3. Retrospective Circular Buffer (always records every note)
+    // 2. Retrospective Circular Buffer (always records every note)
+    const primaryPitch = pending.targetTracks[0]?.soundingPitch ?? pending.pitch
     this.retrospectiveBuffer.push({
-      pitch: finalPitch,
+      pitch: primaryPitch,
       velocity: pending.velocity,
       startTick: Math.max(0, time),
       duration,
@@ -292,16 +331,18 @@ class RecordingEngine {
     this.retrospectiveBuffer = this.retrospectiveBuffer.filter(n => n.timestamp >= cutoff).slice(-400)
     state.setRetrospectiveNoteCount(this.retrospectiveBuffer.length)
 
-    // 4. Live Recording onto Track
-    if (state.isRecording && trackId) {
-      state.addNote({
-        id: Math.random().toString(36).substr(2, 9),
-        trackId,
-        time: Math.max(0, time),
-        duration,
-        pitch: finalPitch,
-        velocity: pending.velocity
-      })
+    // 3. Live Recording onto Track(s)
+    if (state.isRecording) {
+      for (const target of pending.targetTracks) {
+        state.addNote({
+          id: Math.random().toString(36).substr(2, 9),
+          trackId: target.trackId,
+          time: Math.max(0, time),
+          duration,
+          pitch: target.soundingPitch,
+          velocity: pending.velocity
+        })
+      }
     }
   }
 

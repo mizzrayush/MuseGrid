@@ -4,8 +4,9 @@ import { useStore, type Track } from '../engine/store'
 import { SYNTH_PRESETS, SYNTH_PRESET_PARAMS, type SynthPreset } from '../utils/instruments'
 import { audioEngine } from '../engine/AudioEngine'
 import { saveFileWithDialog } from '../utils/fileExport'
-import { IconX, IconShuffle, IconZap, IconPlay, IconDownload, IconSync, IconUpload, IconWaveform, IconLoop } from './Icons'
+import { IconX, IconShuffle, IconZap, IconPlay, IconDownload, IconSync, IconUpload, IconWaveform, IconLoop, IconMic } from './Icons'
 import { CHROMATIC_SAMPLE_PRESETS, bufferToDataUri, type ChromaticSamplePreset } from '../utils/chromaticSamplePresets'
+import { QuickMicRecorder } from '../utils/micRecorder'
 import type { SynthSamplerConfig } from '../engine/store'
 import { evaluateMathExpression, MATH_FORMULA_PRESETS } from '../utils/mathWaveform'
 import {
@@ -230,6 +231,71 @@ export const SynthStudioModal: React.FC = () => {
       console.error('Sampler preset load failed:', err)
     }
   }, [commitSampler])
+
+  // Live Microphone Quick-Sampler (OP-1 / SP-404 style voice & acoustic instrument sampler)
+  const [isRecordingMic, setIsRecordingMic] = useState<boolean>(false)
+  const [micSeconds, setMicSeconds] = useState<number>(0)
+  const micRecorderRef = useRef<QuickMicRecorder | null>(null)
+  const micTimerRef = useRef<any>(null)
+
+  const stopMicRecording = useCallback(async () => {
+    if (micTimerRef.current) {
+      clearInterval(micTimerRef.current)
+      micTimerRef.current = null
+    }
+    if (!micRecorderRef.current) return
+
+    try {
+      const result = await micRecorderRef.current.stop()
+      setIsRecordingMic(false)
+      const base64Uri = await bufferToDataUri(result.buffer)
+      const assignedRoot = result.detectedMidiNote ?? 60
+      commitSampler({
+        name: `Mic Voice (${midiToNoteName(assignedRoot)})`,
+        audioBase64: base64Uri,
+        rootNote: assignedRoot
+      })
+      useStore.getState().showToast(
+        `Recorded live vocal/mic sample! Root mapped to ${midiToNoteName(assignedRoot)} (${result.durationSec.toFixed(2)}s)`,
+        'success'
+      )
+    } catch (err) {
+      console.error('Error stopping mic recording:', err)
+      setIsRecordingMic(false)
+    }
+  }, [commitSampler])
+
+  const startMicRecording = useCallback(async () => {
+    try {
+      if (!micRecorderRef.current) {
+        micRecorderRef.current = new QuickMicRecorder()
+      }
+      await micRecorderRef.current.start()
+      setIsRecordingMic(true)
+      setMicSeconds(0)
+      if (micTimerRef.current) clearInterval(micTimerRef.current)
+      micTimerRef.current = setInterval(() => {
+        setMicSeconds(s => {
+          if (s >= 15) {
+            void stopMicRecording()
+            return s
+          }
+          return s + 1
+        })
+      }, 1000)
+    } catch (err: any) {
+      console.error('Microphone recording failed:', err)
+      useStore.getState().showToast('Could not access microphone. Please allow audio permission in settings.', 'error')
+      setIsRecordingMic(false)
+    }
+  }, [stopMicRecording])
+
+  useEffect(() => {
+    return () => {
+      if (micTimerRef.current) clearInterval(micTimerRef.current)
+      if (micRecorderRef.current) micRecorderRef.current.cancel()
+    }
+  }, [])
 
   // Decode the stored payload for the waveform display (engine cache avoids repeat work)
   useEffect(() => {
@@ -1750,7 +1816,7 @@ export const SynthStudioModal: React.FC = () => {
                 <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: '10px' }}>
                   <div>
                     <label style={{ fontSize: '10px', fontWeight: 700, color: '#888', textTransform: 'uppercase', marginBottom: '6px', display: 'block' }}>
-                      Audio File
+                      Audio File / Voice Mic
                     </label>
                     <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
                       <button
@@ -1770,6 +1836,28 @@ export const SynthStudioModal: React.FC = () => {
                         }}
                       >
                         <IconUpload size={12} color="#00e6ff" /> BROWSE
+                      </button>
+                      <button
+                        onClick={isRecordingMic ? stopMicRecording : startMicRecording}
+                        style={{
+                          background: isRecordingMic ? 'rgba(255, 77, 77, 0.22)' : 'rgba(255, 77, 77, 0.10)',
+                          border: `1px solid ${isRecordingMic ? '#ff4d4d' : 'rgba(255, 77, 77, 0.35)'}`,
+                          color: isRecordingMic ? '#ff4d4d' : '#ff8787',
+                          borderRadius: '6px',
+                          padding: '7px 12px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          fontSize: '11px',
+                          fontWeight: 800,
+                          cursor: 'pointer',
+                          boxShadow: isRecordingMic ? '0 0 12px rgba(255, 77, 77, 0.45)' : 'none',
+                          transition: 'all 0.15s ease'
+                        }}
+                        title={isRecordingMic ? "Click to stop recording and map voice chromatically" : "Record live voice or acoustic sound from microphone"}
+                      >
+                        <IconMic size={12} color={isRecordingMic ? '#ff4d4d' : '#ff8787'} />
+                        {isRecordingMic ? `STOP (${micSeconds}s)` : 'RECORD MIC'}
                       </button>
                       <input
                         ref={samplerFileInputRef}

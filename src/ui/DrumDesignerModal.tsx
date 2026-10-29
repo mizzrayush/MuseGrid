@@ -13,9 +13,11 @@ import {
   IconSync,
   IconUpload,
   IconTrash,
-  IconWaveform
+  IconWaveform,
+  IconMic
 } from './Icons'
 import { DRUM_SAMPLE_PRESETS, bufferToDataUri } from '../utils/drumSamplePresets'
+import { QuickMicRecorder } from '../utils/micRecorder'
 import { AppSlider } from './AppSlider'
 import {
   generateCurveLut,
@@ -388,6 +390,63 @@ export const DrumDesignerModal: React.FC = () => {
       useStore.getState().showToast('Could not load audio file. Ensure it is valid WAV/MP3.', 'error')
     }
   }
+
+  // Live Microphone Quick-Sampler (OP-1 / SP-404 style instant acoustic sampling)
+  const [isRecordingMic, setIsRecordingMic] = useState<boolean>(false)
+  const [micSeconds, setMicSeconds] = useState<number>(0)
+  const micRecorderRef = useRef<QuickMicRecorder | null>(null)
+  const micTimerRef = useRef<any>(null)
+
+  const stopMicRecording = async () => {
+    if (micTimerRef.current) {
+      clearInterval(micTimerRef.current)
+      micTimerRef.current = null
+    }
+    if (!micRecorderRef.current) return
+
+    try {
+      const result = await micRecorderRef.current.stop()
+      setIsRecordingMic(false)
+      const file = new File([result.blob], `Mic_Pad_${selectedPitch + 1}.wav`, { type: 'audio/wav' })
+      await handleLoadSampleFile(selectedPitch, file)
+      useStore.getState().showToast(`Recorded live mic sample onto Pad ${selectedPitch + 1} (${result.durationSec.toFixed(2)}s)`, 'success')
+    } catch (err) {
+      console.error('Error stopping mic recording:', err)
+      setIsRecordingMic(false)
+    }
+  }
+
+  const startMicRecording = async () => {
+    try {
+      if (!micRecorderRef.current) {
+        micRecorderRef.current = new QuickMicRecorder()
+      }
+      await micRecorderRef.current.start()
+      setIsRecordingMic(true)
+      setMicSeconds(0)
+      if (micTimerRef.current) clearInterval(micTimerRef.current)
+      micTimerRef.current = setInterval(() => {
+        setMicSeconds(s => {
+          if (s >= 10) {
+            void stopMicRecording()
+            return s
+          }
+          return s + 1
+        })
+      }, 1000)
+    } catch (err: any) {
+      console.error('Microphone recording failed:', err)
+      useStore.getState().showToast('Could not access microphone. Please allow audio permission in settings.', 'error')
+      setIsRecordingMic(false)
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      if (micTimerRef.current) clearInterval(micTimerRef.current)
+      if (micRecorderRef.current) micRecorderRef.current.cancel()
+    }
+  }, [])
 
   const handleLoadPresetSample = async (pitch: number, presetId: string) => {
     const preset = DRUM_SAMPLE_PRESETS.find(p => p.id === presetId)
@@ -1981,6 +2040,28 @@ export const DrumDesignerModal: React.FC = () => {
                   >
                     <IconUpload size={12} color="#fff" />
                     Load Sample
+                  </button>
+                  <button
+                    onClick={isRecordingMic ? stopMicRecording : startMicRecording}
+                    style={{
+                      padding: '5px 10px',
+                      borderRadius: '6px',
+                      background: isRecordingMic ? 'rgba(255, 77, 77, 0.22)' : 'rgba(255, 77, 77, 0.08)',
+                      border: `1px solid ${isRecordingMic ? '#ff4d4d' : 'rgba(255, 77, 77, 0.35)'}`,
+                      color: isRecordingMic ? '#ff4d4d' : '#ff8787',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      boxShadow: isRecordingMic ? '0 0 12px rgba(255, 77, 77, 0.45)' : 'none',
+                      transition: 'all 0.15s ease'
+                    }}
+                    title={isRecordingMic ? "Click to stop recording and assign to this drum pad" : "Record live sample from microphone onto this drum pad"}
+                  >
+                    <IconMic size={12} color={isRecordingMic ? '#ff4d4d' : '#ff8787'} />
+                    {isRecordingMic ? `Stop REC (${micSeconds}s)` : 'Record Mic'}
                   </button>
                   {currentPadMode === 'sample' && (
                     <button

@@ -939,6 +939,8 @@ export interface Track {
   envelopeCurveType?: string
   curveTension?: number
   curveFormula?: string
+  midiInputDevice?: string // 'all' (default) or specific MIDI device name
+  midiInputChannel?: number | 'all' // 'all' (default) or 1..16
 }
 
 export interface ScaleLock {

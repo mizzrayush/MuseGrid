@@ -10718,6 +10718,24 @@ for (let channel = 0; channel < input.length; channel++) {
                           <span onDoubleClick={e => { e.stopPropagation(); setEditingTrackId(track.id) }}>{track.name}</span>
                         )}
                       </span>
+                      {((track.midiInputDevice && track.midiInputDevice !== 'all') || (track.midiInputChannel && track.midiInputChannel !== 'all')) && (
+                        <span
+                          style={{
+                            fontSize: '8px',
+                            fontWeight: 800,
+                            padding: '1px 4px',
+                            borderRadius: '3px',
+                            background: 'rgba(77, 171, 247, 0.15)',
+                            color: '#4dabf7',
+                            border: '1px solid rgba(77, 171, 247, 0.3)',
+                            letterSpacing: '0.02em',
+                            whiteSpace: 'nowrap'
+                          }}
+                          title={`MIDI Input: ${track.midiInputDevice || 'All Devices'} · ${track.midiInputChannel && track.midiInputChannel !== 'all' ? `Ch ${track.midiInputChannel}` : 'All Channels'}`}
+                        >
+                          {track.midiInputChannel && track.midiInputChannel !== 'all' ? `CH ${track.midiInputChannel}` : 'MIDI'}
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div style={{ display: 'flex', gap: '4px' }}>
@@ -11203,6 +11221,89 @@ for (let channel = 0; channel < input.length; channel++) {
                                 <SliderRow label="Map Cycle" value={track.drumMapShift ?? 0} min={0} max={4} step={1} color="#ff9900" onChange={value => updateTrack(track.id, { drumMapShift: value })} />
                               </>
                             )}
+
+                            {/* MIDI Input Routing (Device & Channel) */}
+                            <div
+                              onMouseDown={e => e.stopPropagation()}
+                              onClick={e => e.stopPropagation()}
+                              onDragStart={e => e.stopPropagation()}
+                              style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.06)' }}
+                            >
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '5px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                                  <IconMidi size={11} color="#4dabf7" />
+                                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#aaa', textTransform: 'uppercase', letterSpacing: '0.04em' }}>MIDI Input</span>
+                                </div>
+                                <span style={{ fontSize: '9px', color: ((track.midiInputDevice && track.midiInputDevice !== 'all') || (track.midiInputChannel && track.midiInputChannel !== 'all')) ? '#4dabf7' : '#666', fontWeight: 600 }}>
+                                  {((track.midiInputDevice && track.midiInputDevice !== 'all') || (track.midiInputChannel && track.midiInputChannel !== 'all')) ? 'Dedicated' : 'Omni'}
+                                </span>
+                              </div>
+
+                              <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: '6px' }}>
+                                {/* Device Selector */}
+                                <div>
+                                  <span style={{ fontSize: '9px', color: 'var(--text-muted)', display: 'block', marginBottom: '3px' }}>Device</span>
+                                  <StopPropSelect
+                                    value={track.midiInputDevice || 'all'}
+                                    onChange={e => updateTrack(track.id, { midiInputDevice: e.target.value })}
+                                    style={{
+                                      width: '100%',
+                                      background: '#12141c',
+                                      color: (track.midiInputDevice && track.midiInputDevice !== 'all') ? '#4dabf7' : '#ccc',
+                                      border: '1px solid rgba(255,255,255,0.12)',
+                                      borderRadius: '4px',
+                                      padding: '4px 6px',
+                                      fontSize: '10px',
+                                      outline: 'none',
+                                      cursor: 'pointer'
+                                    }}
+                                    title="Select MIDI Input Device for this track"
+                                  >
+                                    <option value="all" style={{ background: '#12141c', color: '#ccc' }}>All Devices (Omni)</option>
+                                    {Array.from(new Set([
+                                      ...(track.midiInputDevice && track.midiInputDevice !== 'all' ? [track.midiInputDevice] : []),
+                                      ...activeMidiDeviceNames
+                                    ])).map(devName => (
+                                      <option key={devName} value={devName} style={{ background: '#12141c', color: '#4dabf7' }}>
+                                        {activeMidiDeviceNames.includes(devName) ? devName : `${devName} (Offline)`}
+                                      </option>
+                                    ))}
+                                  </StopPropSelect>
+                                </div>
+
+                                {/* Channel Selector */}
+                                <div>
+                                  <span style={{ fontSize: '9px', color: 'var(--text-muted)', display: 'block', marginBottom: '3px' }}>Channel</span>
+                                  <StopPropSelect
+                                    value={track.midiInputChannel !== undefined ? String(track.midiInputChannel) : 'all'}
+                                    onChange={e => {
+                                      const val = e.target.value
+                                      updateTrack(track.id, { midiInputChannel: val === 'all' ? 'all' : parseInt(val, 10) })
+                                    }}
+                                    style={{
+                                      width: '100%',
+                                      background: '#12141c',
+                                      color: (track.midiInputChannel && track.midiInputChannel !== 'all') ? '#4dabf7' : '#ccc',
+                                      border: '1px solid rgba(255,255,255,0.12)',
+                                      borderRadius: '4px',
+                                      padding: '4px 6px',
+                                      fontSize: '10px',
+                                      outline: 'none',
+                                      cursor: 'pointer'
+                                    }}
+                                    title="Select MIDI Channel (1 - 16 or All)"
+                                  >
+                                    <option value="all" style={{ background: '#12141c', color: '#ccc' }}>All Ch (Omni)</option>
+                                    {Array.from({ length: 16 }, (_, i) => i + 1).map(ch => (
+                                      <option key={ch} value={String(ch)} style={{ background: '#12141c', color: '#4dabf7' }}>
+                                        Ch {ch}
+                                      </option>
+                                    ))}
+                                  </StopPropSelect>
+                                </div>
+                              </div>
+                            </div>
+
                             <details style={{ marginTop: '8px', marginBottom: '8px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
                               <summary style={{ fontSize: '9px', color: '#555', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', cursor: 'pointer', userSelect: 'none', outline: 'none' }}>
                                 ▶ Effects Signal Chain

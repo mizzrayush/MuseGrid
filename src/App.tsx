@@ -137,6 +137,8 @@ function App() {
   const [drumSequencerMode, setDrumSequencerMode] = useState(false)
   const [synthScoreMode, setSynthScoreMode] = useState(false)
   const [showExportMenu, setShowExportMenu] = useState(false)
+  const saveContainerRef = useRef<HTMLDivElement>(null)
+  const exportContainerRef = useRef<HTMLDivElement>(null)
   const isScorePreviewVisible = useStore(s => s.isScorePreviewVisible)
   const setIsScorePreviewVisible = useStore(s => s.setIsScorePreviewVisible)
   const [showNewProjectConfirm, setShowNewProjectConfirm] = useState(false)
@@ -251,13 +253,17 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const handleClickOutside = () => {
-      if (showExportMenu) setShowExportMenu(false)
-      if (showSaveMenu) setShowSaveMenu(false)
+    const handleClickOutside = (e: MouseEvent) => {
+      if (exportContainerRef.current && !exportContainerRef.current.contains(e.target as Node)) {
+        setShowExportMenu(false)
+      }
+      if (saveContainerRef.current && !saveContainerRef.current.contains(e.target as Node)) {
+        setShowSaveMenu(false)
+      }
     }
     window.addEventListener('click', handleClickOutside)
     return () => window.removeEventListener('click', handleClickOutside)
-  }, [showExportMenu, showSaveMenu])
+  }, [])
 
   useEffect(() => {
     document.title = `MuseGrid - ${projectName || 'Untitled'}${isDirty ? '*' : ''}`
@@ -876,7 +882,7 @@ function App() {
           overflow: 'hidden'
         }}>
           {/* Top Header / Studio Pro Transport Deck */}
-          <div className="glass-panel" style={{ height: '54px', width: '100%', maxWidth: '100vw', boxSizing: 'border-box', overflow: 'hidden', position: 'relative', display: 'flex', alignItems: 'center', padding: '0 12px', gap: '8px', borderBottom: '1px solid rgba(255, 255, 255, 0.06)', zIndex: 100 }}>
+          <div className="glass-panel" style={{ height: '54px', width: '100%', maxWidth: '100vw', boxSizing: 'border-box', overflow: 'visible', position: 'relative', display: 'flex', alignItems: 'center', padding: '0 12px', gap: '8px', borderBottom: '1px solid rgba(255, 255, 255, 0.06)', zIndex: 100 }}>
             
             {/* Left Header Section: Brand + Project Tabs Strip */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: '0 1 auto', overflow: 'hidden' }}>
@@ -1085,7 +1091,7 @@ function App() {
         {/* Right Workspace Controls */}
         <div style={{ display: 'flex', gap: '7px', marginLeft: 'auto', alignItems: 'center', flexShrink: 0 }}>
           {/* Save */}
-          <div style={{ position: 'relative', display: 'flex' }} onClick={e => e.stopPropagation()}>
+          <div ref={saveContainerRef} style={{ position: 'relative', display: 'flex' }}>
             <div style={{ display: 'flex', alignItems: 'stretch', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px' }}>
               <button
                 style={{ display: 'flex', alignItems: 'center', gap: '5px', background: 'transparent', color: '#d0d5e2', borderRadius: projectFilePath ? '5px 0 0 5px' : '6px', padding: '5px 10px', cursor: 'pointer', fontSize: '11px', fontWeight: 600, border: 'none', transition: 'all 0.12s' }}
@@ -1167,7 +1173,7 @@ function App() {
           </button>
 
           {/* Consolidated Export Mix */}
-          <div style={{ position: 'relative', display: 'flex' }} onClick={e => e.stopPropagation()}>
+          <div ref={exportContainerRef} style={{ position: 'relative', display: 'flex' }}>
             <button
               onClick={() => !isExporting && setShowExportMenu(!showExportMenu)}
               disabled={isExporting}

@@ -1259,17 +1259,33 @@ export class ChromaticSampler {
       return
     }
     const ctx = this.ctx
-    fetch(uri)
-      .then(r => r.arrayBuffer())
-      .then(ab => ctx.decodeAudioData(ab))
-      .then(decoded => {
-        if (this.disposed) return
-        ChromaticSampler.bufferCache.set(uri, decoded)
-        this.buffer = decoded
-        this.reversed = null
-        this.loadedUri = uri
-      })
-      .catch(e => console.warn('Chromatic sampler decode failed:', e))
+    try {
+      let arrayBufferPromise: Promise<ArrayBuffer>
+      if (uri.startsWith('data:')) {
+        const base64Str = uri.split(',')[1] || uri
+        const binary = atob(base64Str)
+        const len = binary.length
+        const bytes = new Uint8Array(len)
+        for (let i = 0; i < len; i++) {
+          bytes[i] = binary.charCodeAt(i)
+        }
+        arrayBufferPromise = Promise.resolve(bytes.buffer)
+      } else {
+        arrayBufferPromise = fetch(uri).then(r => r.arrayBuffer())
+      }
+      arrayBufferPromise
+        .then(ab => ctx.decodeAudioData(ab))
+        .then(decoded => {
+          if (this.disposed) return
+          ChromaticSampler.bufferCache.set(uri, decoded)
+          this.buffer = decoded
+          this.reversed = null
+          this.loadedUri = uri
+        })
+        .catch(e => console.warn('Chromatic sampler decode failed:', e))
+    } catch (e) {
+      console.warn('Chromatic sampler processing failed:', e)
+    }
   }
 
   private getReversed(): AudioBuffer {
@@ -3677,8 +3693,22 @@ class AudioEngine {
     const cached = ChromaticSampler.peek(dataUri)
     if (cached) return cached
     try {
-      const ab = await (await fetch(dataUri)).arrayBuffer()
-      return await ctx.decodeAudioData(ab)
+      let ab: ArrayBuffer
+      if (dataUri.startsWith('data:')) {
+        const base64Str = dataUri.split(',')[1] || dataUri
+        const binary = atob(base64Str)
+        const len = binary.length
+        const bytes = new Uint8Array(len)
+        for (let i = 0; i < len; i++) {
+          bytes[i] = binary.charCodeAt(i)
+        }
+        ab = bytes.buffer
+      } else {
+        ab = await (await fetch(dataUri)).arrayBuffer()
+      }
+      const decoded = await ctx.decodeAudioData(ab)
+      if (decoded) ChromaticSampler.bufferCache.set(dataUri, decoded)
+      return decoded
     } catch (e) {
       console.warn('Synth sampler buffer decode failed:', e)
       return null

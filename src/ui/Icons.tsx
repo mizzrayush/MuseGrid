@@ -93,25 +93,38 @@ export const IconMuseLogo = ({ size = 24, style, className }: { size?: number; s
   >
     <defs>
       <linearGradient id="mg-logo-bg" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
-        <stop offset="0%" stopColor="#1e202e" />
-        <stop offset="100%" stopColor="#101118" />
+        <stop offset="0%" stopColor="#181a24" />
+        <stop offset="100%" stopColor="#0c0e15" />
       </linearGradient>
-      <linearGradient id="mg-bar-grad1" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stopColor="#00e6ff" />
-        <stop offset="100%" stopColor="#0077ff" />
+      <linearGradient id="mg-logo-rim" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
+        <stop offset="0%" stopColor="#10edf5" />
+        <stop offset="48%" stopColor="#6741d9" />
+        <stop offset="100%" stopColor="#fd00f1" />
       </linearGradient>
-      <linearGradient id="mg-bar-grad2" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stopColor="#ff3366" />
-        <stop offset="100%" stopColor="#ff6b3b" />
+      <linearGradient id="mg-pad-cyan" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stopColor="#18f5fb" />
+        <stop offset="100%" stopColor="#0088ff" />
+      </linearGradient>
+      <linearGradient id="mg-pad-red" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stopColor="#ff1493" />
+        <stop offset="100%" stopColor="#fd00f1" />
       </linearGradient>
     </defs>
-    <rect x="2" y="2" width="20" height="20" rx="5" fill="url(#mg-logo-bg)" stroke="rgba(255,255,255,0.15)" strokeWidth="0.8" />
-    <rect x="5.5" y="10" width="2.5" height="8" rx="1.25" fill="url(#mg-bar-grad1)" />
-    <rect x="9.5" y="5.5" width="2.5" height="12.5" rx="1.25" fill="url(#mg-bar-grad1)" />
-    <rect x="13.5" y="8" width="2.5" height="10" rx="1.25" fill="url(#mg-bar-grad2)" />
-    <rect x="17.5" y="12" width="2.5" height="6" rx="1.25" fill="url(#mg-bar-grad2)" />
-    <circle cx="6.75" cy="6.5" r="1.2" fill="#00e6ff" opacity="0.9" />
-    <circle cx="18.75" cy="8.5" r="1.2" fill="#ff3366" opacity="0.9" />
+    {/* Squircle Chassis with Glowing Dual-Tone Neon Perimeter Rim */}
+    <rect x="2" y="2" width="20" height="20" rx="5.5" fill="url(#mg-logo-bg)" stroke="url(#mg-logo-rim)" strokeWidth="1.1" />
+
+    {/* 4-Pad Asymmetric Bento Grid (Concept 2A) */}
+    {/* Top-Left: Large vertical cyan pad */}
+    <rect x="4.5" y="4.5" width="6.8" height="9.2" rx="2" fill="url(#mg-pad-cyan)" />
+    
+    {/* Bottom-Left: Horizontal neon magenta-red pad */}
+    <rect x="4.5" y="14.7" width="6.8" height="4.8" rx="1.8" fill="url(#mg-pad-red)" />
+    
+    {/* Top-Right: Horizontal neon magenta-red pad */}
+    <rect x="12.7" y="4.5" width="6.8" height="4.8" rx="1.8" fill="url(#mg-pad-red)" />
+    
+    {/* Bottom-Right: Tall vertical cyan pad */}
+    <rect x="12.7" y="10.3" width="6.8" height="9.2" rx="2" fill="url(#mg-pad-cyan)" />
   </svg>
 )
 

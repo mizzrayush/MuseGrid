@@ -14,6 +14,7 @@ export const SYNTH_PRESETS: Array<{ value: SynthPreset; label: string }> = [
   { value: 'glass', label: 'Glass' },
   { value: 'physical', label: 'Physical Modeling' },
   { value: 'vocal', label: 'Vocal/Singing Synth' },
+  { value: 'custom', label: 'Custom Synth (Studio)' },
 ]
 
 export interface SynthPresetParams {
@@ -49,6 +50,7 @@ export const DRUM_KITS: Array<{ value: DrumKit; label: string }> = [
   { value: 'electro', label: 'Electric Drum' },
   { value: 'eightOhEight', label: '808' },
   { value: 'tabla', label: 'Tabla' },
+  { value: 'custom', label: 'Custom Kit (Studio)' },
 ]
 
 export const DEFAULT_SYNTH_PRESET: SynthPreset = 'warm'

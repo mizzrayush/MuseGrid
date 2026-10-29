@@ -4,7 +4,7 @@ import { useStore, type Track } from '../engine/store'
 import { SYNTH_PRESETS, SYNTH_PRESET_PARAMS, type SynthPreset } from '../utils/instruments'
 import { audioEngine } from '../engine/AudioEngine'
 import { saveFileWithDialog } from '../utils/fileExport'
-import { IconX, IconShuffle, IconZap, IconPlay, IconDownload, IconSync, IconUpload, IconWaveform, IconLoop, IconMic } from './Icons'
+import { IconX, IconShuffle, IconZap, IconPlay, IconDownload, IconSync, IconUpload, IconWaveform, IconLoop, IconMic, IconSave } from './Icons'
 import { CHROMATIC_SAMPLE_PRESETS, bufferToDataUri, type ChromaticSamplePreset } from '../utils/chromaticSamplePresets'
 import { QuickMicRecorder } from '../utils/micRecorder'
 import type { SynthSamplerConfig } from '../engine/store'
@@ -16,6 +16,28 @@ import {
   type EnvelopeCurveType
 } from '../utils/envelopeCurves'
 import { AppSlider } from './AppSlider'
+
+const reversedBufferCache = new WeakMap<AudioBuffer, AudioBuffer>()
+function getReversedAudioBuffer(audioCtx: AudioContext, buffer: AudioBuffer): AudioBuffer {
+  const cached = reversedBufferCache.get(buffer)
+  if (cached) return cached
+
+  const reversed = audioCtx.createBuffer(
+    buffer.numberOfChannels,
+    buffer.length,
+    buffer.sampleRate
+  )
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const src = buffer.getChannelData(ch)
+    const dst = reversed.getChannelData(ch)
+    const len = src.length
+    for (let i = 0; i < len; i++) {
+      dst[i] = src[len - 1 - i]
+    }
+  }
+  reversedBufferCache.set(buffer, reversed)
+  return reversed
+}
 
 const KEYBOARD_NOTES = [
   { note: 'C3', midi: 48, isBlack: false },
@@ -191,21 +213,19 @@ export const SynthStudioModal: React.FC = () => {
   const samplerCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const samplerDragEdge = useRef<'start' | 'end' | null>(null)
 
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState<boolean>(false)
+  const lastLoadedTrackIdRef = useRef<string | null>(null)
+
   const commitSampler = useCallback((updates: Partial<SynthSamplerConfig>) => {
-    if (!targetTrack) return
-    const next: SynthSamplerConfig = { ...DEFAULT_SAMPLER, ...targetTrack.synthSampler, ...updates }
-    setSampler(next)
+    setSampler(prev => ({ ...prev, ...updates }))
     setSamplerMode(true)
-    updateTrack(targetTrack.id, { synthMode: 'sampler', synthSampler: next })
-    audioEngine.createInstrument(targetTrack.id, 'synth')
-  }, [targetTrack, updateTrack])
+    setHasUnsavedChanges(true)
+  }, [])
 
   const setStudioMode = useCallback((mode: 'synth' | 'sampler') => {
-    if (!targetTrack) return
     setSamplerMode(mode === 'sampler')
-    updateTrack(targetTrack.id, { synthMode: mode })
-    audioEngine.createInstrument(targetTrack.id, 'synth')
-  }, [targetTrack, updateTrack])
+    setHasUnsavedChanges(true)
+  }, [])
 
   const loadSamplerFile = useCallback(async (file: File) => {
     try {
@@ -397,8 +417,18 @@ export const SynthStudioModal: React.FC = () => {
 
 
   // Sync with track when modal opens or targetTrack changes
+  // Sync with track when modal opens or targetTrack ID changes
   useEffect(() => {
-    if (!targetTrack) return
+    if (!isVisible || !targetTrack) {
+      if (!isVisible) {
+        lastLoadedTrackIdRef.current = null
+      }
+      return
+    }
+    if (lastLoadedTrackIdRef.current === targetTrack.id) return
+    lastLoadedTrackIdRef.current = targetTrack.id
+    setHasUnsavedChanges(false)
+
     if (targetTrack.synthOscillator) setOscType(targetTrack.synthOscillator)
     if (targetTrack.synthFormula) setSynthFormula(targetTrack.synthFormula)
     if (targetTrack.synthPartialsCount) setSynthPartialsCount(targetTrack.synthPartialsCount)
@@ -415,13 +445,7 @@ export const SynthStudioModal: React.FC = () => {
     if (targetTrack.synthDecayFormula) setDecayFormula(targetTrack.synthDecayFormula)
     setSamplerMode(targetTrack.synthMode === 'sampler')
     setSampler({ ...DEFAULT_SAMPLER, ...(targetTrack.synthSampler || {}) })
-  }, [targetTrack, isVisible])
-
-  // Dispatch curve updates to C++ Native Audio Engine
-  useEffect(() => {
-    if (!targetTrack) return
-    audioEngine.setTrackCurve(targetTrack.id, decayCurveType, decayTension, currentCurveLut)
-  }, [targetTrack?.id, decayCurveType, decayTension, currentCurveLut])
+  }, [isVisible, targetTrack?.id])
 
   // ESC key to close
   useEffect(() => {
@@ -434,59 +458,56 @@ export const SynthStudioModal: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [isVisible, setIsVisible])
 
-  // Commit changes to Track & AudioEngine
-  const applySettingsToTrack = useCallback((updates: Partial<Track>) => {
-    if (!targetTrack) return
-    const customUpdates = {
-      ...updates,
-      synthPreset: (updates.synthPreset || 'custom') as SynthPreset
-    }
-    updateTrack(targetTrack.id, customUpdates)
-    audioEngine.createInstrument(targetTrack.id, 'synth')
+  // Local state edit tracker (Testing mode)
+  const applySettingsToTrack = useCallback((_updates: Partial<Track>) => {
+    setHasUnsavedChanges(true)
+  }, [])
 
-    // Live dispatch to native JUCE audio engine
-    if (updates.synthOscillator !== undefined) {
-      audioEngine.setTrackSynthParam(targetTrack.id, 'oscType', updates.synthOscillator)
-    }
-    if (updates.synthAttack !== undefined) {
-      audioEngine.setTrackSynthParam(targetTrack.id, 'attack', updates.synthAttack)
-    }
-    if (updates.synthDecay !== undefined) {
-      audioEngine.setTrackSynthParam(targetTrack.id, 'decay', updates.synthDecay)
-    }
-    if (updates.synthSustain !== undefined) {
-      audioEngine.setTrackSynthParam(targetTrack.id, 'sustain', updates.synthSustain)
-    }
-    if (updates.synthRelease !== undefined) {
-      audioEngine.setTrackSynthParam(targetTrack.id, 'release', updates.synthRelease)
-    }
-    if (updates.synthPreset !== undefined) {
-      audioEngine.setTrackSynthParam(targetTrack.id, 'synthPreset', updates.synthPreset)
-    }
-  }, [targetTrack, updateTrack])
-
-  // A preset rewrites the engine's oscillator and envelope, so the controls and graphs must
-  // adopt those values too - storing only the preset name left the studio showing the old patch.
+  // A preset rewrites the engine's oscillator and envelope
   const applyPreset = useCallback((preset: SynthPreset) => {
     const params = SYNTH_PRESET_PARAMS[preset]
-    if (!params) {
-      applySettingsToTrack({ synthPreset: preset })
-      return
-    }
+    if (!params) return
     setOscType(params.oscillator)
     setAttack(params.attack)
     setDecay(params.decay)
     setSustain(params.sustain)
     setRelease(params.release)
-    applySettingsToTrack({
-      synthPreset: preset,
-      synthOscillator: params.oscillator,
-      synthAttack: params.attack,
-      synthDecay: params.decay,
-      synthSustain: params.sustain,
-      synthRelease: params.release
+    setHasUnsavedChanges(true)
+  }, [])
+
+  // Save studio edits to project track
+  const handleSaveToTrack = () => {
+    if (!targetTrack) return
+
+    updateTrack(targetTrack.id, {
+      synthPreset: 'custom',
+      synthMode: samplerMode ? 'sampler' : 'synth',
+      synthOscillator: oscType,
+      synthFormula: oscType === 'custom' ? synthFormula : undefined,
+      synthPartialsCount: oscType === 'custom' ? synthPartialsCount : undefined,
+      synthAttack: attack,
+      synthDecay: decay,
+      synthSustain: sustain,
+      synthRelease: release,
+      synthFilterFreq: filterFreq,
+      synthFilterQ: filterQ,
+      synthPortamento: portamento,
+      synthDetune: fineDetune,
+      synthDecayCurveType: decayCurveType,
+      synthDecayTension: decayTension,
+      synthDecayFormula: decayFormula,
+      synthSampler: samplerMode ? { ...sampler } : undefined
     })
-  }, [applySettingsToTrack])
+
+    audioEngine.createInstrument(targetTrack.id, 'synth')
+    audioEngine.setTrackCurve(targetTrack.id, decayCurveType, decayTension, currentCurveLut)
+    if (samplerMode && sampler.sampleUri) {
+      audioEngine.setTrackSamplerConfig(targetTrack.id, sampler)
+    }
+
+    setHasUnsavedChanges(false)
+    useStore.getState().showToast(`Saved custom synth sound to track "${targetTrack.name}"!`, 'success')
+  }
 
   // --- Waveform Animation ---
   useEffect(() => {
@@ -857,8 +878,31 @@ export const SynthStudioModal: React.FC = () => {
     setActiveKey(note)
     const effectiveMidi = KEYBOARD_NOTES.find(k => k.note === note)?.midi || 60
     const shiftedMidi = effectiveMidi + octave * 12 + semitone
-    const noteSound = Tone.Frequency(shiftedMidi, 'midi').toNote()
-    audioEngine.playNote(targetTrack.id, 'synth', noteSound, '8n', undefined, 1, undefined, fineDetune)
+
+    if (samplerMode && samplerBuffer) {
+      try {
+        const audioCtx = Tone.getContext().rawContext as AudioContext
+        const bufferToPlay = sampler.reverse ? getReversedAudioBuffer(audioCtx, samplerBuffer) : samplerBuffer
+        const source = audioCtx.createBufferSource()
+        source.buffer = bufferToPlay
+        const semitoneDiff = shiftedMidi - (sampler.rootNote ?? 60) + (sampler.detune ?? 0) / 100 + fineDetune / 100
+        source.playbackRate.value = Math.pow(2, semitoneDiff / 12)
+        const gainNode = audioCtx.createGain()
+        gainNode.gain.setValueAtTime(0.001, audioCtx.currentTime)
+        gainNode.gain.linearRampToValueAtTime(0.9, audioCtx.currentTime + 0.02)
+        gainNode.gain.linearRampToValueAtTime(0.001, audioCtx.currentTime + 0.8)
+        source.connect(gainNode)
+        gainNode.connect(audioCtx.destination)
+        const startSec = Math.max(0, Math.min(bufferToPlay.duration - 0.001, sampler.startOffset * bufferToPlay.duration))
+        source.start(audioCtx.currentTime, startSec, 0.8)
+      } catch (err) {
+        console.warn('Sampler audition error:', err)
+      }
+    } else {
+      const noteSound = Tone.Frequency(shiftedMidi, 'midi').toNote()
+      audioEngine.playNote(targetTrack.id, 'synth', noteSound, '8n', undefined, 1, undefined, fineDetune)
+    }
+
     setTimeout(() => setActiveKey(null), 250)
   }
 
@@ -906,17 +950,37 @@ export const SynthStudioModal: React.FC = () => {
     const notes = [60, 64, 67, 72] // C4, E4, G4, C5 arpeggio
     notes.forEach((midi, idx) => {
       setTimeout(() => {
-        const noteSound = Tone.Frequency(midi + octave * 12 + semitone, 'midi').toNote()
-        audioEngine.playNote(
-          targetTrack.id,
-          'synth',
-          noteSound,
-          '8n',
-          undefined,
-          0.85,
-          undefined,
-          fineDetune
-        )
+        const shiftedMidi = midi + octave * 12 + semitone
+        if (samplerMode && samplerBuffer) {
+          try {
+            const audioCtx = Tone.getContext().rawContext as AudioContext
+            const bufferToPlay = sampler.reverse ? getReversedAudioBuffer(audioCtx, samplerBuffer) : samplerBuffer
+            const source = audioCtx.createBufferSource()
+            source.buffer = bufferToPlay
+            const semitoneDiff = shiftedMidi - (sampler.rootNote ?? 60) + (sampler.detune ?? 0) / 100 + fineDetune / 100
+            source.playbackRate.value = Math.pow(2, semitoneDiff / 12)
+            const gainNode = audioCtx.createGain()
+            gainNode.gain.setValueAtTime(0.001, audioCtx.currentTime)
+            gainNode.gain.linearRampToValueAtTime(0.85, audioCtx.currentTime + 0.02)
+            gainNode.gain.linearRampToValueAtTime(0.001, audioCtx.currentTime + 0.45)
+            source.connect(gainNode)
+            gainNode.connect(audioCtx.destination)
+            const startSec = Math.max(0, Math.min(bufferToPlay.duration - 0.001, sampler.startOffset * bufferToPlay.duration))
+            source.start(audioCtx.currentTime, startSec, 0.45)
+          } catch (_) {}
+        } else {
+          const noteSound = Tone.Frequency(shiftedMidi, 'midi').toNote()
+          audioEngine.playNote(
+            targetTrack.id,
+            'synth',
+            noteSound,
+            '8n',
+            undefined,
+            0.85,
+            undefined,
+            fineDetune
+          )
+        }
       }, idx * 130)
     })
   }
@@ -971,26 +1035,10 @@ export const SynthStudioModal: React.FC = () => {
     setFilterQ(2.5)
     setFilterType('lowpass')
     setPortamento(0)
-    if (targetTrack) {
-      updateTrack(targetTrack.id, {
-        synthPreset: 'piano',
-        synthOscillator: 'triangle',
-        synthAttack: 0.004,
-        synthDecay: 0.28,
-        synthSustain: 0.16,
-        synthRelease: 0.36,
-        synthDecayCurveType: 'exponential',
-        synthDecayTension: 0,
-        synthDecayFormula: 'exp(-4.8 * x)',
-        synthFilterFreq: 2500,
-        synthFilterQ: 2.5,
-        synthPortamento: 0,
-        synthDetune: 0,
-        transpose: 0
-      })
-      audioEngine.createInstrument(targetTrack.id, 'synth')
-      useStore.getState().showToast('Reset synth to factory defaults', 'info')
-    }
+    setSamplerMode(false)
+    setSampler({ ...DEFAULT_SAMPLER })
+    setHasUnsavedChanges(true)
+    useStore.getState().showToast('Reset working synth to defaults (Click "Save to Track" to apply)', 'info')
   }
 
   if (!isVisible) return null
@@ -1140,6 +1188,31 @@ export const SynthStudioModal: React.FC = () => {
               onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)' }}
             >
               <IconPlay size={12} fill="#fff" /> PREVIEW
+            </button>
+
+            {/* Save to Track / Testing Mode Button */}
+            <button
+              onClick={handleSaveToTrack}
+              title="Save all custom synth/sampler settings to the project track"
+              style={{
+                background: hasUnsavedChanges ? 'rgba(0, 230, 255, 0.18)' : 'rgba(105, 219, 124, 0.12)',
+                border: `1px solid ${hasUnsavedChanges ? '#00e6ff' : '#69db7c'}`,
+                color: hasUnsavedChanges ? '#00e6ff' : '#69db7c',
+                borderRadius: '6px',
+                padding: '6px 14px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                fontSize: '11px',
+                fontWeight: 800,
+                letterSpacing: '0.04em',
+                cursor: 'pointer',
+                boxShadow: hasUnsavedChanges ? '0 0 12px rgba(0, 230, 255, 0.35)' : 'none',
+                transition: 'all 0.15s ease'
+              }}
+            >
+              <IconSave size={13} color={hasUnsavedChanges ? '#00e6ff' : '#69db7c'} />
+              {hasUnsavedChanges ? 'SAVE TO TRACK ●' : 'SAVED TO TRACK ✓'}
             </button>
 
             {/* Reset to Default Button */}

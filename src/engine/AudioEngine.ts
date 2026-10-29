@@ -4691,24 +4691,10 @@ class AudioEngine {
       drum.padSamples[pitch] = sample
       drum.padModes[pitch] = 'sample'
 
-      const existingSamples = track.drumPadSamples || {}
-      const existingModes = track.drumPadModes || {}
-      state.updateTrack(trackId, {
-        drumPadSamples: { ...existingSamples, [pitch]: sample },
-        drumPadModes: { ...existingModes, [pitch]: 'sample' }
-      })
     } else {
       drum.padAudioBuffers.delete(pitch)
       delete drum.padSamples[pitch]
       drum.padModes[pitch] = 'synth'
-
-      const existingSamples = { ...(track.drumPadSamples || {}) }
-      delete existingSamples[pitch]
-      const existingModes = { ...(track.drumPadModes || {}), [pitch]: 'synth' as const }
-      state.updateTrack(trackId, {
-        drumPadSamples: existingSamples,
-        drumPadModes: existingModes
-      })
     }
   }
 
@@ -4727,10 +4713,6 @@ class AudioEngine {
       this.drums.set(trackId, drum)
     }
     drum.padModes[pitch] = mode
-    const existingModes = track.drumPadModes || {}
-    state.updateTrack(trackId, {
-      drumPadModes: { ...existingModes, [pitch]: mode }
-    })
   }
 
   setTrackDrumKit(trackId: string, kit: DrumKit) {

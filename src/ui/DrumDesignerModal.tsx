@@ -14,7 +14,8 @@ import {
   IconUpload,
   IconTrash,
   IconWaveform,
-  IconMic
+  IconMic,
+  IconSave
 } from './Icons'
 import { DRUM_SAMPLE_PRESETS, bufferToDataUri } from '../utils/drumSamplePresets'
 import { QuickMicRecorder } from '../utils/micRecorder'
@@ -236,53 +237,101 @@ export const DrumDesignerModal: React.FC = () => {
   const isDraggingDrumGraph = useRef<'decay' | 'punch' | null>(null)
   const [canvasCursor, setCanvasCursor] = useState<'default' | 'ew-resize' | 'ns-resize' | 'pointer'>('default')
 
-  // Sync state from targetTrack
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState<boolean>(false)
+  const lastLoadedTrackIdRef = useRef<string | null>(null)
+
+  // Sync state from targetTrack ONLY once when modal opens or track ID changes
   useEffect(() => {
-    if (!targetTrack) return
+    if (!isVisible || !targetTrack) {
+      if (!isVisible) {
+        lastLoadedTrackIdRef.current = null
+      }
+      return
+    }
+
+    if (lastLoadedTrackIdRef.current === targetTrack.id) return
+    lastLoadedTrackIdRef.current = targetTrack.id
+    setHasUnsavedChanges(false)
+
     if (targetTrack.drumDecays) {
-      setPadDecays(prev => ({ ...prev, ...targetTrack.drumDecays }))
-      padDecaysRef.current = { ...padDecaysRef.current, ...targetTrack.drumDecays }
+      setPadDecays(targetTrack.drumDecays)
+      padDecaysRef.current = { ...targetTrack.drumDecays }
+    } else {
+      setPadDecays({ ...DEFAULT_DECAYS })
+      padDecaysRef.current = { ...DEFAULT_DECAYS }
     }
     if (targetTrack.drumOctaves) {
-      setPadOctaves(prev => ({ ...prev, ...targetTrack.drumOctaves }))
-      padOctavesRef.current = { ...padOctavesRef.current, ...targetTrack.drumOctaves }
+      setPadOctaves(targetTrack.drumOctaves)
+      padOctavesRef.current = { ...targetTrack.drumOctaves }
+    } else {
+      setPadOctaves({ ...DEFAULT_OCTAVES })
+      padOctavesRef.current = { ...DEFAULT_OCTAVES }
     }
     if (targetTrack.drumResonances) {
-      setPadResonances(prev => ({ ...prev, ...targetTrack.drumResonances }))
-      padResonancesRef.current = { ...padResonancesRef.current, ...targetTrack.drumResonances }
+      setPadResonances(targetTrack.drumResonances)
+      padResonancesRef.current = { ...targetTrack.drumResonances }
+    } else {
+      setPadResonances({ ...DEFAULT_RESONANCES })
+      padResonancesRef.current = { ...DEFAULT_RESONANCES }
     }
     if (targetTrack.drumPitches) {
-      setPadPitches(prev => ({ ...prev, ...targetTrack.drumPitches }))
-      padPitchesRef.current = { ...padPitchesRef.current, ...targetTrack.drumPitches }
+      setPadPitches(targetTrack.drumPitches)
+      padPitchesRef.current = { ...targetTrack.drumPitches }
+    } else {
+      setPadPitches({})
+      padPitchesRef.current = {}
     }
     if (targetTrack.drumDetunes) {
-      setPadDetunes(prev => ({ ...prev, ...targetTrack.drumDetunes }))
-      padDetunesRef.current = { ...padDetunesRef.current, ...targetTrack.drumDetunes }
+      setPadDetunes(targetTrack.drumDetunes)
+      padDetunesRef.current = { ...targetTrack.drumDetunes }
+    } else {
+      setPadDetunes({})
+      padDetunesRef.current = {}
     }
     if (targetTrack.drumSlides) {
-      setPadSlides(prev => ({ ...prev, ...targetTrack.drumSlides }))
-      padSlidesRef.current = { ...padSlidesRef.current, ...targetTrack.drumSlides }
+      setPadSlides(targetTrack.drumSlides)
+      padSlidesRef.current = { ...targetTrack.drumSlides }
+    } else {
+      setPadSlides({})
+      padSlidesRef.current = {}
     }
     if (targetTrack.drumSlideTimes) {
-      setPadSlideTimes(prev => ({ ...prev, ...targetTrack.drumSlideTimes }))
-      padSlideTimesRef.current = { ...padSlideTimesRef.current, ...targetTrack.drumSlideTimes }
+      setPadSlideTimes(targetTrack.drumSlideTimes)
+      padSlideTimesRef.current = { ...targetTrack.drumSlideTimes }
+    } else {
+      setPadSlideTimes({})
+      padSlideTimesRef.current = {}
     }
     if (targetTrack.drumPadModes) {
-      setPadModes(prev => ({ ...prev, ...targetTrack.drumPadModes }))
+      setPadModes(targetTrack.drumPadModes)
+      padModesRef.current = { ...targetTrack.drumPadModes }
+    } else {
+      setPadModes({})
+      padModesRef.current = {}
     }
     if (targetTrack.drumPadSamples) {
-      setPadSamples(prev => ({ ...prev, ...targetTrack.drumPadSamples }))
+      setPadSamples(targetTrack.drumPadSamples)
+      padSamplesRef.current = { ...targetTrack.drumPadSamples }
       const ctx = Tone.getContext().rawContext as AudioContext
       for (const [pStr, s] of Object.entries(targetTrack.drumPadSamples)) {
         const p = Number(pStr)
-        if (s?.audioBase64 && !padBuffers.has(p)) {
+        if (s?.audioBase64 && !padBuffersRef.current.has(p)) {
           fetch(s.audioBase64)
             .then(r => r.arrayBuffer())
             .then(ab => ctx.decodeAudioData(ab))
-            .then(ab => setPadBuffers(prev => new Map(prev).set(p, ab)))
+            .then(ab => {
+              setPadBuffers(prev => {
+                const next = new Map(prev).set(p, ab)
+                padBuffersRef.current = next
+                return next
+              })
+            })
             .catch(e => console.warn('Sample decode error:', e))
         }
       }
+    } else {
+      setPadSamples({})
+      padSamplesRef.current = {}
     }
     if (targetTrack.drumPadCurves) {
       const types: Record<number, EnvelopeCurveType> = {}
@@ -294,25 +343,23 @@ export const DrumDesignerModal: React.FC = () => {
         if (c.tension !== undefined) tensions[p] = c.tension
         if (c.formula) formulas[p] = c.formula
       }
-      setPadCurveTypes(prev => ({ ...prev, ...types }))
-      setPadTensions(prev => ({ ...prev, ...tensions }))
-      setPadFormulas(prev => ({ ...prev, ...formulas }))
+      setPadCurveTypes(types)
+      setPadTensions(tensions)
+      setPadFormulas(formulas)
+    } else {
+      setPadCurveTypes({})
+      setPadTensions({})
+      setPadFormulas({})
     }
-  }, [targetTrack])
+  }, [isVisible, targetTrack?.id])
 
-  // Commit pad curve changes to AudioEngine & targetTrack
+  // Commit pad curve changes to local studio state (Testing mode)
   const commitPadCurve = useCallback((pitch: number, type: EnvelopeCurveType, tension: number, formula: string) => {
-    const lut = generateCurveLut(type, tension, formula, 256)
     setPadCurveTypes(prev => ({ ...prev, [pitch]: type }))
     setPadTensions(prev => ({ ...prev, [pitch]: tension }))
     setPadFormulas(prev => ({ ...prev, [pitch]: formula }))
-    if (targetTrack) {
-      const existing = targetTrack.drumPadCurves || {}
-      const updated = { ...existing, [pitch]: { type, tension, formula, lut } }
-      updateTrack(targetTrack.id, { drumPadCurves: updated })
-      audioEngine.setPadCurve(targetTrack.id, pitch, lut, tension)
-    }
-  }, [targetTrack, updateTrack])
+    setHasUnsavedChanges(true)
+  }, [])
 
   // Get active pad definition
   const currentPadDef = useMemo(() => {
@@ -707,72 +754,48 @@ export const DrumDesignerModal: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [isVisible, triggerPad, setIsVisible])
 
-  // Save changes to targetTrack & AudioEngine
+  // Update pad parameter locally (Testing mode, not modifying track until Save)
   const commitPadDecay = useCallback((pitch: number, val: number) => {
     padDecaysRef.current[pitch] = val
-    const updated = { ...padDecays, [pitch]: val }
-    setPadDecays(updated)
-    if (targetTrack) {
-      audioEngine.setDrumPadDecay(targetTrack.id, pitch, val)
-      updateTrack(targetTrack.id, { drumDecays: updated })
-    }
-  }, [padDecays, targetTrack, updateTrack])
+    setPadDecays(prev => ({ ...prev, [pitch]: val }))
+    setHasUnsavedChanges(true)
+  }, [])
 
   const commitPadOctave = useCallback((pitch: number, val: number) => {
     padOctavesRef.current[pitch] = val
-    const updated = { ...padOctaves, [pitch]: val }
-    setPadOctaves(updated)
-    if (targetTrack) {
-      audioEngine.setDrumPadOctave(targetTrack.id, pitch, val)
-      updateTrack(targetTrack.id, { drumOctaves: updated })
-    }
-  }, [padOctaves, targetTrack, updateTrack])
+    setPadOctaves(prev => ({ ...prev, [pitch]: val }))
+    setHasUnsavedChanges(true)
+  }, [])
 
   const commitPadResonance = useCallback((pitch: number, val: number) => {
     padResonancesRef.current[pitch] = val
-    const updated = { ...padResonances, [pitch]: val }
-    setPadResonances(updated)
-    if (targetTrack) {
-      audioEngine.setDrumPadResonance(targetTrack.id, pitch, val)
-      updateTrack(targetTrack.id, { drumResonances: updated })
-    }
-  }, [padResonances, targetTrack, updateTrack])
+    setPadResonances(prev => ({ ...prev, [pitch]: val }))
+    setHasUnsavedChanges(true)
+  }, [])
 
   const commitPadPitch = useCallback((pitch: number, val: number) => {
     padPitchesRef.current[pitch] = val
-    const updated = { ...padPitches, [pitch]: val }
-    setPadPitches(updated)
-    if (targetTrack) {
-      updateTrack(targetTrack.id, { drumPitches: updated })
-    }
-  }, [padPitches, targetTrack, updateTrack])
+    setPadPitches(prev => ({ ...prev, [pitch]: val }))
+    setHasUnsavedChanges(true)
+  }, [])
 
   const commitPadDetune = useCallback((pitch: number, val: number) => {
     padDetunesRef.current[pitch] = val
-    const updated = { ...padDetunes, [pitch]: val }
-    setPadDetunes(updated)
-    if (targetTrack) {
-      updateTrack(targetTrack.id, { drumDetunes: updated })
-    }
-  }, [padDetunes, targetTrack, updateTrack])
+    setPadDetunes(prev => ({ ...prev, [pitch]: val }))
+    setHasUnsavedChanges(true)
+  }, [])
 
   const commitPadSlide = useCallback((pitch: number, val: number) => {
     padSlidesRef.current[pitch] = val
-    const updated = { ...padSlides, [pitch]: val }
-    setPadSlides(updated)
-    if (targetTrack) {
-      updateTrack(targetTrack.id, { drumSlides: updated })
-    }
-  }, [padSlides, targetTrack, updateTrack])
+    setPadSlides(prev => ({ ...prev, [pitch]: val }))
+    setHasUnsavedChanges(true)
+  }, [])
 
   const commitPadSlideTime = useCallback((pitch: number, val: number) => {
     padSlideTimesRef.current[pitch] = val
-    const updated = { ...padSlideTimes, [pitch]: val }
-    setPadSlideTimes(updated)
-    if (targetTrack) {
-      updateTrack(targetTrack.id, { drumSlideTimes: updated })
-    }
-  }, [padSlideTimes, targetTrack, updateTrack])
+    setPadSlideTimes(prev => ({ ...prev, [pitch]: val }))
+    setHasUnsavedChanges(true)
+  }, [])
 
   // Canvas Transient & Envelope Visualizer Animation + Draggable Handles
   useEffect(() => {
@@ -1421,33 +1444,75 @@ export const DrumDesignerModal: React.FC = () => {
     input.click()
   }
 
+  // Save studio edits to project track
+  const handleSaveToTrack = () => {
+    if (!targetTrack) return
+
+    // Compile LUT curves
+    const compiledCurves: Record<number, { type?: string; tension?: number; formula?: string; lut?: number[] }> = {}
+    for (let p = 0; p < 16; p++) {
+      const type = padCurveTypes[p]
+      const tension = padTensions[p]
+      const formula = padFormulas[p]
+      if (type) {
+        const lut = generateCurveLut(type, tension ?? 0, formula || '', 256)
+        compiledCurves[p] = { type, tension, formula, lut }
+        audioEngine.setPadCurve(targetTrack.id, p, lut, tension ?? 0)
+      }
+    }
+
+    // Set samples on audio engine
+    for (const [pStr, s] of Object.entries(padSamples)) {
+      const p = Number(pStr)
+      const buf = padBuffers.get(p)
+      audioEngine.setDrumPadSample(targetTrack.id, p, s, buf)
+    }
+
+    updateTrack(targetTrack.id, {
+      drumKit: 'custom',
+      drumDecays: { ...padDecays },
+      drumOctaves: { ...padOctaves },
+      drumResonances: { ...padResonances },
+      drumPitches: { ...padPitches },
+      drumDetunes: { ...padDetunes },
+      drumSlides: { ...padSlides },
+      drumSlideTimes: { ...padSlideTimes },
+      drumPadCurves: compiledCurves,
+      drumPadModes: { ...padModes },
+      drumPadSamples: { ...padSamples }
+    })
+    audioEngine.createInstrument(targetTrack.id, 'drum')
+    setHasUnsavedChanges(false)
+    useStore.getState().showToast(`Saved drum kit settings to track "${targetTrack.name}"!`, 'success')
+  }
+
   // Reset entire kit to factory defaults
   const handleResetToDefault = () => {
     setPadDecays({ ...DEFAULT_DECAYS })
+    padDecaysRef.current = { ...DEFAULT_DECAYS }
     setPadPitches({})
+    padPitchesRef.current = {}
     setPadDetunes({})
+    padDetunesRef.current = {}
     setPadSlides({})
+    padSlidesRef.current = {}
     setPadSlideTimes({})
+    padSlideTimesRef.current = {}
     setPadOctaves({})
+    padOctavesRef.current = {}
     setPadResonances({})
+    padResonancesRef.current = {}
     setPadCurveTypes({})
     setPadTensions({})
     setPadFormulas({})
     setPadModes({})
+    padModesRef.current = {}
     setPadSamples({})
+    padSamplesRef.current = {}
     setPadBuffers(new Map())
-    if (targetTrack) {
-      updateTrack(targetTrack.id, {
-        drumKit: 'classic',
-        drumDecays: { ...DEFAULT_DECAYS },
-        drumPadCurves: {},
-        drumPadModes: {},
-        drumPadSamples: {},
-        transpose: 0
-      })
-      audioEngine.createInstrument(targetTrack.id, 'drum')
-      useStore.getState().showToast('Reset drum kit to factory defaults', 'info')
-    }
+    padBuffersRef.current = new Map()
+    setHasUnsavedChanges(true)
+    useStore.getState().showToast('Reset working kit to defaults (Click "Save to Track" to apply)', 'info')
   }
 
   if (!isVisible) return null
@@ -1549,6 +1614,31 @@ export const DrumDesignerModal: React.FC = () => {
               onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)' }}
             >
               <IconPlay size={12} fill="#fff" /> PREVIEW
+            </button>
+
+            {/* Save to Track / Testing Mode Button */}
+            <button
+              onClick={handleSaveToTrack}
+              title="Save all pad sounds, samples, curves, and settings to the project track"
+              style={{
+                background: hasUnsavedChanges ? 'rgba(0, 230, 255, 0.18)' : 'rgba(105, 219, 124, 0.12)',
+                border: `1px solid ${hasUnsavedChanges ? '#00e6ff' : '#69db7c'}`,
+                color: hasUnsavedChanges ? '#00e6ff' : '#69db7c',
+                borderRadius: '6px',
+                padding: '6px 14px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                fontSize: '11px',
+                fontWeight: 800,
+                letterSpacing: '0.04em',
+                cursor: 'pointer',
+                boxShadow: hasUnsavedChanges ? '0 0 12px rgba(0, 230, 255, 0.35)' : 'none',
+                transition: 'all 0.15s ease'
+              }}
+            >
+              <IconSave size={13} color={hasUnsavedChanges ? '#00e6ff' : '#69db7c'} />
+              {hasUnsavedChanges ? 'SAVE TO TRACK ●' : 'SAVED TO TRACK ✓'}
             </button>
 
             {/* Reset to Default Kit Button */}

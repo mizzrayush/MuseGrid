@@ -10919,9 +10919,13 @@ for (let channel = 0; channel < input.length; channel++) {
                                   {SYNTH_PRESETS.filter(preset => preset.value !== 'physical' && preset.value !== 'vocal').map(preset => (
                                     <option key={preset.value} value={preset.value} style={{ background: '#12141c', color: '#e0e0e0' }}>{preset.label}</option>
                                   ))}
-                                  {track.customMuxins && (
-                                    <option value="custom" style={{ background: '#12141c', color: '#e0e0e0' }}>Custom: {track.customMuxins.name}</option>
-                                  )}
+                                  {track.customMuxins ? (
+                                    <option value="custom" style={{ background: '#12141c', color: '#00e6ff', fontWeight: 700 }}>Custom: {track.customMuxins.name}</option>
+                                  ) : (track.synthPreset === 'custom' || track.synthMode === 'sampler') ? (
+                                    <option value="custom" style={{ background: '#12141c', color: '#00e6ff', fontWeight: 700 }}>
+                                      {track.synthMode === 'sampler' ? 'Custom Sampler (Studio)' : 'Custom Synth (Studio)'}
+                                    </option>
+                                  ) : null}
                                   <option value="import-muzins" style={{ background: '#12141c', color: '#e0e0e0' }}>Load from Device (.muzins)...</option>
                                 </optgroup>
                                 <optgroup label="── SPECIALIZED ACOUSTIC & VOCAL ENGINES ──" style={{ background: '#0a0b10', color: '#da77f2', fontWeight: 800 }}>
@@ -11099,9 +11103,11 @@ for (let channel = 0; channel < input.length; channel++) {
                                 )}
                                 <optgroup label="── BUILT-IN DRUM KITS ──" style={{ background: '#0a0b10', color: '#888', fontWeight: 800 }}>
                                   {DRUM_KITS.map(kit => <option key={kit.value} value={kit.value} style={{ background: '#12141c', color: '#e0e0e0' }}>{kit.label}</option>)}
-                                  {track.customMuxins && (
-                                    <option value="custom" style={{ background: '#12141c', color: '#e0e0e0' }}>Custom: {track.customMuxins.name}</option>
-                                  )}
+                                  {track.customMuxins ? (
+                                    <option value="custom" style={{ background: '#12141c', color: '#ff6b6b', fontWeight: 700 }}>Custom: {track.customMuxins.name}</option>
+                                  ) : (track.drumKit === 'custom' || (track.drumPadSamples && Object.keys(track.drumPadSamples).length > 0)) ? (
+                                    <option value="custom" style={{ background: '#12141c', color: '#ff6b6b', fontWeight: 700 }}>Custom Drum Kit (Studio)</option>
+                                  ) : null}
                                   <option value="import-muzins" style={{ background: '#12141c', color: '#e0e0e0' }}>Load from Device (.muzins)...</option>
                                 </optgroup>
                               </StopPropSelect>

@@ -1356,7 +1356,11 @@ export class ChromaticSampler {
         }
       }
     }
-    if (cfg.loop) {
+    // Enable looping if loop option is toggled OR if note duration exceeds sample region length so notes extend naturally
+    const regionDur = regionSec / rate
+    const isExtended = durSec > regionDur + 0.05
+    const shouldLoop = cfg.loop || isExtended
+    if (shouldLoop) {
       source.loop = true
       source.loopStart = regionStart
       source.loopEnd = regionEnd
@@ -1374,9 +1378,8 @@ export class ChromaticSampler {
     gain.gain.linearRampToValueAtTime(peak, now + attack)
     gain.gain.exponentialRampToValueAtTime(susLevel, now + attack + decay)
 
-    const regionDur = regionSec / rate
     const noteEnd = now + Math.max(0.02, durSec)
-    const releaseAt = cfg.loop ? noteEnd : Math.min(noteEnd, now + regionDur)
+    const releaseAt = shouldLoop ? noteEnd : Math.min(noteEnd, now + regionDur)
     const holdAt = Math.max(now + attack + decay, releaseAt)
     gain.gain.setValueAtTime(susLevel, holdAt)
     gain.gain.exponentialRampToValueAtTime(0.0001, releaseAt + release)
@@ -4660,8 +4663,13 @@ class AudioEngine {
         }
         return
       }
-      this.drums.get(track.id)?.dispose()
+      const oldDrum = this.drums.get(track.id)
+      const existingBuffers = oldDrum ? new Map(oldDrum.padAudioBuffers) : undefined
+      oldDrum?.dispose()
       const drum = new DrumMachine(kit, track.customMuxins)
+      if (existingBuffers) {
+        drum.padAudioBuffers = existingBuffers
+      }
       drum.drumDecays = track.drumDecays
       drum.drumOctaves = track.drumOctaves
       drum.drumResonances = track.drumResonances

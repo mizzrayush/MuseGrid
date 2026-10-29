@@ -235,14 +235,38 @@ export default function ImportAudioModal() {
   const [recordingSeconds, setRecordingSeconds] = useState(0)
   const [micLevel, setMicLevel] = useState(0)
 
-  // Melodyne parameter sliders
-  const [gateThreshold, setGateThreshold] = useState<number>(0.02) // Min amplitude
-  const [pitchSensitivity, setPitchSensitivity] = useState<number>(50) // 0 - 100
-  const [minNoteDuration, setMinNoteDuration] = useState<number>(0.1) // seconds
+  const micSettings = useStore(s => s.micSettings)
+  const updateMicSettings = useStore(s => s.updateMicSettings)
+
+  // Melodyne parameter sliders (synced with global micSettings)
+  const [gateThreshold, setGateThresholdState] = useState<number>(micSettings?.gateThreshold ?? 0.02) // Min amplitude
+  const [pitchSensitivity, setPitchSensitivityState] = useState<number>(micSettings?.pitchSensitivity ?? 50) // 0 - 100
+  const [minNoteDuration, setMinNoteDurationState] = useState<number>(micSettings?.minNoteDuration ?? 0.1) // seconds
   const [lockToScale, setLockToScale] = useState<boolean>(scaleLock.enabled)
   const [quantizeResolution, setQuantizeResolution] = useState<number>(48) // 16th note (48 ticks), 0 represents None
-  const [freqFilterLow, setFreqFilterLow] = useState<number>(60) // Hz
-  const [freqFilterHigh, setFreqFilterHigh] = useState<number>(1200) // Hz
+  const [freqFilterLow, setFreqFilterLowState] = useState<number>(micSettings?.freqFilterLow ?? 60) // Hz
+  const [freqFilterHigh, setFreqFilterHighState] = useState<number>(micSettings?.freqFilterHigh ?? 1200) // Hz
+
+  const setGateThreshold = (val: number) => {
+    setGateThresholdState(val)
+    updateMicSettings({ gateThreshold: val })
+  }
+  const setPitchSensitivity = (val: number) => {
+    setPitchSensitivityState(val)
+    updateMicSettings({ pitchSensitivity: val })
+  }
+  const setMinNoteDuration = (val: number) => {
+    setMinNoteDurationState(val)
+    updateMicSettings({ minNoteDuration: val })
+  }
+  const setFreqFilterLow = (val: number) => {
+    setFreqFilterLowState(val)
+    updateMicSettings({ freqFilterLow: val })
+  }
+  const setFreqFilterHigh = (val: number) => {
+    setFreqFilterHighState(val)
+    updateMicSettings({ freqFilterHigh: val })
+  }
   const [transposeSemitones, setTransposeSemitones] = useState<number>(0)
   const [shiftToStart, setShiftToStart] = useState<boolean>(true)
 
@@ -441,7 +465,13 @@ export default function ImportAudioModal() {
   // Microphone recording
   const startRecording = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: micSettings?.echoCancellation ?? false,
+          noiseSuppression: micSettings?.noiseSuppression ?? false,
+          autoGainControl: micSettings?.autoGainControl ?? false
+        }
+      })
       audioChunksRef.current = []
 
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext

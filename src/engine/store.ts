@@ -979,6 +979,46 @@ export interface StudioSettings {
   sampleRate?: number         // AudioContext sample rate
 }
 
+export interface MicRecordingSettings {
+  echoCancellation: boolean
+  noiseSuppression: boolean
+  autoGainControl: boolean
+  inputGain: number
+  gateThreshold: number
+  silenceTrimThresholdDb: number
+  autoTrimSilence: boolean
+  autoNormalize: boolean
+  pitchDetectionEnabled: boolean
+  pitchConfidenceThreshold: number
+  minPitchHz: number
+  maxPitchHz: number
+  pitchSensitivity: number
+  minNoteDuration: number
+  freqFilterLow: number
+  freqFilterHigh: number
+  maxDurationSec: number
+}
+
+export const DEFAULT_MIC_SETTINGS: MicRecordingSettings = {
+  echoCancellation: false,
+  noiseSuppression: false,
+  autoGainControl: false,
+  inputGain: 1.0,
+  gateThreshold: 0.02,
+  silenceTrimThresholdDb: -42,
+  autoTrimSilence: true,
+  autoNormalize: true,
+  pitchDetectionEnabled: true,
+  pitchConfidenceThreshold: 0.20,
+  minPitchHz: 45,
+  maxPitchHz: 1800,
+  pitchSensitivity: 50,
+  minNoteDuration: 0.10,
+  freqFilterLow: 60,
+  freqFilterHigh: 1200,
+  maxDurationSec: 30
+}
+
 export interface Clip {
   id: string
   trackId: string
@@ -1385,6 +1425,9 @@ export interface AppState {
   updateMetronome: (updates: Partial<MetronomeSettings>) => void
   studioSettings: StudioSettings
   updateStudio: (updates: Partial<StudioSettings>) => void
+  micSettings: MicRecordingSettings
+  updateMicSettings: (updates: Partial<MicRecordingSettings>) => void
+  resetMicSettings: () => void
   leftPaneWidth: number
   leftPaneCollapsed: boolean
   setLeftPaneCollapsed: (v: boolean) => void
@@ -1526,6 +1569,7 @@ export const snapshotProjectData = (state: AppState) => ({
   timeSignature: state.timeSignature,
   metronomeSettings: state.metronomeSettings,
   studioSettings: state.studioSettings,
+  micSettings: state.micSettings,
   customFxConfigs: state.customFxConfigs,
   pitchSnapEnabled: state.pitchSnapEnabled,
   pitchDropSnap: state.pitchDropSnap,
@@ -2650,6 +2694,10 @@ if (firstTrack) {
           ...state.studioSettings,
           ...(newState.studioSettings || {})
         },
+        micSettings: {
+          ...state.micSettings,
+          ...(newState.micSettings || {})
+        },
         isPlaying: false,
         playheadPosition: 0,
         history: [],
@@ -3613,6 +3661,13 @@ if (firstTrack) {
     updateStudio: (updates) => set(state => ({
       studioSettings: { ...state.studioSettings, ...updates }
     })),
+    micSettings: { ...DEFAULT_MIC_SETTINGS },
+    updateMicSettings: (updates) => set(state => ({
+      micSettings: { ...state.micSettings, ...updates }
+    })),
+    resetMicSettings: () => set({
+      micSettings: { ...DEFAULT_MIC_SETTINGS }
+    }),
     showImportAudioModal: false,
     importAudioTrackId: null,
     importAudioBuffer: null,

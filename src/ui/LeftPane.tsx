@@ -20,6 +20,7 @@ import { generateMusicXML, downloadScore, generateMuzTrack, downloadMuzTrack, pa
 import { exportTrackScala, parseScalaContent } from '../utils/scalaExport'
 import { saveFileWithDialog } from '../utils/fileExport'
 import { generateAiMelody, generateAiDrums, generateBeatMorph, generateAutoHarmony, generateHumanGroove, generatePianoGenieNote, resetPianoGenie } from '../utils/aiLab'
+import { detectFundamentalPitch, hzToMidi } from '../utils/micRecorder'
 import StemSplitterPane from './StemSplitterPane'
 import { MidiEditSection } from './MidiEditSection'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET, DRUM_KITS, SYNTH_PRESETS, type DrumKit, type SynthPreset } from '../utils/instruments'
@@ -900,6 +901,438 @@ const extractXmlFromMxl = async (data: ArrayBuffer | Uint8Array): Promise<string
   }
   return targetFile.async('string');
 };
+
+function MicRecordingSettingsSection() {
+  const micSettings = useStore(s => s.micSettings)
+  const updateMicSettings = useStore(s => s.updateMicSettings)
+  const resetMicSettings = useStore(s => s.resetMicSettings)
+  const showToast = useStore(s => s.showToast)
+  const setShowImportAudioModal = useStore(s => s.setShowImportAudioModal)
+
+  // Real-time Mic Testing & Calibration
+  const [isTesting, setIsTesting] = useState(false)
+  const [micLevel, setMicLevel] = useState(0)
+  const [detectedPitch, setDetectedPitch] = useState<{ note: string; freq: number } | null>(null)
+  const testStreamRef = useRef<MediaStream | null>(null)
+  const testAudioCtxRef = useRef<AudioContext | null>(null)
+  const animFrameRef = useRef<number | null>(null)
+
+  const stopMicTest = () => {
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current)
+      animFrameRef.current = null
+    }
+    if (testStreamRef.current) {
+      testStreamRef.current.getTracks().forEach(t => t.stop())
+      testStreamRef.current = null
+    }
+    if (testAudioCtxRef.current) {
+      try { testAudioCtxRef.current.close() } catch {}
+      testAudioCtxRef.current = null
+    }
+    setIsTesting(false)
+    setMicLevel(0)
+    setDetectedPitch(null)
+  }
+
+  const startMicTest = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: micSettings.echoCancellation,
+          noiseSuppression: micSettings.noiseSuppression,
+          autoGainControl: micSettings.autoGainControl
+        }
+      })
+      testStreamRef.current = stream
+
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext
+      const ctx = new AudioCtx()
+      testAudioCtxRef.current = ctx
+
+      const source = ctx.createMediaStreamSource(stream)
+      const analyser = ctx.createAnalyser()
+      analyser.fftSize = 1024
+      source.connect(analyser)
+
+      const timeDomain = new Float32Array(analyser.fftSize)
+      setIsTesting(true)
+
+      const updateMeter = () => {
+        analyser.getFloatTimeDomainData(timeDomain)
+        let sum = 0
+        for (let i = 0; i < timeDomain.length; i++) {
+          sum += timeDomain[i] * timeDomain[i]
+        }
+        const rms = Math.sqrt(sum / timeDomain.length) * (micSettings.inputGain || 1.0)
+        setMicLevel(Math.min(1.0, rms * 4.0))
+
+        if (micSettings.pitchDetectionEnabled && rms >= micSettings.gateThreshold) {
+          const freq = detectFundamentalPitch(
+            timeDomain,
+            ctx.sampleRate,
+            micSettings.pitchConfidenceThreshold,
+            micSettings.minPitchHz,
+            micSettings.maxPitchHz
+          )
+          if (freq) {
+            const midi = hzToMidi(freq)
+            const noteName = Tone.Frequency(midi, 'midi').toNote()
+            setDetectedPitch({ note: noteName, freq: Math.round(freq) })
+          }
+        } else if (rms < micSettings.gateThreshold) {
+          setDetectedPitch(null)
+        }
+
+        animFrameRef.current = requestAnimationFrame(updateMeter)
+      }
+
+      animFrameRef.current = requestAnimationFrame(updateMeter)
+    } catch (err: any) {
+      showToast('Microphone access denied or unavailable: ' + (err?.message || err), 'error')
+      stopMicTest()
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      stopMicTest()
+    }
+  }, [])
+
+  const isSignalPassing = micLevel >= micSettings.gateThreshold * 4.0
+  const gatePercent = Math.min(100, Math.max(0, micSettings.gateThreshold * 400))
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+      {/* Live Mic Calibration & Level Meter */}
+      <div style={{
+        padding: '10px',
+        borderRadius: '8px',
+        background: 'rgba(0,0,0,0.3)',
+        border: `1px solid ${isTesting ? 'rgba(0, 230, 255, 0.4)' : 'rgba(255,255,255,0.06)'}`,
+        transition: 'all 0.2s ease'
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span style={{
+              width: 7,
+              height: 7,
+              borderRadius: '50%',
+              background: isTesting ? (isSignalPassing ? '#00e676' : '#ffcc00') : '#555',
+              boxShadow: isTesting ? (isSignalPassing ? '0 0 8px #00e676' : '0 0 6px #ffcc00') : 'none'
+            }} />
+            <span style={{ fontSize: '10px', fontWeight: 800, color: '#eee', letterSpacing: '0.04em' }}>
+              LIVE INPUT CALIBRATOR
+            </span>
+          </div>
+
+          <button
+            onClick={isTesting ? stopMicTest : startMicTest}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '5px',
+              padding: '4px 8px',
+              borderRadius: '5px',
+              fontSize: '10px',
+              fontWeight: 800,
+              cursor: 'pointer',
+              border: `1px solid ${isTesting ? '#ff4d6d' : '#00e6ff'}`,
+              background: isTesting ? 'rgba(255, 77, 109, 0.2)' : 'rgba(0, 230, 255, 0.15)',
+              color: isTesting ? '#ff4d6d' : '#00e6ff',
+              transition: 'all 0.15s ease'
+            }}
+          >
+            <IconMic size={11} /> {isTesting ? 'STOP TEST' : 'TEST MIC'}
+          </button>
+        </div>
+
+        {/* Meter Bar with Gate Threshold Marker */}
+        <div style={{ position: 'relative', height: '14px', borderRadius: '4px', background: '#0a0b12', border: '1px solid rgba(255,255,255,0.08)', overflow: 'hidden', marginBottom: '6px' }}>
+          <div style={{
+            height: '100%',
+            width: `${Math.round(micLevel * 100)}%`,
+            background: 'linear-gradient(to right, #00e676 0%, #ffcc00 65%, #ff3366 100%)',
+            transition: 'width 0.06s ease-out'
+          }} />
+
+          {/* Gate Threshold Marker Line */}
+          <div
+            title={`Gate Threshold: ${micSettings.gateThreshold}`}
+            style={{
+              position: 'absolute',
+              top: 0,
+              bottom: 0,
+              left: `${gatePercent}%`,
+              width: '2px',
+              background: '#fff',
+              boxShadow: '0 0 6px #fff',
+              pointerEvents: 'none',
+              zIndex: 2
+            }}
+          />
+        </div>
+
+        {/* Status Readout */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '9px' }}>
+          <span style={{ color: isTesting ? (isSignalPassing ? '#00e676' : '#889') : '#666', fontWeight: 700 }}>
+            {isTesting
+              ? (isSignalPassing ? '● SIGNAL PASSING' : '○ MUTED BY GATE')
+              : 'Press Test Mic to calibrate threshold'}
+          </span>
+          {detectedPitch && (
+            <span style={{ color: '#00e6ff', fontWeight: 800 }}>
+              Pitch: {detectedPitch.note} ({detectedPitch.freq} Hz)
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Group 1: Stream Capture Drivers */}
+      <div style={{ padding: '8px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.05)' }}>
+        <div style={{ fontSize: '10px', color: '#00e6ff', fontWeight: 800, letterSpacing: '0.04em', marginBottom: '8px' }}>
+          HARDWARE & STREAM INPUT
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+          <div>
+            <span style={{ fontSize: '11px', color: '#ccc', fontWeight: 600, display: 'block' }}>Echo Cancellation</span>
+            <span style={{ fontSize: '9px', color: '#777' }}>Disable for acoustic instruments to preserve timbre</span>
+          </div>
+          <ToggleSwitch
+            checked={micSettings.echoCancellation}
+            onChange={v => updateMicSettings({ echoCancellation: v })}
+            color="#00e6ff"
+          />
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+          <div>
+            <span style={{ fontSize: '11px', color: '#ccc', fontWeight: 600, display: 'block' }}>Noise Suppression</span>
+            <span style={{ fontSize: '9px', color: '#777' }}>Disable to avoid digital gating artifacts</span>
+          </div>
+          <ToggleSwitch
+            checked={micSettings.noiseSuppression}
+            onChange={v => updateMicSettings({ noiseSuppression: v })}
+            color="#00e6ff"
+          />
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+          <div>
+            <span style={{ fontSize: '11px', color: '#ccc', fontWeight: 600, display: 'block' }}>Auto Gain Control</span>
+            <span style={{ fontSize: '9px', color: '#777' }}>Disable to retain natural performance dynamics</span>
+          </div>
+          <ToggleSwitch
+            checked={micSettings.autoGainControl}
+            onChange={v => updateMicSettings({ autoGainControl: v })}
+            color="#00e6ff"
+          />
+        </div>
+
+        <SliderRow
+          label="Software Input Gain"
+          value={micSettings.inputGain}
+          min={0.1}
+          max={3.0}
+          step={0.05}
+          suffix="x"
+          color="#00e6ff"
+          onChange={v => updateMicSettings({ inputGain: +v.toFixed(2) })}
+        />
+      </div>
+
+      {/* Group 2: Noise Gate & Auto-Trim */}
+      <div style={{ padding: '8px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.05)' }}>
+        <div style={{ fontSize: '10px', color: '#ffcc00', fontWeight: 800, letterSpacing: '0.04em', marginBottom: '8px' }}>
+          NOISE GATE & SAMPLE CLEANING
+        </div>
+
+        <SliderRow
+          label="Noise Gate Threshold"
+          value={micSettings.gateThreshold}
+          min={0.001}
+          max={0.150}
+          step={0.001}
+          suffix=""
+          color="#ffcc00"
+          onChange={v => updateMicSettings({ gateThreshold: +v.toFixed(3) })}
+        />
+
+        <SliderRow
+          label="Silence Trim Threshold"
+          value={micSettings.silenceTrimThresholdDb}
+          min={-60}
+          max={-12}
+          step={1}
+          suffix=" dB"
+          color="#ffcc00"
+          onChange={v => updateMicSettings({ silenceTrimThresholdDb: Math.round(v) })}
+        />
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+          <div>
+            <span style={{ fontSize: '11px', color: '#ccc', fontWeight: 600, display: 'block' }}>Auto-Trim Silence</span>
+            <span style={{ fontSize: '9px', color: '#777' }}>Cuts dead space at start & end of recording</span>
+          </div>
+          <ToggleSwitch
+            checked={micSettings.autoTrimSilence}
+            onChange={v => updateMicSettings({ autoTrimSilence: v })}
+            color="#ffcc00"
+          />
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
+          <div>
+            <span style={{ fontSize: '11px', color: '#ccc', fontWeight: 600, display: 'block' }}>Auto-Normalize Peaks</span>
+            <span style={{ fontSize: '9px', color: '#777' }}>Peak normalizes recorded sample to -0.5 dBFS</span>
+          </div>
+          <ToggleSwitch
+            checked={micSettings.autoNormalize}
+            onChange={v => updateMicSettings({ autoNormalize: v })}
+            color="#69db7c"
+          />
+        </div>
+      </div>
+
+      {/* Group 3: Pitch & Melodyne Extraction */}
+      <div style={{ padding: '8px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.05)' }}>
+        <div style={{ fontSize: '10px', color: '#4dabf7', fontWeight: 800, letterSpacing: '0.04em', marginBottom: '8px' }}>
+          PITCH DETECTION & HUM-TO-MIDI
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+          <div>
+            <span style={{ fontSize: '11px', color: '#ccc', fontWeight: 600, display: 'block' }}>Auto Pitch Detection</span>
+            <span style={{ fontSize: '9px', color: '#777' }}>Detects root note for sampler & Melodyne</span>
+          </div>
+          <ToggleSwitch
+            checked={micSettings.pitchDetectionEnabled}
+            onChange={v => updateMicSettings({ pitchDetectionEnabled: v })}
+            color="#4dabf7"
+          />
+        </div>
+
+        <SliderRow
+          label="Correlation Confidence"
+          value={micSettings.pitchConfidenceThreshold}
+          min={0.05}
+          max={0.60}
+          step={0.01}
+          suffix=""
+          color="#4dabf7"
+          onChange={v => updateMicSettings({ pitchConfidenceThreshold: +v.toFixed(2) })}
+        />
+
+        <SliderRow
+          label="Melodyne Sensitivity"
+          value={micSettings.pitchSensitivity}
+          min={0}
+          max={100}
+          step={1}
+          suffix="%"
+          color="#4dabf7"
+          onChange={v => updateMicSettings({ pitchSensitivity: Math.round(v) })}
+        />
+
+        <SliderRow
+          label="Min Note Duration"
+          value={micSettings.minNoteDuration}
+          min={0.02}
+          max={0.50}
+          step={0.01}
+          suffix="s"
+          color="#4dabf7"
+          onChange={v => updateMicSettings({ minNoteDuration: +v.toFixed(2) })}
+        />
+
+        <SliderRow
+          label="Low-Cut Filter"
+          value={micSettings.freqFilterLow}
+          min={20}
+          max={500}
+          step={5}
+          suffix=" Hz"
+          color="#b197fc"
+          onChange={v => updateMicSettings({ freqFilterLow: Math.round(v) })}
+        />
+
+        <SliderRow
+          label="High-Cut Filter"
+          value={micSettings.freqFilterHigh}
+          min={500}
+          max={8000}
+          step={50}
+          suffix=" Hz"
+          color="#b197fc"
+          onChange={v => updateMicSettings({ freqFilterHigh: Math.round(v) })}
+        />
+      </div>
+
+      {/* Group 4: Safety Limit & Action Buttons */}
+      <div style={{ padding: '8px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.05)' }}>
+        <SliderRow
+          label="Max Record Limit"
+          value={micSettings.maxDurationSec}
+          min={5}
+          max={120}
+          step={1}
+          suffix="s"
+          color="#ff8599"
+          onChange={v => updateMicSettings({ maxDurationSec: Math.round(v) })}
+        />
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginTop: '10px' }}>
+          <button
+            onClick={() => {
+              resetMicSettings()
+              showToast('Mic recording settings restored to studio defaults', 'info')
+            }}
+            style={{
+              padding: '6px 8px',
+              borderRadius: '5px',
+              border: '1px solid rgba(255,255,255,0.12)',
+              background: 'rgba(255,255,255,0.04)',
+              color: '#bbb',
+              fontSize: '10px',
+              fontWeight: 700,
+              cursor: 'pointer',
+              transition: 'all 0.15s ease'
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; e.currentTarget.style.color = '#fff' }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.04)'; e.currentTarget.style.color = '#bbb' }}
+          >
+            Reset Defaults
+          </button>
+
+          <button
+            onClick={() => setShowImportAudioModal(true)}
+            style={{
+              padding: '6px 8px',
+              borderRadius: '5px',
+              border: '1px solid rgba(0, 230, 255, 0.35)',
+              background: 'rgba(0, 230, 255, 0.12)',
+              color: '#00e6ff',
+              fontSize: '10px',
+              fontWeight: 800,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '4px',
+              transition: 'all 0.15s ease'
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = 'rgba(0, 230, 255, 0.22)' }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'rgba(0, 230, 255, 0.12)' }}
+          >
+            <IconSliders size={11} /> Open Audio Import
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 export default function LeftPane() {
   const tracks = useStore(s => s.tracks)
@@ -5914,6 +6347,15 @@ export default function LeftPane() {
               <span style={{ fontSize: '9px', color: '#69db7c', fontWeight: 700 }}>LIVE</span>
             )}
           </div>
+        </Section>
+
+        {/* Dedicated Mic Recording Settings Pane */}
+        <Section
+          title="Mic Recording Settings"
+          info={micSettings.autoNormalize ? "NORM ON" : "RAW"}
+          defaultOpen={false}
+        >
+          <MicRecordingSettingsSection />
         </Section>
 
         <Section title="Grid" defaultOpen={false}>

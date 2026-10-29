@@ -1,4 +1,5 @@
 import * as Tone from 'tone'
+import { useStore, type MicRecordingSettings, DEFAULT_MIC_SETTINGS } from '../engine/store'
 
 export interface MicRecordingResult {
   blob: Blob
@@ -8,7 +9,13 @@ export interface MicRecordingResult {
 }
 
 // Autocorrelation pitch detection algorithm to track dominant pitch in an audio segment
-export function detectFundamentalPitch(signal: Float32Array, sampleRate: number): number | null {
+export function detectFundamentalPitch(
+  signal: Float32Array,
+  sampleRate: number,
+  thresh = 0.2,
+  minHz = 45,
+  maxHz = 1800
+): number | null {
   const SIZE = signal.length
   if (SIZE < 256) return null
 
@@ -22,8 +29,6 @@ export function detectFundamentalPitch(signal: Float32Array, sampleRate: number)
     r[lag] = sum
   }
 
-  // Threshold to avoid picking noise peaks
-  const thresh = 0.2
   let peak = -1
   let maxVal = -1
 
@@ -43,8 +48,7 @@ export function detectFundamentalPitch(signal: Float32Array, sampleRate: number)
 
   if (peak !== -1 && maxVal > r[0] * thresh) {
     const freq = sampleRate / peak
-    // Valid vocal/melodic instrument range (45 Hz to 1800 Hz)
-    if (freq >= 45 && freq <= 1800) {
+    if (freq >= minHz && freq <= maxHz) {
       return freq
     }
   }
@@ -55,22 +59,118 @@ export function hzToMidi(freq: number): number {
   return Math.round(12 * Math.log2(freq / 440) + 69)
 }
 
+// Peak normalize AudioBuffer to target dBFS (default -0.5 dB)
+export function normalizeAudioBuffer(buffer: AudioBuffer, targetDb = -0.5, rawCtx?: AudioContext): AudioBuffer {
+  let peak = 0
+  for (let c = 0; c < buffer.numberOfChannels; c++) {
+    const data = buffer.getChannelData(c)
+    for (let i = 0; i < data.length; i++) {
+      const abs = Math.abs(data[i])
+      if (abs > peak) peak = abs
+    }
+  }
+
+  if (peak <= 0.00001) return buffer
+  const targetLinear = Math.pow(10, targetDb / 20)
+  const multiplier = targetLinear / peak
+
+  const ctx = rawCtx || (Tone.getContext().rawContext as AudioContext)
+  const out = ctx.createBuffer(buffer.numberOfChannels, buffer.length, buffer.sampleRate)
+  for (let c = 0; c < buffer.numberOfChannels; c++) {
+    const inData = buffer.getChannelData(c)
+    const outData = out.getChannelData(c)
+    for (let i = 0; i < inData.length; i++) {
+      outData[i] = inData[i] * multiplier
+    }
+  }
+  return out
+}
+
+// Trim leading and trailing silence below dB threshold
+export function trimAudioBufferSilence(buffer: AudioBuffer, silenceThresholdDb = -42, rawCtx?: AudioContext): AudioBuffer {
+  const thresholdLinear = Math.pow(10, silenceThresholdDb / 20)
+  const numChannels = buffer.numberOfChannels
+  const len = buffer.length
+  let startIdx = 0
+  let endIdx = len - 1
+
+  // Find start
+  outerStart: for (let i = 0; i < len; i++) {
+    for (let c = 0; c < numChannels; c++) {
+      if (Math.abs(buffer.getChannelData(c)[i]) >= thresholdLinear) {
+        startIdx = Math.max(0, i - 128) // include small 128-sample ramp
+        break outerStart
+      }
+    }
+  }
+
+  // Find end
+  outerEnd: for (let i = len - 1; i >= startIdx; i--) {
+    for (let c = 0; c < numChannels; c++) {
+      if (Math.abs(buffer.getChannelData(c)[i]) >= thresholdLinear) {
+        endIdx = Math.min(len - 1, i + 128)
+        break outerEnd
+      }
+    }
+  }
+
+  const trimmedLen = endIdx - startIdx + 1
+  if (trimmedLen <= 0 || trimmedLen === len) return buffer
+
+  const ctx = rawCtx || (Tone.getContext().rawContext as AudioContext)
+  const out = ctx.createBuffer(numChannels, trimmedLen, buffer.sampleRate)
+  for (let c = 0; c < numChannels; c++) {
+    const inData = buffer.getChannelData(c)
+    const outData = out.getChannelData(c)
+    for (let i = 0; i < trimmedLen; i++) {
+      outData[i] = inData[startIdx + i]
+    }
+  }
+  return out
+}
+
+// Scale gain of AudioBuffer
+export function applyGainToAudioBuffer(buffer: AudioBuffer, gain: number, rawCtx?: AudioContext): AudioBuffer {
+  if (Math.abs(gain - 1.0) < 0.001) return buffer
+  const ctx = rawCtx || (Tone.getContext().rawContext as AudioContext)
+  const out = ctx.createBuffer(buffer.numberOfChannels, buffer.length, buffer.sampleRate)
+  for (let c = 0; c < buffer.numberOfChannels; c++) {
+    const inData = buffer.getChannelData(c)
+    const outData = out.getChannelData(c)
+    for (let i = 0; i < inData.length; i++) {
+      outData[i] = inData[i] * gain
+    }
+  }
+  return out
+}
+
 export class QuickMicRecorder {
   private mediaRecorder: MediaRecorder | null = null
   private stream: MediaStream | null = null
   private chunks: Blob[] = []
   private audioCtx: AudioContext | null = null
   private isRecording: boolean = false
+  private autoStopTimer: any = null
+  private settings: MicRecordingSettings
+
+  constructor(customSettings?: Partial<MicRecordingSettings>) {
+    const liveSettings = useStore.getState().micSettings || DEFAULT_MIC_SETTINGS
+    this.settings = { ...liveSettings, ...(customSettings || {}) }
+  }
 
   public async start(): Promise<void> {
     if (this.isRecording) return
     this.chunks = []
 
+    // Refresh settings from current store
+    const liveSettings = useStore.getState().micSettings || DEFAULT_MIC_SETTINGS
+    this.settings = { ...liveSettings, ...this.settings }
+
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false
+        echoCancellation: this.settings.echoCancellation,
+        noiseSuppression: this.settings.noiseSuppression,
+        autoGainControl: this.settings.autoGainControl
       }
     })
 
@@ -86,6 +186,15 @@ export class QuickMicRecorder {
 
     this.mediaRecorder.start(100)
     this.isRecording = true
+
+    // Safety duration timeout
+    if (this.settings.maxDurationSec > 0) {
+      this.autoStopTimer = setTimeout(() => {
+        if (this.isRecording) {
+          this.stop().catch(() => {})
+        }
+      }, this.settings.maxDurationSec * 1000)
+    }
   }
 
   public get recording(): boolean {
@@ -93,6 +202,11 @@ export class QuickMicRecorder {
   }
 
   public stop(): Promise<MicRecordingResult> {
+    if (this.autoStopTimer) {
+      clearTimeout(this.autoStopTimer)
+      this.autoStopTimer = null
+    }
+
     return new Promise((resolve, reject) => {
       if (!this.mediaRecorder || !this.isRecording) {
         reject(new Error('Recorder not active'))
@@ -104,18 +218,39 @@ export class QuickMicRecorder {
           const blob = new Blob(this.chunks, { type: 'audio/wav' })
           const arrayBuffer = await blob.arrayBuffer()
           const rawCtx = Tone.getContext().rawContext as AudioContext
-          const audioBuffer = await rawCtx.decodeAudioData(arrayBuffer)
+          let audioBuffer = await rawCtx.decodeAudioData(arrayBuffer)
 
-          // Try fundamental pitch detection on middle of recording
+          // 1. Apply software input gain if configured
+          if (this.settings.inputGain !== 1.0) {
+            audioBuffer = applyGainToAudioBuffer(audioBuffer, this.settings.inputGain, rawCtx)
+          }
+
+          // 2. Auto-trim silence from start/end
+          if (this.settings.autoTrimSilence) {
+            audioBuffer = trimAudioBufferSilence(audioBuffer, this.settings.silenceTrimThresholdDb, rawCtx)
+          }
+
+          // 3. Peak normalize to clear studio volume
+          if (this.settings.autoNormalize) {
+            audioBuffer = normalizeAudioBuffer(audioBuffer, -0.5, rawCtx)
+          }
+
+          // 4. Fundamental pitch detection
           let detectedMidiNote: number | undefined
-          if (audioBuffer.length > 2048) {
+          if (this.settings.pitchDetectionEnabled && audioBuffer.length > 1024) {
             const channelData = audioBuffer.getChannelData(0)
             const sampleSliceSize = Math.min(4096, channelData.length)
             const midStart = Math.max(0, Math.floor((channelData.length - sampleSliceSize) / 2))
             const sampleSlice = channelData.slice(midStart, midStart + sampleSliceSize)
-            const freq = detectFundamentalPitch(sampleSlice, audioBuffer.sampleRate)
+            const freq = detectFundamentalPitch(
+              sampleSlice,
+              audioBuffer.sampleRate,
+              this.settings.pitchConfidenceThreshold,
+              this.settings.minPitchHz,
+              this.settings.maxPitchHz
+            )
             if (freq) {
-              detectedMidiNote = Math.max(24, Math.min(96, hzToMidi(freq)))
+              detectedMidiNote = Math.max(21, Math.min(108, hzToMidi(freq)))
             }
           }
 
@@ -138,6 +273,10 @@ export class QuickMicRecorder {
   }
 
   public cancel(): void {
+    if (this.autoStopTimer) {
+      clearTimeout(this.autoStopTimer)
+      this.autoStopTimer = null
+    }
     if (this.mediaRecorder && this.isRecording) {
       try {
         this.mediaRecorder.stop()
@@ -147,6 +286,10 @@ export class QuickMicRecorder {
   }
 
   private cleanup(): void {
+    if (this.autoStopTimer) {
+      clearTimeout(this.autoStopTimer)
+      this.autoStopTimer = null
+    }
     this.isRecording = false
     if (this.stream) {
       this.stream.getTracks().forEach((t) => t.stop())

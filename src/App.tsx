@@ -1,3 +1,4 @@
+// MuseGrid App Component - Updated pull request submission
 import { useEffect, useRef, useState } from 'react'
 import * as Tone from 'tone'
 import GridCanvas from './renderer/GridCanvas'

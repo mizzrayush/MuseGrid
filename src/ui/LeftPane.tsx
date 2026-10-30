@@ -3046,8 +3046,9 @@ export default function LeftPane() {
 
   const exportTrack = (trackId: string, format: 'wav' | 'mp3' | 'midi') => {
     const state = useStore.getState()
-    // Calculate absolute end across all tracks
-    const lastNoteTick = state.notes.length > 0 ? Math.max(...state.notes.map(n => n.time + n.duration)) : 768
+    const trackNotes = state.notes.filter(n => n.trackId === trackId)
+    const startTick = trackNotes.length > 0 ? Math.min(...trackNotes.map(n => n.time)) : 0
+    const endTick = trackNotes.length > 0 ? Math.max(...trackNotes.map(n => n.time + n.duration)) : 768
 
     setProjectExportData({
       type: format,
@@ -11534,11 +11535,17 @@ for (let channel = 0; channel < input.length; channel++) {
                                     useStore.getState().showToast('Custom Synth Mode Activated', 'success')
                                   } else {
                                     commitHistory()
+                                    // If track is in sampler mode with a custom sample loaded, preserve synthMode unless explicitly changed
+                                    const keepSampler = track.synthMode === 'sampler' && !!track.synthSampler?.audioBase64
                                     updateTrack(track.id, {
                                       synthPreset: val as SynthPreset,
-                                      synthMode: 'synth'
+                                      synthMode: keepSampler ? 'sampler' : 'synth'
                                     })
-                                    setTimeout(() => audioEngine.createInstrument(track.id, 'synth'), 50)
+                                    if (keepSampler && track.synthSampler) {
+                                      audioEngine.setTrackSamplerConfig(track.id, track.synthSampler)
+                                    } else {
+                                      setTimeout(() => audioEngine.createInstrument(track.id, 'synth'), 50)
+                                    }
                                   }
                                 }}
                                 style={{ width: '100%', background: '#12141c', color: '#00e6ff', border: '1px solid rgba(0, 230, 255, 0.25)', borderRadius: '4px', padding: '5px', fontSize: '11px', outline: 'none' }}

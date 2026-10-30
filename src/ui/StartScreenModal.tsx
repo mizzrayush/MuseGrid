@@ -495,9 +495,30 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
       return
     }
 
-    // 3. Fallback: if user already has an active session
-    if (hasActiveSession) {
+    // 3. Entries without a file path are live sessions: point at their open tab
+    const targetName = item.name.trim().toLowerCase()
+    const liveTab = openTabs.find(t =>
+      item.filePath && t.filePath
+        ? t.filePath.toLowerCase() === item.filePath.toLowerCase()
+        : t.name.trim().toLowerCase() === targetName
+    )
+
+    if (liveTab) {
+      switchTab(liveTab.id)
       setIsStartScreenOpen(false)
+      onProjectLoaded?.()
+      enterDawFullscreen()
+      showToast(`Opened ${liveTab.name}`, 'success')
+      return
+    }
+
+    // 4. Fallback: if user already has an active session, navigate into it
+    if (hasActiveSession) {
+      if (useStore.getState().activeTabId === 'start' && openTabs.length > 0) {
+        switchTab(openTabs[0].id)
+      }
+      setIsStartScreenOpen(false)
+      onProjectLoaded?.()
       enterDawFullscreen()
       showToast(`Returned to active workspace`, 'info')
     } else {

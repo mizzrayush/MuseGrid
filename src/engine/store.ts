@@ -1565,6 +1565,12 @@ export const snapshotProjectData = (state: AppState) => ({
   metronomeEnabled: state.metronomeEnabled,
   metronomeVolume: state.metronomeVolume,
   quantizeInputEnabled: state.quantizeInputEnabled,
+  quantizeStrength: state.quantizeStrength,
+  dropSnap: state.dropSnap,
+  activeTool: state.activeTool,
+  noteInspectorEnabled: state.noteInspectorEnabled,
+  midiOverdub: state.midiOverdub,
+  completeNotesOnPause: state.completeNotesOnPause,
   playheadFollowMode: state.playheadFollowMode,
   automationCurves: state.automationCurves,
   automationTargets: state.automationTargets,
@@ -1599,7 +1605,6 @@ export const snapshotProjectData = (state: AppState) => ({
   grooveTimingStrength: state.grooveTimingStrength,
   grooveVelocityStrength: state.grooveVelocityStrength,
   grooveExtractionTargetAll: state.grooveExtractionTargetAll,
-  quantizeStrength: state.quantizeStrength,
   zoomSynth: state.zoomSynth,
   zoomDrum: state.zoomDrum,
   syncZoom: state.syncZoom,
@@ -1613,7 +1618,9 @@ export const snapshotProjectData = (state: AppState) => ({
   vocalVelocityEnabled: state.vocalVelocityEnabled,
   horizScrollLockEnabled: state.horizScrollLockEnabled,
   vertScrollLockEnabled: state.vertScrollLockEnabled,
-  scrollBoth: state.scrollBoth
+  scrollBoth: state.scrollBoth,
+  columnWidths: state.columnWidths,
+  sharedPanX: state.sharedPanX
 })
 
 export const createDefaultTracks = (): Track[] => [
@@ -1728,7 +1735,37 @@ export const applyProjectDataToEngineAndStore = (data: any, tabName?: string, fi
     }
   }
 
+  // Every setting a project saves must also be restored, otherwise opening a
+  // project in a tab silently keeps the previous project's grid/studio state.
+  const currentState = useStore.getState()
+  const restoredSettings: Partial<AppState> = {}
+  const settingKeys: Array<keyof AppState> = [
+    'metronomeEnabled', 'metronomeVolume', 'swing',
+    'snapEnabled', 'snapResolution', 'gridBlockTicks', 'dropSnap', 'gridShadeEvery', 'gridColumnCount',
+    'playheadFollowMode', 'completeNotesOnPause', 'midiOverdub',
+    'activeTool', 'noteInspectorEnabled', 'readOnlyMode',
+    'pitchSnapEnabled', 'pitchDropSnap', 'pitchSnapSensitivity',
+    'verticalMergeThreshold', 'verticalStretchMode', 'glideStyle',
+    'customSynthRows', 'customDrumRows', 'synthLowerOctave', 'synthUpperOctave',
+    'minNoteSize', 'autoExtendGrid', 'gridResizable',
+    'gridSplitOrder', 'gridPaneMode', 'scrollBoth', 'bothGridActive',
+    'horizScrollLockEnabled', 'vertScrollLockEnabled',
+    'ghostNotesEnabled', 'ghostNoteOpacity', 'ghostCrossInstrument',
+    'showSynthVelocity', 'showDrumVelocity',
+    'vocalVelocityEnabled', 'vocalVelocityMin', 'vocalVelocityMax', 'vocalVelocityScale',
+    'deduplicateEnabled', 'deduplicateProximityTolerance', 'deduplicateOverlapThreshold',
+    'grooveTemplates', 'activeGrooveTemplateId', 'grooveTimingStrength',
+    'grooveVelocityStrength', 'grooveExtractionTargetAll',
+    'quantizeInputEnabled', 'quantizeStrength',
+    'zoomSynth', 'zoomDrum', 'syncZoom',
+    'customFxConfigs', 'voicePresets', 'columnWidths', 'sharedPanX'
+  ]
+  settingKeys.forEach(key => {
+    if (data[key] !== undefined) (restoredSettings as any)[key] = data[key]
+  })
+
   return {
+    ...restoredSettings,
     projectName: tabName || data.projectName || 'Untitled Project',
     projectFilePath: filePath !== undefined ? filePath : (data.projectFilePath || null),
     isDirty: false,
@@ -1753,6 +1790,15 @@ export const applyProjectDataToEngineAndStore = (data: any, tabName?: string, fi
     playheadPosition: 0,
     columnWidths: data.columnWidths || {},
     sharedPanX: data.sharedPanX || 0,
+    studioSettings: data.studioSettings
+      ? { ...currentState.studioSettings, ...data.studioSettings }
+      : currentState.studioSettings,
+    metronomeSettings: data.metronomeSettings
+      ? { ...currentState.metronomeSettings, ...data.metronomeSettings }
+      : currentState.metronomeSettings,
+    micSettings: data.micSettings
+      ? { ...currentState.micSettings, ...data.micSettings }
+      : currentState.micSettings,
     isPlaying: false
   }
 }
@@ -3690,7 +3736,7 @@ if (firstTrack) {
       proceduralFxRate: '32n',
       velocityCurveFormula: 'v',
       limiterThreshold: -1.5,
-      persistenceEnabled: false,
+      persistenceEnabled: true,
     },
     updateStudio: (updates) => set(state => ({
       studioSettings: { ...state.studioSettings, ...updates }
@@ -3900,10 +3946,23 @@ useStore.subscribe((state, prevState) => {
         snapEnabled: curState.snapEnabled,
         snapResolution: curState.snapResolution,
         gridBlockTicks: curState.gridBlockTicks,
+        dropSnap: curState.dropSnap,
         minNoteSize: curState.minNoteSize,
         gridShadeEvery: curState.gridShadeEvery,
         gridColumnCount: curState.gridColumnCount,
         swing: curState.swing,
+        activeTool: curState.activeTool,
+        noteInspectorEnabled: curState.noteInspectorEnabled,
+        midiOverdub: curState.midiOverdub,
+        quantizeStrength: curState.quantizeStrength,
+        deduplicateEnabled: curState.deduplicateEnabled,
+        deduplicateProximityTolerance: curState.deduplicateProximityTolerance,
+        deduplicateOverlapThreshold: curState.deduplicateOverlapThreshold,
+        zoomSynth: curState.zoomSynth,
+        zoomDrum: curState.zoomDrum,
+        syncZoom: curState.syncZoom,
+        gridSplitOrder: curState.gridSplitOrder,
+        gridPaneMode: curState.gridPaneMode,
         metronomeEnabled: curState.metronomeEnabled,
         metronomeVolume: curState.metronomeVolume,
         grooveTemplates: curState.grooveTemplates,
@@ -3922,6 +3981,7 @@ useStore.subscribe((state, prevState) => {
         timeSignature: curState.timeSignature,
         metronomeSettings: curState.metronomeSettings,
         studioSettings: curState.studioSettings,
+        micSettings: curState.micSettings,
         leftPaneWidth: curState.leftPaneWidth,
         leftPaneCollapsed: curState.leftPaneCollapsed,
         splitRatio: curState.splitRatio,
@@ -4006,6 +4066,9 @@ try {
       }
       if (parsed.metronomeSettings) {
         topLevelUpdates.metronomeSettings = { ...useStore.getState().metronomeSettings, ...parsed.metronomeSettings }
+      }
+      if (parsed.micSettings) {
+        topLevelUpdates.micSettings = { ...useStore.getState().micSettings, ...parsed.micSettings }
       }
       useStore.setState(topLevelUpdates)
     }

@@ -108,13 +108,21 @@ class WasmAudioProcessor extends AudioWorkletProcessor {
 
     this.wasm.process();
 
+    // `process()` can allocate (new voices/buffers) and grow linear memory,
+    // which detaches the Float32Array views captured before the call.
+    if (this.wasmMemory !== this.wasm.memory.buffer) {
+      this.wasmMemory = this.wasm.memory.buffer;
+      this.outLBuffer = new Float32Array(this.wasmMemory, this.outLPtr, 128);
+      this.outRBuffer = new Float32Array(this.wasmMemory, this.outRPtr, 128);
+    }
+
     const output = outputs[0];
     if (output) {
       if (!output[0] || !output[1]) {
         console.warn(`[audio-processor] WARNING: Output channels count is ${output.length}`);
       }
-      if (output[0]) output[0].set(this.outLBuffer);
-      if (output[1]) output[1].set(this.outRBuffer);
+      if (output[0]) output[0].set(this.outLBuffer.subarray(0, output[0].length));
+      if (output[1]) output[1].set(this.outRBuffer.subarray(0, output[1].length));
     }
 
     return true;

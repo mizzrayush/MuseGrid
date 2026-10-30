@@ -69,11 +69,13 @@ export const getProjectDataString = () => {
     scaleLock: state.scaleLock, snapEnabled: state.snapEnabled, snapResolution: state.snapResolution, gridBlockTicks: state.gridBlockTicks,
     gridShadeEvery: state.gridShadeEvery, gridColumnCount: state.gridColumnCount, swing: state.swing, metronomeEnabled: state.metronomeEnabled,
     metronomeVolume: state.metronomeVolume, quantizeInputEnabled: state.quantizeInputEnabled,
+    dropSnap: state.dropSnap, activeTool: state.activeTool, noteInspectorEnabled: state.noteInspectorEnabled,
+    midiOverdub: state.midiOverdub, completeNotesOnPause: state.completeNotesOnPause,
     playheadFollowMode: state.playheadFollowMode, automationCurves: state.automationCurves,
     // Without the target map a reloaded project would read a pan/volume/VST3 curve as velocity.
     automationTargets: state.automationTargets,
     automationLanes: state.automationLanes, clips: state.clips, groups: state.groups, drumSteps: state.drumSteps,
-    timeSignature: state.timeSignature, metronomeSettings: state.metronomeSettings, studioSettings: state.studioSettings, customFxConfigs: state.customFxConfigs,
+    timeSignature: state.timeSignature, metronomeSettings: state.metronomeSettings, studioSettings: state.studioSettings, micSettings: state.micSettings, customFxConfigs: state.customFxConfigs,
     pitchSnapEnabled: state.pitchSnapEnabled, pitchDropSnap: state.pitchDropSnap, pitchSnapSensitivity: state.pitchSnapSensitivity, verticalMergeThreshold: state.verticalMergeThreshold,
     verticalStretchMode: state.verticalStretchMode, customSynthRows: state.customSynthRows, customDrumRows: state.customDrumRows, synthLowerOctave: state.synthLowerOctave,
     synthUpperOctave: state.synthUpperOctave, minNoteSize: state.minNoteSize, autoExtendGrid: state.autoExtendGrid, gridResizable: state.gridResizable, readOnlyMode: state.readOnlyMode,
@@ -84,7 +86,8 @@ export const getProjectDataString = () => {
     zoomSynth: state.zoomSynth, zoomDrum: state.zoomDrum, syncZoom: state.syncZoom,
     gridSplitOrder: state.gridSplitOrder, gridPaneMode: state.gridPaneMode,
     showSynthVelocity: state.showSynthVelocity, showDrumVelocity: state.showDrumVelocity, vocalVelocityMin: state.vocalVelocityMin, vocalVelocityMax: state.vocalVelocityMax, vocalVelocityScale: state.vocalVelocityScale, vocalVelocityEnabled: state.vocalVelocityEnabled,
-    horizScrollLockEnabled: state.horizScrollLockEnabled, vertScrollLockEnabled: state.vertScrollLockEnabled, scrollBoth: state.scrollBoth
+    horizScrollLockEnabled: state.horizScrollLockEnabled, vertScrollLockEnabled: state.vertScrollLockEnabled, scrollBoth: state.scrollBoth,
+    columnWidths: state.columnWidths, sharedPanX: state.sharedPanX
   })
 }
 
@@ -761,6 +764,9 @@ function App() {
             }
             if (parsed.metronomeSettings) {
               topUpdates.metronomeSettings = { ...useStore.getState().metronomeSettings, ...parsed.metronomeSettings }
+            }
+            if (parsed.micSettings) {
+              topUpdates.micSettings = { ...useStore.getState().micSettings, ...parsed.micSettings }
             }
             if (parsed.bpm) audioEngine.setBpm(parsed.bpm)
             useStore.setState(topUpdates)

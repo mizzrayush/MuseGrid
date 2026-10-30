@@ -2330,6 +2330,7 @@ export default function LeftPane() {
       downbeatVel: 1.0,
       upbeatVel: 0.65,
     })
+    useStore.getState().resetMicSettings()
 
     audioEngine.setBpm(120)
 
@@ -2589,6 +2590,7 @@ export default function LeftPane() {
         timestamp: new Date().toISOString(),
         // 1. Studio & Engine
         studioSettings,
+        micSettings,
         engineMode: state.engineMode,
         // 2. Metronome & Click
         metronomeSettings,
@@ -2698,6 +2700,7 @@ export default function LeftPane() {
         version: '1.2.0',
         timestamp: new Date().toISOString(),
         studioSettings,
+        micSettings,
         engineMode: state.engineMode,
         metronomeSettings,
         metronomeEnabled: state.metronomeEnabled,
@@ -2811,6 +2814,10 @@ export default function LeftPane() {
       }
       if (parsed.voicePresets !== undefined) {
         localStorage.setItem('musegrid_voice_presets', JSON.stringify(parsed.voicePresets))
+      }
+
+      if (parsed.micSettings) {
+        useStore.getState().updateMicSettings(parsed.micSettings)
       }
 
       // Apply top level workstation settings
@@ -4993,6 +5000,7 @@ export default function LeftPane() {
     if (designerTab === 'synth') {
       updateTrack(trackId, {
         synthPreset: 'custom',
+        synthMode: 'synth',
         customMuxins: {
           name: designerName,
           engineType: designerEngine,
@@ -8304,6 +8312,7 @@ export default function LeftPane() {
                     commitHistory()
                     updateTrack(activeTrack.id, {
                       synthPreset: 'physical',
+                      synthMode: 'synth',
                       pmModelType: 'string',
                       pmStringStiffness: 0.5,
                       pmStringDecay: 0.7,
@@ -8355,7 +8364,7 @@ export default function LeftPane() {
                     <button
                       onClick={() => {
                         commitHistory()
-                        updateTrack(activeTrack.id, { synthPreset: 'warm' })
+                        updateTrack(activeTrack.id, { synthPreset: 'warm', synthMode: 'synth' })
                         audioEngine.createInstrument(activeTrack.id, 'synth')
                       }}
                       style={{
@@ -8628,12 +8637,13 @@ export default function LeftPane() {
                               onClick={() => {
                                 commitHistory()
                                 if (isPhysical) {
-                                  updateTrack(t.id, { synthPreset: 'warm' })
+                                  updateTrack(t.id, { synthPreset: 'warm', synthMode: 'synth' })
                                   audioEngine.createInstrument(t.id, 'synth')
                                   useStore.getState().showToast(`Disabled Physical Modeling on "${t.name}"`, 'success')
                                 } else {
                                   updateTrack(t.id, {
                                     synthPreset: 'physical',
+                                    synthMode: 'synth',
                                     pmModelType: activeTrack.pmModelType || 'string',
                                     pmStringStiffness: activeTrack.pmStringStiffness ?? 0.5,
                                     pmStringDecay: activeTrack.pmStringDecay ?? 0.7,
@@ -8779,7 +8789,7 @@ export default function LeftPane() {
                   <button
                     onClick={() => {
                       commitHistory()
-                      updateTrack(activeTrack.id, { synthPreset: 'piano' })
+                      updateTrack(activeTrack.id, { synthPreset: 'piano', synthMode: 'synth' })
                       audioEngine.createInstrument(activeTrack.id, 'synth')
                       useStore.getState().showToast(`Deactivated vocal synth on "${activeTrack.name}" (switched to Piano)`, 'info')
                     }}
@@ -8794,7 +8804,7 @@ export default function LeftPane() {
                   <button
                     onClick={() => {
                       commitHistory()
-                      updateTrack(activeTrack.id, { synthPreset: 'vocal' })
+                      updateTrack(activeTrack.id, { synthPreset: 'vocal', synthMode: 'synth' })
                       audioEngine.createInstrument(activeTrack.id, 'synth')
                       useStore.getState().showToast(`Activated vocal synth on "${activeTrack.name}"`, 'success')
                     }}
@@ -11504,7 +11514,8 @@ for (let channel = 0; channel < input.length; channel++) {
                                               if (parsed.engineType === 'physical') {
                                                 updateTrack(track.id, {
                                                   synthPreset: 'physical',
-                                                  ...parsed.config
+                                                  ...parsed.config,
+                                                  synthMode: 'synth'
                                                 })
                                                 setTimeout(() => {
                                                   audioEngine.createInstrument(track.id, 'synth')
@@ -11531,6 +11542,7 @@ for (let channel = 0; channel < input.length; channel++) {
                                     commitHistory()
                                     updateTrack(track.id, {
                                       synthPreset: 'physical',
+                                      synthMode: 'synth',
                                       pmModelType: track.pmModelType || 'string',
                                       pmStringStiffness: track.pmStringStiffness ?? 0.5,
                                       pmStringDecay: track.pmStringDecay ?? 0.7,
@@ -11541,7 +11553,7 @@ for (let channel = 0; channel < input.length; channel++) {
                                     useStore.getState().showToast('Physical Modeling Engine Activated', 'success')
                                   } else if (val === 'vocal') {
                                     commitHistory()
-                                    updateTrack(track.id, { synthPreset: 'vocal' })
+                                    updateTrack(track.id, { synthPreset: 'vocal', synthMode: 'synth' })
                                     setTimeout(() => audioEngine.createInstrument(track.id, 'synth'), 50)
                                     useStore.getState().showToast('Vocal / Singing Synth Activated', 'success')
                                   } else if (val === 'custom-sampler') {
@@ -13917,11 +13929,18 @@ for (let channel = 0; channel < input.length; channel++) {
                           <ToggleSwitch
                             checked={projectExportData.startTick === loopStart && projectExportData.endTick === loopEnd}
                             onChange={v => {
-                              const lastTick = notes.length > 0 ? Math.max(...notes.map(n => n.time + n.duration)) : 768
+                              // Fall back to the exported scope's own bounds, not the whole
+                              // project, so a single-track export keeps its start tick.
+                              const scopeIds = projectExportData.trackIds && projectExportData.trackIds.length > 0
+                                ? new Set(projectExportData.trackIds)
+                                : projectExportData.trackId ? new Set([projectExportData.trackId]) : null
+                              const scopedNotes = scopeIds ? notes.filter(n => scopeIds.has(n.trackId)) : notes
+                              const firstTick = scopedNotes.length > 0 ? Math.min(...scopedNotes.map(n => n.time)) : 0
+                              const lastTick = scopedNotes.length > 0 ? Math.max(...scopedNotes.map(n => n.time + n.duration)) : 768
                               setProjectExportData({
                                 ...projectExportData,
-                                startTick: v ? loopStart : 0,
-                                endTick: v ? loopEnd : lastTick
+                                startTick: v ? loopStart : firstTick,
+                                endTick: v ? loopEnd : Math.max(firstTick + 1, lastTick)
                               })
                             }}
                             color="#12b886"

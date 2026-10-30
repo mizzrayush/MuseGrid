@@ -342,7 +342,10 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
   const handleClose = () => {
     if (embedded) {
       if (openTabs.length > 0) {
+        // At startup the autosaved tab is already active, so switchTab() is a
+        // no-op; the launch flag still has to clear or the hub stays on screen.
         switchTab(openTabs[0].id)
+        onProjectLoaded?.()
       } else {
         onNewProject()
       }
@@ -375,7 +378,10 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
   const handleSkipToWorkspace = () => {
     if (embedded) {
       if (openTabs.length > 0) {
+        // At startup the autosaved tab is already active, so switchTab() is a
+        // no-op; the launch flag still has to clear or the hub stays on screen.
         switchTab(openTabs[0].id)
+        onProjectLoaded?.()
       } else {
         onNewProject()
       }

@@ -527,8 +527,14 @@ export const SynthStudioModal: React.FC = () => {
   const handleSaveToTrack = () => {
     if (!targetTrack) return
 
+    // Saving studio edits must not silently swap a physical/vocal track back to the
+    // generic custom synth; only an explicit sampler save changes the engine.
+    const keepSpecializedPreset = !samplerMode &&
+      (targetTrack.synthPreset === 'physical' || targetTrack.synthPreset === 'vocal')
+    const savedPreset = keepSpecializedPreset ? targetTrack.synthPreset! : 'custom'
+
     updateTrack(targetTrack.id, {
-      synthPreset: 'custom',
+      synthPreset: savedPreset,
       synthMode: samplerMode ? 'sampler' : 'synth',
       synthOscillator: oscType,
       synthFormula: oscType === 'custom' ? synthFormula : undefined,
@@ -554,7 +560,8 @@ export const SynthStudioModal: React.FC = () => {
     }
 
     setHasUnsavedChanges(false)
-    useStore.getState().showToast(`Saved custom synth sound to track "${targetTrack.name}"!`, 'success')
+    const savedLabel = savedPreset === 'physical' ? 'physical model' : savedPreset === 'vocal' ? 'vocal engine' : 'custom synth sound'
+    useStore.getState().showToast(`Saved ${savedLabel} to track "${targetTrack.name}"!`, 'success')
   }
 
   // --- Waveform Animation ---

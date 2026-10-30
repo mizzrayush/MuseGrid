@@ -3073,6 +3073,34 @@ export default function LeftPane() {
     setContextMenu(null)
   }
 
+  const exportSelectedMix = (format: 'wav' | 'mp3' | 'midi') => {
+    const state = useStore.getState()
+    const mixNotes = state.notes.filter(n => selectedTrackIds.includes(n.trackId))
+    const firstTick = mixNotes.length > 0 ? Math.min(...mixNotes.map(n => n.time)) : 0
+    const lastTick = mixNotes.length > 0 ? Math.max(...mixNotes.map(n => n.time + n.duration)) : 768
+
+    setProjectExportData({
+      type: format,
+      trackIds: selectedTrackIds,
+      octaveOffset: 0,
+      semitoneOffset: 0,
+      normalize: format !== 'midi',
+      includeMetronome: false,
+      autoFade: format !== 'midi',
+      isRendering: false,
+      progress: 0,
+      renderElapsedSeconds: 0,
+      renderTotalSeconds: 0,
+      startTick: state.loopEnabled ? state.loopStart : firstTick,
+      endTick: state.loopEnabled ? state.loopEnd : Math.max(firstTick + 1, lastTick),
+      includeProceduralFx: format === 'midi' ? false : state.studioSettings.proceduralFxEnabled,
+      mp3Kbps: 320,
+      bounceMode: 'hybrid',
+      realtimeTailSeconds: 2
+    })
+    setContextMenu(null)
+  }
+
   const cancelProjectExport = () => {
     const currentExport = useStore.getState().projectExportData
     if (currentExport?.isRendering && currentExport.bounceMode === 'realtime') {
@@ -13025,8 +13053,8 @@ for (let channel = 0; channel < input.length; channel++) {
                         setContextMenu(null)
                         state.showToast('Selected tracks merged into active track(s).', 'success')
                       }}><IconPlus size={13} /> Merge Selected</button>
-                      <button style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '8px 16px', background: 'none', border: 'none', color: '#4dabf7', cursor: 'pointer', textAlign: 'left', fontSize: '12px', fontWeight: 500 }} onClick={() => { useStore.getState().setProjectExportData({ type: 'wav', trackIds: selectedTrackIds, octaveOffset: 0, semitoneOffset: 0, normalize: true, includeMetronome: false, autoFade: true, isRendering: false, progress: 0 }); setContextMenu(null) }}><IconDownload size={13} /> Export Selected Mix (WAV)</button>
-                      <button style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '8px 16px', background: 'none', border: 'none', color: '#00e6ff', cursor: 'pointer', textAlign: 'left', fontSize: '12px', fontWeight: 500 }} onClick={() => { useStore.getState().setProjectExportData({ type: 'mp3', trackIds: selectedTrackIds, octaveOffset: 0, semitoneOffset: 0, normalize: true, includeMetronome: false, autoFade: true, isRendering: false, progress: 0 }); setContextMenu(null) }}><IconDownload size={13} /> Export Selected Mix (MP3)</button>
+                      <button style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '8px 16px', background: 'none', border: 'none', color: '#4dabf7', cursor: 'pointer', textAlign: 'left', fontSize: '12px', fontWeight: 500 }} onClick={() => exportSelectedMix('wav')}><IconDownload size={13} /> Export Selected Mix (WAV)</button>
+                      <button style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '8px 16px', background: 'none', border: 'none', color: '#00e6ff', cursor: 'pointer', textAlign: 'left', fontSize: '12px', fontWeight: 500 }} onClick={() => exportSelectedMix('mp3')}><IconDownload size={13} /> Export Selected Mix (MP3)</button>
                       <button style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '8px 16px', background: 'none', border: 'none', color: '#da77f2', cursor: 'pointer', textAlign: 'left', fontSize: '12px', fontWeight: 600 }} onClick={() => {
                         const selTracks = tracks.filter(t => selectedTrackIds.includes(t.id))
                         const selNotes = notes.filter(n => selectedTrackIds.includes(n.trackId))
@@ -13043,7 +13071,7 @@ for (let channel = 0; channel < input.length; channel++) {
                         downloadMuzTrack(json, 'selected_tracks.muztrack')
                         setContextMenu(null)
                       }}><IconDownload size={13} /> Export Selected (.muztrack)</button>
-                      <button style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '8px 16px', background: 'none', border: 'none', color: '#ffd43b', cursor: 'pointer', textAlign: 'left', fontSize: '12px', fontWeight: 500 }} onClick={() => { useStore.getState().setProjectExportData({ type: 'midi', trackIds: selectedTrackIds, octaveOffset: 0, semitoneOffset: 0, normalize: false, includeMetronome: false, autoFade: false, isRendering: false, progress: 0 }); setContextMenu(null) }}><IconMidi size={13} /> Export Selected (MIDI)</button>
+                      <button style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '8px 16px', background: 'none', border: 'none', color: '#ffd43b', cursor: 'pointer', textAlign: 'left', fontSize: '12px', fontWeight: 500 }} onClick={() => exportSelectedMix('midi')}><IconMidi size={13} /> Export Selected (MIDI)</button>
                       <button style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '8px 16px', background: 'none', border: 'none', color: '#da77f2', cursor: 'pointer', textAlign: 'left', fontSize: '12px', fontWeight: 500 }} onClick={() => { useStore.getState().setScorePreviewTrackIds(selectedTrackIds); useStore.getState().setIsScorePreviewVisible(true); setContextMenu(null) }}><IconMusic size={13} /> Score Editor / MusicXML</button>
                     </>
                   )
@@ -13179,20 +13207,7 @@ for (let channel = 0; channel < input.length; channel++) {
                 )}
                 <button
                   style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '8px 16px', background: 'none', border: 'none', color: '#ffd43b', cursor: 'pointer', textAlign: 'left', fontSize: '12px', fontWeight: 500 }}
-                  onClick={() => {
-                    useStore.getState().setProjectExportData({
-                      type: 'wav',
-                      trackId: contextMenu.trackId,
-                      octaveOffset: 0,
-                      semitoneOffset: 0,
-                      normalize: true,
-                      includeMetronome: false,
-                      autoFade: true,
-                      isRendering: false,
-                      progress: 0
-                    })
-                    setContextMenu(null)
-                  }}
+                  onClick={() => { exportTrack(contextMenu.trackId, 'wav') }}
                 >
                   <IconDownload size={13} /> Export Track Audio / Mix...
                 </button>

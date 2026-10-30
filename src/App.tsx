@@ -19,6 +19,7 @@ import { scheduler } from './engine/Scheduler'
 import { useStore, saveRecentProject, type ProjectTab } from './engine/store'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET } from './utils/instruments'
 import { saveFileWithDialog } from './utils/fileExport'
+import { readMuzTrackExpression } from './utils/scoreExport'
 import { ProjectTabBar } from './ui/ProjectTabBar'
 import { IconTrash, IconDownload, IconSave, IconPlay, IconStop, IconMidi, IconAlign, IconSkipBack, IconChevronDown, IconMaximize, IconMusic, IconStretch, IconChevronLeft, IconChevronRight, IconSync, IconHelp, IconTarget, IconSliders, IconAlertTriangle, IconMuseLogo } from './ui/Icons'
 
@@ -403,7 +404,9 @@ function App() {
                 time: n.time,
                 duration: n.duration,
                 velocity: n.velocity ?? 0.8,
-                lyric: n.lyric
+                lyric: n.lyric,
+                ...(n.velocityInspectorModified ? { velocityInspectorModified: true } : {}),
+                ...readMuzTrackExpression(n)
               }))
             }
           })

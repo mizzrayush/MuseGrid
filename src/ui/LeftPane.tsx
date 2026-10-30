@@ -16,7 +16,7 @@ import { buildNativeBouncePayload, canUseNativeBounce, renderNativeAudioBuffer, 
 import { audioBufferToWav } from '../utils/wavEncoder'
 import { audioBufferToMp3 } from '../utils/mp3Encoder'
 import { createMidiData } from '../utils/midiExport'
-import { generateMusicXML, downloadScore, generateMuzTrack, downloadMuzTrack, parseMuzTrack } from '../utils/scoreExport'
+import { generateMusicXML, downloadScore, generateMuzTrack, downloadMuzTrack, parseMuzTrack, readMuzTrackExpression } from '../utils/scoreExport'
 import { exportTrackScala, parseScalaContent } from '../utils/scalaExport'
 import { saveFileWithDialog } from '../utils/fileExport'
 import { generateAiMelody, generateAiDrums, generateBeatMorph, generateAutoHarmony, generateHumanGroove, generatePianoGenieNote, resetPianoGenie } from '../utils/aiLab'
@@ -4675,7 +4675,9 @@ export default function LeftPane() {
           time: srcNote.time,
           duration: srcNote.duration,
           velocity: srcNote.velocity ?? 0.8,
-          lyric: srcNote.lyric
+          lyric: srcNote.lyric,
+          ...(srcNote.velocityInspectorModified ? { velocityInspectorModified: true } : {}),
+          ...readMuzTrackExpression(srcNote)
         })
       }
 

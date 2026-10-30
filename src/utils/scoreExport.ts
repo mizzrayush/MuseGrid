@@ -1,4 +1,5 @@
 import type { Track, Note } from '../engine/store'
+import { ARTICULATION_FIELDS } from './articulations'
 import { saveFileWithDialog } from './fileExport'
 
 function escapeXml(unsafe: string): string {
@@ -305,6 +306,14 @@ export function downloadScore(xmlString: string, filename: string): void {
   })
 }
 
+export type MuzTrackExpression = Partial<Pick<Note,
+  | 'vibratoDepth' | 'vibratoRate' | 'vibratoDelay' | 'vibratoFade' | 'vibratoWave'
+  | 'tremoloDepth' | 'tremoloRate' | 'tremoloWave'
+  | 'filterStart' | 'filterEnd' | 'filterSweepTime' | 'filterSweepRamp'
+  | 'pitchSlide' | 'pitchSlideTime' | 'pitchSlideRamp' | 'pitchSlideCustomCurve'
+  | 'glideStyle' | 'octaves' | 'resonance' | 'decay'
+>>
+
 export interface MuzTrackExportData {
   format: 'muztrack'
   version: '1.0'
@@ -335,7 +344,26 @@ export interface MuzTrackExportData {
     lyric?: string
     frequencyHz: number
     centsFromRoot: number
+    edoDivision?: number
+    velocityInspectorModified?: boolean
+    /** Per-note articulation values; omitted for notes that use the track defaults. */
+    expression?: MuzTrackExpression
   }>
+}
+
+/**
+ * Copies only known articulation fields so a .muztrack file cannot overwrite note
+ * identity, timing, or pitch through a malformed `expression` object.
+ */
+export function readMuzTrackExpression(source: { expression?: unknown } | null | undefined): Partial<Note> {
+  const expression = source?.expression
+  if (!expression || typeof expression !== 'object') return {}
+  const result: Partial<Note> = {}
+  ARTICULATION_FIELDS.forEach(key => {
+    const value = (expression as Record<string, unknown>)[key]
+    if (value !== undefined) (result as Record<string, unknown>)[key] = value
+  })
+  return result
 }
 
 export function generateMuzTrack(tracks: Track[], allNotes: Note[], bpm: number, timeSignature: string): string {
@@ -368,6 +396,11 @@ export function generateMuzTrack(tracks: Track[], allNotes: Note[], bpm: number,
       const root = parentTrack?.edoRootNote ?? 60
       const freq = 440 * Math.pow(2, (n.pitch - 69) / 12)
       const centsFromRoot = Math.round((n.pitch - root) * 100)
+      const expression: MuzTrackExpression = {}
+      ARTICULATION_FIELDS.forEach(key => {
+        const value = n[key]
+        if (value !== undefined) (expression as Record<string, unknown>)[key] = value
+      })
 
       return {
         id: n.id,
@@ -379,7 +412,9 @@ export function generateMuzTrack(tracks: Track[], allNotes: Note[], bpm: number,
         lyric: n.lyric,
         frequencyHz: Math.round(freq * 100) / 100,
         centsFromRoot,
-        edoDivision: edo
+        edoDivision: edo,
+        ...(n.velocityInspectorModified ? { velocityInspectorModified: true } : {}),
+        ...(Object.keys(expression).length > 0 ? { expression } : {})
       }
     })
   }

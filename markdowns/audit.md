@@ -279,7 +279,8 @@ Added the same day, after the audit above. This pass deliberately extends *compo
 - **MIDI Type 1** — `midiExport` writes interpolated tempo meta events across each segment (sampled every half-beat, with exact values on every tempo point) and time-signature meta events for every meter point, both offset to the exported region start.
 - **Offline audio** — `renderProjectAudio` computes note lengths, range duration, and the end buffer with `conductorSecondsAtTick` / `conductorDurationSeconds`; the metronome uses `buildConductorBeats` so accents follow the meter map.
 - **Native bounce** — `nativeBounce` returns `null` when a tempo map is active, causing the export dialog to fall back to the Tone offline renderer instead of producing a constant-BPM bounce. Live JUCE playback still follows the map through `setBpm`.
-- **Score/MusicXML and `.muztrack`** — remain single-tempo, single-time-signature exports. This is a documented limitation, not a silent failure.
+- **Score/MusicXML** — remains a single-tempo, single-time-signature export. This is a documented limitation, not a silent failure.
+- **`.muztrack`** — remains a track-sharing format with one base BPM/signature (the conductor map stays in `.muz`). It now also carries per-note articulation in an optional `expression` object without changing format version 1.0, so vibrato, tremolo, filter sweep, slide, glide style, octave spread, resonance, and decay survive import into another project. Older readers ignore the field; older files import with no expression.
 
 ### 11.5 Verification evidence for this pass
 
@@ -293,6 +294,7 @@ Added the same day, after the audit above. This pass deliberately extends *compo
 | Runtime: drum channels | Added "Custom Channel 1" (pitch 16); header now reads "Channels 17 +" |
 | Runtime: MIDI meta export | 4/4 then 3/4 signatures; tempo events interpolating 120 → 180 |
 | Runtime: offline render | Same 768-tick range: 2.526 s at constant 120 BPM vs 2.117 s under the 120→180 map (1.6 s musical duration + 0.017 s tail + 0.5 s pad), proving the map retimes the bounce |
+| Runtime: `.muztrack` expression | Articulation values round-trip; plain notes omit the field; a crafted `expression` object cannot overwrite pitch or timing |
 
 **Not runtime-verified in this pass:** score export with a meter map (code-verified single signature), native bounce fallback path on a machine with the JUCE engine attached (code-verified via the `nativeBounce` guard), and formula curves with pathological expressions (clamped and fallback-tested by code).
 

@@ -11,6 +11,7 @@ import { CustomScriptProcessorNode, DPreverbNode, audioEngine, VocalModelVoice, 
 import { getActiveDPreverbInstances, getTrackFxInstances, getTrackFxSetting as readTrackFxSetting, type BuiltInFxType } from '../engine/fxDefaults'
 import { createTrackChannel } from './toneChannel'
 import { drumSampleShouldLoop, getSamplerPlayPlan, resolveSamplerLoopMode, resolveSamplerRegion } from './audioPlayback'
+import { buildConductorBeats, conductorDurationSeconds, conductorSecondsAtTick, getTempoAtTick } from './conductor'
 
 const PPQ = 192
 
@@ -830,12 +831,19 @@ function renderTrackNotesWithTransform(
       if (relativeTime + noteLength < 0) return // Before range
       if (options.endTick !== undefined && noteTime >= options.endTick) return // After range
 
-      // Use note-specific TPS for timing and duration if defined
+      // Use note-specific tempo for timing and duration if defined. The conductor
+      // map is integrated over the played tick span so accel/rit land where the
+      // live transport puts them.
       const noteBpm = note.bpm ?? trackBpm
-      const noteTicksPerSecond = (noteBpm / 60) * PPQ
-
-      const start = Math.max(0, relativeTime / noteTicksPerSecond)
-      const duration = Math.max(0.01, noteLength / noteTicksPerSecond)
+      const relativeTempo = noteBpm / state.bpm
+      const playedTick = noteTime / relativeTempo
+      const playedRegionStart = startOffset / relativeTempo
+      const start = Math.max(0,
+        conductorSecondsAtTick(state.tempoMap, state.bpm, playedTick) -
+        conductorSecondsAtTick(state.tempoMap, state.bpm, playedRegionStart))
+      const duration = Math.max(0.01,
+        conductorDurationSeconds(state.tempoMap, state.bpm, playedTick, playedTick + noteLength) / relativeTempo)
+      const noteTicksPerSecond = ((getTempoAtTick(state.tempoMap, state.bpm, playedTick) * relativeTempo) / 60) * PPQ
 
       // The automation lane drives velocity, per-note volume, per-note pan or expression parameters.
       let velocity = note.velocity / 127
@@ -1197,12 +1205,17 @@ function renderTrackNotesWithTransform(
     if (relativeTime + note.duration < 0) return // Before range
     if (options.endTick !== undefined && note.time >= options.endTick) return // After range
 
-    // Use note-specific TPS for timing and duration if defined
+    // Use note-specific tempo for timing and duration if defined
     const noteBpm = note.bpm ?? trackBpm
-    const noteTicksPerSecond = (noteBpm / 60) * PPQ
-
-    const start = Math.max(0, relativeTime / noteTicksPerSecond)
-    const duration = Math.max(0.01, note.duration / noteTicksPerSecond)
+    const relativeTempo = noteBpm / state.bpm
+    const playedTick = note.time / relativeTempo
+    const playedRegionStart = startOffset / relativeTempo
+    const start = Math.max(0,
+      conductorSecondsAtTick(state.tempoMap, state.bpm, playedTick) -
+      conductorSecondsAtTick(state.tempoMap, state.bpm, playedRegionStart))
+    const duration = Math.max(0.01,
+      conductorDurationSeconds(state.tempoMap, state.bpm, playedTick, playedTick + note.duration) / relativeTempo)
+    const noteTicksPerSecond = ((getTempoAtTick(state.tempoMap, state.bpm, playedTick) * relativeTempo) / 60) * PPQ
     let laneNote = note
     let velocity = note.velocity / 127
     let autoGain = 1
@@ -1293,7 +1306,7 @@ function renderTrackNotesWithTransform(
   })
 }
 
-function renderMetronome(duration: number, ticksPerSecond: number, state: AppState, startTick = 0): void {
+function renderMetronome(state: AppState, startTick: number, endTick: number): void {
   const settings = state.metronomeSettings
   const metronome = new Tone.MembraneSynth({
     pitchDecay: settings.pitchDecay,
@@ -1307,22 +1320,19 @@ function renderMetronome(duration: number, ticksPerSecond: number, state: AppSta
   }).toDestination()
   metronome.volume.value = settings.volume
 
-  const beatsPerMeasure = parseInt(state.timeSignature.split('/')[0]) || 4
-  const ticksPerBeat = PPQ
-  const endTick = startTick + duration * ticksPerSecond
   // Clicks stay on the project beat grid, matching live playback, so a loop export that starts
   // mid-bar still accents the real downbeats instead of restarting the count at the loop start.
-  const firstBeat = Math.ceil(startTick / ticksPerBeat)
+  const beats = buildConductorBeats(state.meterMap, state.timeSignature, startTick, endTick)
+  const rangeStartSeconds = conductorSecondsAtTick(state.tempoMap, state.bpm, startTick)
 
-  for (let beatIndex = firstBeat; beatIndex * ticksPerBeat < endTick; beatIndex++) {
-    const tick = beatIndex * ticksPerBeat
-    const time = (tick - startTick) / ticksPerSecond
-    const isDownbeat = beatIndex % beatsPerMeasure === 0
-    const note = isDownbeat ? settings.downbeatPitch : settings.upbeatPitch
-    const velBase = isDownbeat ? settings.downbeatVel : settings.upbeatVel
+  beats.forEach(beat => {
+    const time = conductorSecondsAtTick(state.tempoMap, state.bpm, beat.tick) - rangeStartSeconds
+    if (time < 0) return
+    const note = beat.isDownbeat ? settings.downbeatPitch : settings.upbeatPitch
+    const velBase = beat.isDownbeat ? settings.downbeatVel : settings.upbeatVel
     const velocity = Math.max(0, Math.min(1, state.metronomeVolume * velBase))
     metronome.triggerAttackRelease(note, '32n', time, velocity)
-  }
+  })
 }
 
 function getTrackFxSetting(track: Track, instId: string, instType: string, paramName: string, fallback: number): number {
@@ -1357,15 +1367,22 @@ function scheduleTrackDPreverb(
     if (endTick !== undefined && note.time >= endTick) return
 
     const noteBpm = note.bpm ?? trackBpm
-    const noteTicksPerSecond = (noteBpm / 60) * PPQ
-    const noteStartSeconds = Math.max(0, (note.time - startOffset) / noteTicksPerSecond)
+    const relativeTempo = noteBpm / state.bpm
+    const playedNoteTick = note.time / relativeTempo
+    const playedStartOffset = startOffset / relativeTempo
+    const noteStartSeconds = Math.max(0,
+      conductorSecondsAtTick(state.tempoMap, state.bpm, playedNoteTick) -
+      conductorSecondsAtTick(state.tempoMap, state.bpm, playedStartOffset))
+    const localTicksPerSecond = ((getTempoAtTick(state.tempoMap, state.bpm, playedNoteTick) * relativeTempo) / 60) * PPQ
 
     dpreverbs.forEach(({ settings, node }) => {
-      const idealPreStartTick = note.time - (settings.tail * noteTicksPerSecond)
+      const idealPreStartTick = note.time - (settings.tail * localTicksPerSecond)
       const preStartTick = Math.max(startOffset, idealPreStartTick)
       if (endTick !== undefined && preStartTick >= endTick) return
 
-      const preStartSeconds = Math.max(0, (preStartTick - startOffset) / noteTicksPerSecond)
+      const preStartSeconds = Math.max(0,
+        conductorSecondsAtTick(state.tempoMap, state.bpm, preStartTick / relativeTempo) -
+        conductorSecondsAtTick(state.tempoMap, state.bpm, playedStartOffset))
       const effectiveDuration = noteStartSeconds - preStartSeconds
       if (effectiveDuration <= 0.015) return
 
@@ -1641,9 +1658,8 @@ export async function renderProjectAudio(state: AppState, options: RenderOptions
         gaps.push(region.gap);
       } catch (err) {
         // Handle empty region gracefully by exporting silence
-        const durationTicks = region.endTick - region.startTick;
-        const globalTPS = (state.bpm / 60) * PPQ;
-        const durationSeconds = Math.max(0.1, durationTicks / globalTPS);
+        const durationSeconds = Math.max(0.1,
+          conductorDurationSeconds(state.tempoMap, state.bpm, region.startTick, region.endTick))
         const ctx = Tone.context;
         const sampleRate = ctx.sampleRate;
         const silentBuf = ctx.createBuffer(2, Math.round(durationSeconds * sampleRate), sampleRate);
@@ -1692,20 +1708,25 @@ export async function renderProjectAudio(state: AppState, options: RenderOptions
   renderableNotes.forEach(note => {
     const track = tracks.find(t => t.id === note.trackId)
     const trackBpm = track?.targetTempo ?? state.bpm
-    const trackTPS = (trackBpm / 60) * PPQ
-    const noteEnd = (note.time + note.duration - startTick) / trackTPS
+    const relative = trackBpm / state.bpm
+    const playedStart = startTick / relative
+    const playedEnd = (note.time + note.duration) / relative
+    const noteEnd = conductorSecondsAtTick(state.tempoMap, state.bpm, playedEnd) -
+      conductorSecondsAtTick(state.tempoMap, state.bpm, playedStart)
     if (noteEnd > maxSeconds) maxSeconds = noteEnd
   })
 
-  // Also consider the absolute duration of the selected tick range at global BPM
+  // Also consider the absolute duration of the selected tick range under the conductor map
   const globalTPS = (bpm / 60) * PPQ
-  const rangeDuration = (endTick - startTick) / globalTPS
+  const rangeDuration = conductorDurationSeconds(state.tempoMap, state.bpm, startTick, endTick)
   if (rangeDuration > maxSeconds) {
     // If the requested range is longer than the notes (e.g. exporting a silent tail)
     maxSeconds = rangeDuration
   }
 
-  const endBufferSeconds = state.studioSettings.loopEndBuffer / globalTPS
+  const endBufferSeconds = conductorDurationSeconds(
+    state.tempoMap, state.bpm, endTick, endTick + state.studioSettings.loopEndBuffer
+  )
   const fadeDuration = state.studioSettings.renderFadeDuration
   const renderDuration = Math.max(maxSeconds + endBufferSeconds + (options.autoFade ? fadeDuration : 0.5), 1)
 
@@ -2040,7 +2061,7 @@ export async function renderProjectAudio(state: AppState, options: RenderOptions
     }
 
     if (options.includeMetronome) {
-      renderMetronome(renderDuration, globalTPS, state, startTick)
+      renderMetronome(state, startTick, endTick)
     }
 
     renderableTracks.forEach(track => {

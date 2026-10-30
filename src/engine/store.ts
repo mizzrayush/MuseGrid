@@ -1,6 +1,18 @@
 import { create } from 'zustand'
 import { type DrumKit, type SynthPreset, DEFAULT_SYNTH_PRESET, DEFAULT_DRUM_KIT } from '../utils/instruments'
 import { BUILT_IN_FX_LABELS, getTrackFxInstances, isBuiltInFxType } from './fxDefaults'
+import {
+  normalizeTempoMap,
+  normalizeMeterMap,
+  parseMeterSignature,
+  type TempoPoint,
+  type MeterPoint,
+} from '../utils/conductor'
+import {
+  ARTICULATION_FIELDS,
+  DEFAULT_ARTICULATION_PRESETS,
+  type ArticulationPreset,
+} from '../utils/articulations'
 
 /** Per-note sound override: a built-in preset, a drum kit, or a hosted VST3 instrument. */
 export type InstrumentOverride = SynthPreset | DrumKit | `vst3:${string}`
@@ -1412,6 +1424,29 @@ export interface AppState {
   resetAutomationLane: (trackId: string) => void
   bakeProceduralAutomation: (trackId: string, formula: string, preset: string, density: number) => void
 
+  // Conductor: project-level tempo curve and metre changes on the shared tick timeline.
+  tempoMap: TempoPoint[]
+  meterMap: MeterPoint[]
+  showConductor: boolean
+  setShowConductor: (v: boolean) => void
+  setTempoMap: (points: TempoPoint[]) => void
+  addTempoPoint: (point: TempoPoint) => void
+  updateTempoPoint: (id: string, updates: Partial<TempoPoint>) => void
+  removeTempoPoint: (id: string) => void
+  setMeterMap: (points: MeterPoint[]) => void
+  addMeterPoint: (point: MeterPoint) => void
+  updateMeterPoint: (id: string, updates: Partial<MeterPoint>) => void
+  removeMeterPoint: (id: string) => void
+  resetConductor: () => void
+
+  // Reusable per-note articulation bundles (expression, not sample keyswitches).
+  articulationPresets: ArticulationPreset[]
+  setArticulationPresets: (presets: ArticulationPreset[]) => void
+  addArticulationPreset: (preset: ArticulationPreset) => void
+  removeArticulationPreset: (id: string) => void
+  applyArticulationPreset: (noteIds: string[], presetId: string) => void
+  clearArticulation: (noteIds: string[]) => void
+
   setDrumSteps: (steps: number) => void
   setTimeSignature: (sig: string) => void
 
@@ -1575,6 +1610,9 @@ export const snapshotProjectData = (state: AppState) => ({
   automationCurves: state.automationCurves,
   automationTargets: state.automationTargets,
   automationLanes: state.automationLanes,
+  tempoMap: state.tempoMap,
+  meterMap: state.meterMap,
+  showConductor: state.showConductor,
   clips: state.clips,
   groups: state.groups,
   drumSteps: state.drumSteps,
@@ -1605,6 +1643,7 @@ export const snapshotProjectData = (state: AppState) => ({
   grooveTimingStrength: state.grooveTimingStrength,
   grooveVelocityStrength: state.grooveVelocityStrength,
   grooveExtractionTargetAll: state.grooveExtractionTargetAll,
+  articulationPresets: state.articulationPresets,
   zoomSynth: state.zoomSynth,
   zoomDrum: state.zoomDrum,
   syncZoom: state.syncZoom,
@@ -1705,6 +1744,10 @@ export const createBlankProjectData = (projectName = 'Untitled Project') => ({
   automationCurves: {},
   automationTargets: {},
   automationLanes: {},
+  tempoMap: [],
+  meterMap: [],
+  showConductor: false,
+  articulationPresets: DEFAULT_ARTICULATION_PRESETS,
   history: [],
   historyIndex: -1,
   columnWidths: {},
@@ -1758,7 +1801,8 @@ export const applyProjectDataToEngineAndStore = (data: any, tabName?: string, fi
     'grooveVelocityStrength', 'grooveExtractionTargetAll',
     'quantizeInputEnabled', 'quantizeStrength',
     'zoomSynth', 'zoomDrum', 'syncZoom',
-    'customFxConfigs', 'voicePresets', 'columnWidths', 'sharedPanX'
+    'customFxConfigs', 'voicePresets', 'columnWidths', 'sharedPanX',
+    'showConductor'
   ]
   settingKeys.forEach(key => {
     if (data[key] !== undefined) (restoredSettings as any)[key] = data[key]
@@ -1784,6 +1828,11 @@ export const applyProjectDataToEngineAndStore = (data: any, tabName?: string, fi
     automationCurves: data.automationCurves || {},
     automationTargets: data.automationTargets || {},
     automationLanes: data.automationLanes || {},
+    tempoMap: normalizeTempoMap(data.tempoMap),
+    meterMap: normalizeMeterMap(data.meterMap),
+    articulationPresets: Array.isArray(data.articulationPresets) && data.articulationPresets.length > 0
+      ? data.articulationPresets
+      : DEFAULT_ARTICULATION_PRESETS,
     clips: data.clips || [],
     groups: data.groups || [],
     drumSteps: data.drumSteps || 16,
@@ -1935,6 +1984,9 @@ export const useStore = create<AppState>((originalSet, get, api) => {
     automationCurves: {},
     automationTargets: {},
     automationLanes: {},
+    tempoMap: [],
+    meterMap: [],
+    showConductor: false,
     projectRevision: 0,
     drumSteps: 16,
 
@@ -2190,6 +2242,7 @@ if (firstTrack) {
     grooveExtractionTargetAll: true,
     quantizeInputEnabled: true,
     quantizeStrength: 100,
+    articulationPresets: DEFAULT_ARTICULATION_PRESETS,
 
     gridSplitOrder: 'synth-first',
     gridPaneMode: 'split',
@@ -2747,6 +2800,8 @@ if (firstTrack) {
         customFxConfigs: newState.customFxConfigs !== undefined ? newState.customFxConfigs : state.customFxConfigs,
         // A project saved before formula lanes exists must keep its drawn lanes, not lose the map.
         automationLanes: newState.automationLanes ?? state.automationLanes,
+        tempoMap: normalizeTempoMap(newState.tempoMap ?? state.tempoMap),
+        meterMap: normalizeMeterMap(newState.meterMap ?? state.meterMap),
         projectRevision: state.projectRevision + 1,
         notes: deduplicateNotes(newState.notes !== undefined ? newState.notes : state.notes),
         tracks: (newState.tracks || state.tracks).map((t: any) => ({
@@ -3338,6 +3393,64 @@ if (firstTrack) {
       }
     }),
 
+    setShowConductor: (v) => set({ showConductor: v }),
+    setTempoMap: (points) => set({ tempoMap: normalizeTempoMap(points) }),
+    addTempoPoint: (point) => set((state) => ({
+      tempoMap: normalizeTempoMap([
+        ...state.tempoMap.filter(existing => Math.abs(existing.tick - point.tick) > 0.5),
+        point,
+      ])
+    })),
+    updateTempoPoint: (id, updates) => set((state) => ({
+      tempoMap: normalizeTempoMap(state.tempoMap.map(point => point.id === id ? { ...point, ...updates } : point))
+    })),
+    removeTempoPoint: (id) => set((state) => ({
+      tempoMap: state.tempoMap.filter(point => point.id !== id)
+    })),
+    setMeterMap: (points) => set({ meterMap: normalizeMeterMap(points) }),
+    addMeterPoint: (point) => set((state) => ({
+      meterMap: normalizeMeterMap([
+        ...state.meterMap.filter(existing => Math.abs(existing.tick - point.tick) > 0.5),
+        point,
+      ])
+    })),
+    updateMeterPoint: (id, updates) => set((state) => ({
+      meterMap: normalizeMeterMap(state.meterMap.map(point => point.id === id ? { ...point, ...updates } : point))
+    })),
+    removeMeterPoint: (id) => set((state) => ({
+      meterMap: state.meterMap.filter(point => point.id !== id)
+    })),
+    resetConductor: () => set({ tempoMap: [], meterMap: [] }),
+
+    setArticulationPresets: (presets) => set({ articulationPresets: presets }),
+    addArticulationPreset: (preset) => set(state => ({
+      articulationPresets: state.articulationPresets.some(p => p.id === preset.id)
+        ? state.articulationPresets.map(p => p.id === preset.id ? preset : p)
+        : [...state.articulationPresets, preset]
+    })),
+    removeArticulationPreset: (id) => set(state => ({
+      // Built-in presets stay available so the palette never loses its anchors.
+      articulationPresets: state.articulationPresets.filter(p => p.id !== id || p.builtin)
+    })),
+    applyArticulationPreset: (noteIds, presetId) => {
+      const state = get()
+      if (noteIds.length === 0) return
+      const preset = state.articulationPresets.find(p => p.id === presetId)
+      if (!preset) return
+      const cleared: Partial<Note> = {}
+      ARTICULATION_FIELDS.forEach(key => { (cleared as any)[key] = undefined })
+      state.commitHistory()
+      state.updateNotes(noteIds, { ...cleared, ...preset.updates })
+    },
+    clearArticulation: (noteIds) => {
+      const state = get()
+      if (noteIds.length === 0) return
+      const cleared: Partial<Note> = {}
+      ARTICULATION_FIELDS.forEach(key => { (cleared as any)[key] = undefined })
+      state.commitHistory()
+      state.updateNotes(noteIds, cleared)
+    },
+
     addClip: (clip) => set(s => ({ clips: [...s.clips, clip] })),
     removeClip: (id) => set(s => ({ clips: s.clips.filter(c => c.id !== id) })),
     updateClip: (id, updates) => set(s => ({ clips: s.clips.map(c => c.id === id ? { ...c, ...updates } : c) })),
@@ -3417,8 +3530,17 @@ if (firstTrack) {
     setDrumSteps: (drumSteps) => set({ drumSteps }),
     setTimeSignature: (sig) => {
       const normalized = normalizeTimeSignature(sig)
-      const numerator = parseInt(normalized.split('/')[0], 10) || 4
-      set({ timeSignature: normalized, gridShadeEvery: numerator })
+      const parsed = parseMeterSignature(normalized)
+      set((state) => {
+        const meterMap = state.meterMap.length > 0 && state.meterMap[0].tick === 0
+          ? normalizeMeterMap([{ ...state.meterMap[0], ...parsed }, ...state.meterMap.slice(1)])
+          : state.meterMap
+        return {
+          timeSignature: normalized,
+          gridShadeEvery: parsed.numerator,
+          meterMap,
+        }
+      })
     },
     setProjectExportData: (projectExportData) => set({ projectExportData }),
     setExportRegionMode: (exportRegionMode) => set({ exportRegionMode }),
@@ -3971,10 +4093,14 @@ useStore.subscribe((state, prevState) => {
         grooveVelocityStrength: curState.grooveVelocityStrength,
         grooveExtractionTargetAll: curState.grooveExtractionTargetAll,
         quantizeInputEnabled: curState.quantizeInputEnabled,
+        articulationPresets: curState.articulationPresets,
         playheadFollowMode: curState.playheadFollowMode,
         automationCurves: curState.automationCurves,
         automationTargets: curState.automationTargets,
         automationLanes: curState.automationLanes,
+        tempoMap: curState.tempoMap,
+        meterMap: curState.meterMap,
+        showConductor: curState.showConductor,
         clips: curState.clips,
         groups: curState.groups,
         drumSteps: curState.drumSteps,
@@ -4056,7 +4182,8 @@ try {
         'deduplicateProximityTolerance', 'deduplicateOverlapThreshold',
         'grooveTemplates', 'activeGrooveTemplateId', 'grooveTimingStrength',
         'grooveVelocityStrength', 'grooveExtractionTargetAll',
-        'customFxConfigs', 'voicePresets', 'midiRemapData'
+        'customFxConfigs', 'voicePresets', 'midiRemapData', 'showConductor',
+        'articulationPresets'
       ]
       keys.forEach(k => {
         if (parsed[k] !== undefined) topLevelUpdates[k] = parsed[k]

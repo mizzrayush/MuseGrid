@@ -163,7 +163,7 @@ The custom waveform designer lets users write mathematical expressions to build 
 *   **Partial Count**: Choose the number of harmonics (up to 64) to calculate when generating the wavetable.
 
 ### 4.3 Drum Synthesis Engine
-Drum tracks map to a 16-pad grid, running real-time physical models instead of static samples:
+Drum tracks start from a 16-channel template that grows as far as MIDI pitches allow, running real-time physical models instead of static samples:
 *   **Membrane Model**:
     *   Simulates the tension and resonance of a drum skin.
     *   Controls: Pitch frequency, pitch decay time, and amplitude decay envelope.
@@ -256,7 +256,7 @@ The MIDI Remap Laboratory parses external files and aligns them to the current p
 *   **Global Offsets**: Apply pitch transposition (octaves/semitones), time scaling (half-time/double-time), and velocity scaling before importing notes to the timeline.
 
 ### 8.2 Pitch and Drum Mapping
-*   **Smart Drum Auto-Map**: Maps General MIDI (GM) percussion numbers to MuseGrid's 16-pad drum layout.
+*   **Smart Drum Auto-Map**: Maps General MIDI (GM) percussion numbers to MuseGrid's default 16-channel drum layout; additional channels can be added from the Track pane or the Step Sequencer header.
 *   **Smart Scale Snap**: Snaps incoming pitches to the active `Scale Lock`.
 *   **Pitch Pruning**: Displays a list of all unique pitches detected in a file, letting users select and exclude specific pitches before importing them.
 

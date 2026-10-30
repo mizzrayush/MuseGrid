@@ -5,6 +5,7 @@ import type { Track, Note, AutomationPoint, AutomationTarget, AutomationLane } f
 import { parseAutomationTarget } from './store'
 import { getLaneValueAtTick, applyExpressionLaneToNote, laneFallbackValue, laneIsActive, laneValueToPan } from '../utils/automation'
 import { buildGlideIntoMap, resolveGlidePlayback, type GlideIntoSpec } from '../utils/midiEditing'
+import { conductorDurationSeconds, conductorSecondsAtTick, getTempoAtTick, type TempoPoint } from '../utils/conductor'
 import { getActiveDPreverbInstances } from './fxDefaults'
 
 export const TICKS_PER_BEAT = 192
@@ -37,7 +38,8 @@ export function mapNoteToScheduledEvent(
   glideInto?: GlideIntoSpec,
   automationTarget: AutomationTarget = 'velocity',
   automationLane?: AutomationLane,
-  allTrackCurves?: Record<string, AutomationPoint[]>
+  allTrackCurves?: Record<string, AutomationPoint[]>,
+  tempoMap?: TempoPoint[]
 ): ScheduledNoteMapping {
   const trackBpm = track?.targetTempo ?? globalBpm
   const multiplier = trackBpm / globalBpm
@@ -57,7 +59,12 @@ export function mapNoteToScheduledEvent(
 
   const noteBpm = n.bpm ?? trackBpm
   const noteTPS = (noteBpm / 60) * TICKS_PER_BEAT
-  const durationSeconds = Math.max(0.005, playback.durationTicks / noteTPS)
+  // Under a conductor tempo map the tick length varies, so length is the integral
+  // of the map over the note's span. Per-note/track BPM still scales it relatively.
+  const tempoDuration = tempoMap && tempoMap.length > 0
+    ? conductorDurationSeconds(tempoMap, globalBpm, positionTicks, positionTicks + playback.durationTicks)
+    : playback.durationTicks / noteTPS
+  const durationSeconds = Math.max(0.005, tempoDuration * (tempoMap && tempoMap.length > 0 ? globalBpm / Math.max(1, noteBpm) : 1))
 
   const finalPitchEnd = glideInto && track?.instrument !== 'drum'
     ? (isMicrotonal ? Tone.Frequency(n.pitch + transpose, 'midi').toFrequency() : Tone.Frequency(n.pitch + transpose, 'midi').toNote())
@@ -122,7 +129,9 @@ export function mapNoteToScheduledEvent(
 
   return {
     time: `${Math.round(positionTicks)}i`,
-    timeSeconds: positionTicks / globalTPS,
+    timeSeconds: tempoMap && tempoMap.length > 0
+      ? conductorSecondsAtTick(tempoMap, globalBpm, positionTicks)
+      : positionTicks / globalTPS,
     positionTicks,
     pitch: finalPitch,
     pitchEnd: finalPitchEnd,
@@ -198,7 +207,8 @@ class Scheduler {
         state.automationCurves !== prevState.automationCurves ||
         state.automationTargets !== prevState.automationTargets ||
         state.automationLanes !== prevState.automationLanes ||
-        state.bpm !== prevState.bpm
+        state.bpm !== prevState.bpm ||
+        state.tempoMap !== prevState.tempoMap
       ) {
         this.rebuildSchedule(state.notes, state.tracks)
       }
@@ -220,6 +230,7 @@ class Scheduler {
     })
 
     const globalBpm = useStore.getState().bpm
+    const tempoMap = useStore.getState().tempoMap
     const audibleNotes = notes.filter(n => !n.muted)
     const glideIntoMap = buildGlideIntoMap(audibleNotes)
     const automationTargets = useStore.getState().automationTargets
@@ -235,7 +246,7 @@ class Scheduler {
       const automationPoints = allCurves[trackId]
       const events: ScheduledTrackEvent[] = trackNotes.map(n => ({
         kind: 'note',
-        ...mapNoteToScheduledEvent(n, track, globalBpm, automationPoints, glideIntoMap.get(n.id), automationTargets[trackId] ?? 'velocity', automationLanes[trackId], allCurves)
+        ...mapNoteToScheduledEvent(n, track, globalBpm, automationPoints, glideIntoMap.get(n.id), automationTargets[trackId] ?? 'velocity', automationLanes[trackId], allCurves, tempoMap)
       }))
 
       if (track) {
@@ -243,10 +254,17 @@ class Scheduler {
         if (dpreverbs.length > 0) {
           trackNotes.forEach(n => {
             const noteStartTicks = n.time / multiplier
+            const localBpm = tempoMap && tempoMap.length > 0
+              ? getTempoAtTick(tempoMap, globalBpm, noteStartTicks)
+              : globalBpm
+            const localTPS = (localBpm / 60) * TICKS_PER_BEAT
             dpreverbs.forEach(({ inst, settings }) => {
-              const idealPreStartTicks = noteStartTicks - (settings.tail * globalTPS)
+              const idealPreStartTicks = noteStartTicks - (settings.tail * localTPS)
               const preStartTicks = Math.max(0, idealPreStartTicks)
-              const effectiveDuration = (noteStartTicks - preStartTicks) / globalTPS
+              const effectiveDuration = tempoMap && tempoMap.length > 0
+                ? conductorSecondsAtTick(tempoMap, globalBpm, noteStartTicks) -
+                  conductorSecondsAtTick(tempoMap, globalBpm, preStartTicks)
+                : (noteStartTicks - preStartTicks) / globalTPS
               if (effectiveDuration <= 0.015) return
 
               events.push({

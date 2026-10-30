@@ -74,7 +74,8 @@ export const getProjectDataString = () => {
     playheadFollowMode: state.playheadFollowMode, automationCurves: state.automationCurves,
     // Without the target map a reloaded project would read a pan/volume/VST3 curve as velocity.
     automationTargets: state.automationTargets,
-    automationLanes: state.automationLanes, clips: state.clips, groups: state.groups, drumSteps: state.drumSteps,
+    automationLanes: state.automationLanes, tempoMap: state.tempoMap, meterMap: state.meterMap, showConductor: state.showConductor,
+    clips: state.clips, groups: state.groups, drumSteps: state.drumSteps,
     timeSignature: state.timeSignature, metronomeSettings: state.metronomeSettings, studioSettings: state.studioSettings, micSettings: state.micSettings, customFxConfigs: state.customFxConfigs,
     pitchSnapEnabled: state.pitchSnapEnabled, pitchDropSnap: state.pitchDropSnap, pitchSnapSensitivity: state.pitchSnapSensitivity, verticalMergeThreshold: state.verticalMergeThreshold,
     verticalStretchMode: state.verticalStretchMode, customSynthRows: state.customSynthRows, customDrumRows: state.customDrumRows, synthLowerOctave: state.synthLowerOctave,
@@ -83,6 +84,7 @@ export const getProjectDataString = () => {
     voicePresets: state.voicePresets,
     deduplicateEnabled: state.deduplicateEnabled, deduplicateOverlapThreshold: state.deduplicateOverlapThreshold, deduplicateProximityTolerance: state.deduplicateProximityTolerance,
     grooveTemplates: state.grooveTemplates, activeGrooveTemplateId: state.activeGrooveTemplateId, grooveTimingStrength: state.grooveTimingStrength, grooveVelocityStrength: state.grooveVelocityStrength, grooveExtractionTargetAll: state.grooveExtractionTargetAll, quantizeStrength: state.quantizeStrength,
+    articulationPresets: state.articulationPresets,
     zoomSynth: state.zoomSynth, zoomDrum: state.zoomDrum, syncZoom: state.syncZoom,
     gridSplitOrder: state.gridSplitOrder, gridPaneMode: state.gridPaneMode,
     showSynthVelocity: state.showSynthVelocity, showDrumVelocity: state.showDrumVelocity, vocalVelocityMin: state.vocalVelocityMin, vocalVelocityMax: state.vocalVelocityMax, vocalVelocityScale: state.vocalVelocityScale, vocalVelocityEnabled: state.vocalVelocityEnabled,
@@ -698,6 +700,9 @@ function App() {
         automationCurves: {},
         automationTargets: {},
         automationLanes: {},
+        tempoMap: [],
+        meterMap: [],
+        showConductor: false,
         playheadFollowMode: 'playhead',
         snapResolution: 48,
         projectExportData: null,
@@ -754,7 +759,8 @@ function App() {
               'deduplicateProximityTolerance', 'deduplicateOverlapThreshold',
               'grooveTemplates', 'activeGrooveTemplateId', 'grooveTimingStrength',
               'grooveVelocityStrength', 'grooveExtractionTargetAll',
-              'customFxConfigs', 'voicePresets', 'midiRemapData'
+              'customFxConfigs', 'voicePresets', 'midiRemapData',
+              'articulationPresets'
             ]
             keys.forEach(k => {
               if (parsed[k] !== undefined) topUpdates[k] = parsed[k]

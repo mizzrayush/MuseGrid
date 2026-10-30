@@ -1,18 +1,75 @@
 import { Midi } from '@tonejs/midi'
 import type { Note, Track } from '../engine/store'
+import {
+  getMeterPositionAtTick,
+  getTempoAtTick,
+  type MeterPoint,
+  type TempoPoint,
+} from './conductor'
 
 export interface MidiExportOptions {
   mapToEdoDegrees?: boolean;
+  /** Conductor maps are written as tempo/time-signature meta events. */
+  tempoMap?: TempoPoint[];
+  meterMap?: MeterPoint[];
+  timeSignature?: string;
+  /** Export region start; maps are rebased so tick 0 is the region start. */
+  startTick?: number;
 }
 
 export function createMidiData(notes: Note[], bpm: number, tracks?: Track[], options?: MidiExportOptions): Uint8Array {
   const midi = new Midi()
-  
-  // Set global tempo
-  midi.header.setTempo(bpm)
+  const regionStart = options?.startTick ?? 0
 
   // Scale MuseGrid ticks (192 PPQ) to @tonejs/midi ticks (midi.header.ppq, typically 480 PPQ)
   const scale = (midi.header.ppq || 480) / 192
+
+  const tempoMap = options?.tempoMap ?? []
+  const meterMap = options?.meterMap ?? []
+
+  if (tempoMap.length > 0) {
+    // Sample non-step ramps on beat boundaries so DAWs see a close approximation of
+    // the curve, then land exact values on every tempo point.
+    const events = new Map<number, number>()
+    const baseAtStart = getTempoAtTick(tempoMap, bpm, regionStart)
+    events.set(0, baseAtStart)
+    tempoMap.forEach((point, index) => {
+      if (point.tick < regionStart) return
+      const next = tempoMap[index + 1]
+      if (next && point.curve !== 'step') {
+        for (let tick = point.tick + 96; tick < next.tick; tick += 96) {
+          events.set(Math.round((tick - regionStart) * scale), getTempoAtTick(tempoMap, bpm, tick))
+        }
+      }
+      events.set(Math.round((point.tick - regionStart) * scale), point.bpm)
+    })
+    midi.header.tempos = [...events.entries()]
+      .filter(([ticks]) => ticks >= 0)
+      .sort((a, b) => a[0] - b[0])
+      .map(([ticks, eventBpm]) => ({ ticks, bpm: eventBpm }))
+  } else {
+    // Set global tempo
+    midi.header.setTempo(bpm)
+  }
+
+  if (meterMap.length > 0) {
+    const signatureEvents = new Map<number, number[]>()
+    signatureEvents.set(0, [
+      getMeterPositionAtTick(meterMap, options?.timeSignature ?? '4/4', regionStart).meter.numerator,
+      getMeterPositionAtTick(meterMap, options?.timeSignature ?? '4/4', regionStart).meter.denominator,
+    ])
+    meterMap.forEach(point => {
+      if (point.tick < regionStart) return
+      signatureEvents.set(Math.round((point.tick - regionStart) * scale), [point.numerator, point.denominator])
+    })
+    midi.header.timeSignatures = [...signatureEvents.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([ticks, timeSignature]) => ({ ticks, timeSignature }))
+  }
+
+  if (tempoMap.length > 0 || meterMap.length > 0) {
+    midi.header.update()
+  }
 
   if (tracks && tracks.length > 0) {
     const notesByTrack = new Map<string, Note[]>()

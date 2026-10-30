@@ -1631,7 +1631,12 @@ export const ScriptAPI = {
         ? state.notes.filter(n => options.trackIds!.includes(n.trackId))
         : options?.trackId ? state.notes.filter(n => n.trackId === options.trackId) : state.notes;
 
-      const midiData = createMidiData(exportNotes, state.bpm, exportTracks, { mapToEdoDegrees: options?.mapToEdoDegrees });
+      const midiData = createMidiData(exportNotes, state.bpm, exportTracks, {
+        mapToEdoDegrees: options?.mapToEdoDegrees,
+        tempoMap: state.tempoMap,
+        meterMap: state.meterMap,
+        timeSignature: state.timeSignature,
+      });
       const blob = new Blob([midiData as unknown as BlobPart], { type: 'audio/midi' });
       const targetFilename = filename.endsWith('.mid') ? filename : `${filename}.mid`;
       await saveFileWithDialog(blob, {

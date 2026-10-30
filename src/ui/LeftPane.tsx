@@ -2599,6 +2599,7 @@ export default function LeftPane() {
         // 3. Playback & Transport
         bpm: state.bpm,
         timeSignature: state.timeSignature,
+        showConductor: state.showConductor,
         swing: state.swing,
         loopEnabled: state.loopEnabled,
         loopStart: state.loopStart,
@@ -2671,6 +2672,7 @@ export default function LeftPane() {
         grooveTimingStrength: state.grooveTimingStrength,
         grooveVelocityStrength: state.grooveVelocityStrength,
         grooveExtractionTargetAll: state.grooveExtractionTargetAll,
+        articulationPresets: state.articulationPresets,
         // 12. Presets & Remap
         customFxConfigs: state.customFxConfigs,
         voicePresets: state.voicePresets,
@@ -2707,6 +2709,7 @@ export default function LeftPane() {
         metronomeVolume: state.metronomeVolume,
         bpm: state.bpm,
         timeSignature: state.timeSignature,
+        showConductor: state.showConductor,
         swing: state.swing,
         loopEnabled: state.loopEnabled,
         loopStart: state.loopStart,
@@ -2771,6 +2774,7 @@ export default function LeftPane() {
         grooveTimingStrength: state.grooveTimingStrength,
         grooveVelocityStrength: state.grooveVelocityStrength,
         grooveExtractionTargetAll: state.grooveExtractionTargetAll,
+        articulationPresets: state.articulationPresets,
         customFxConfigs: state.customFxConfigs,
         voicePresets: state.voicePresets,
         midiRemapData: state.midiRemapData,
@@ -2824,7 +2828,7 @@ export default function LeftPane() {
       const topLevelUpdates: any = {}
       const keys = [
         'engineMode', 'metronomeEnabled', 'metronomeVolume',
-        'bpm', 'timeSignature', 'swing', 'loopEnabled', 'loopStart', 'loopEnd',
+        'bpm', 'timeSignature', 'showConductor', 'swing', 'loopEnabled', 'loopStart', 'loopEnd',
         'playheadFollowMode', 'completeNotesOnPause', 'midiOverdub',
         'activeTool', 'noteInspectorEnabled', 'readOnlyMode',
         'snapEnabled', 'snapResolution', 'gridBlockTicks', 'dropSnap',
@@ -2843,7 +2847,7 @@ export default function LeftPane() {
         'deduplicateProximityTolerance', 'deduplicateOverlapThreshold',
         'grooveTemplates', 'activeGrooveTemplateId', 'grooveTimingStrength',
         'grooveVelocityStrength', 'grooveExtractionTargetAll',
-        'customFxConfigs', 'voicePresets', 'midiRemapData'
+        'customFxConfigs', 'voicePresets', 'midiRemapData', 'articulationPresets'
       ]
       keys.forEach(k => {
         if (parsed[k] !== undefined) {
@@ -3516,6 +3520,10 @@ export default function LeftPane() {
         ? notes.filter(n => projectExportData.trackIds!.includes(n.trackId))
         : trackId ? notes.filter(n => n.trackId === trackId) : [...notes]
 
+      let midiStartTick = 0
+      let midiTempoMap: typeof state.tempoMap | undefined
+      let midiMeterMap: typeof state.meterMap | undefined
+
       if (exportRegionMode && exportRegions && exportRegions.length > 0) {
         const sortedRegions = [...exportRegions].sort((a, b) => a.startTick - b.startTick)
         const stitchedNotes: typeof exportNotes = []
@@ -3540,6 +3548,9 @@ export default function LeftPane() {
       } else {
         const sTick = startTick ?? 0
         const eTick = endTick ?? Infinity
+        midiStartTick = sTick
+        midiTempoMap = state.tempoMap
+        midiMeterMap = state.meterMap
 
         // Range Filtering & Shifting
         exportNotes = exportNotes
@@ -3552,7 +3563,13 @@ export default function LeftPane() {
         exportNotes = exportNotes.map(n => ({ ...n, pitch: n.pitch + totalTranspose }))
       }
 
-      const midiData = createMidiData(exportNotes, exportBpm, exportTracks, { mapToEdoDegrees: exportScala && hasMicrotonal })
+      const midiData = createMidiData(exportNotes, exportBpm, exportTracks, {
+        mapToEdoDegrees: exportScala && hasMicrotonal,
+        tempoMap: midiTempoMap,
+        meterMap: midiMeterMap,
+        timeSignature: state.timeSignature,
+        startTick: midiStartTick,
+      })
       const blob = new Blob([midiData as unknown as BlobPart], { type: 'audio/midi' })
       let filename = 'project.mid'
       if (trackId && targetTrack) {

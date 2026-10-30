@@ -6,6 +6,7 @@ import {
   IconLayers, IconArrowUp, IconArrowDown, IconSparkles, IconShuffle, IconList, IconAlign
 } from '../ui/Icons'
 import { useContextMenuDismissal, useContextMenuPosition } from '../ui/useContextMenuDismissal'
+import ConductorLane from './ConductorLane'
 import { useStore, DEFAULT_DRUM_ROWS, EXPRESSION_LANE_TARGETS, expressionLaneLabel, parseAutomationTarget, getTrackAutomationPoints, type ExpressionLaneTarget, type Note } from '../engine/store'
 import { audioEngine } from '../engine/AudioEngine'
 import type { Vst3ParameterInfo } from '../engine/AudioEngine'
@@ -28,6 +29,7 @@ import {
   type GlideChainOptions
 } from '../utils/midiEditing'
 import { getEdoStepInfo } from '../utils/edoNomenclature'
+import { conductorSecondsAtTick, getBarNumberAtTick, isBarStartTick } from '../utils/conductor'
 
 const TRACK_COLORS = ['#4dabf7', '#ff9900', '#69db7c', '#da77f2', '#ff6b6b', '#00e6ff', '#ffd43b']
 const newId = () => Math.random().toString(36).substr(2, 9)
@@ -1128,6 +1130,16 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
     return Math.max(0, col.tick + offsetX * ratio)
   }, [getColumns])
 
+  // The conductor lane shares the grid's pan/zoom and playhead-follow maths.
+  const getConductorView = useCallback((width: number) => {
+    const s = stateRef.current
+    const st = useStore.getState()
+    const panX = (st.playheadFollowMode === 'grid' && !s.isHorizScrollLocked)
+      ? getPlayheadAnchorX(width) - tickToX(st.playheadPosition) * s.zoom
+      : s.pan.x
+    return { panX, zoom: s.zoom }
+  }, [tickToX])
+
   useEffect(() => {
     if (!autoExtendGrid) return
 
@@ -1261,7 +1273,6 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         : pan.x
       const cols = getColumns()
       const shadeEvery = Math.max(1, storeState.gridShadeEvery)
-      const majorEveryColumns = Math.max(shadeEvery, Math.round(768 / Math.max(1, storeState.gridBlockTicks)))
 
       cols.forEach(col => {
         const x = effectivePanX + SIDEBAR_WIDTH + col.x * zoom
@@ -1272,7 +1283,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         ctx.fillStyle = isDark ? 'rgba(255,255,255,0.025)' : 'rgba(0,0,0,0.08)'
         ctx.fillRect(x, 0, w, height)
 
-        const isMajor = col.index % majorEveryColumns === 0
+        const isMajor = isBarStartTick(storeState.meterMap, storeState.timeSignature, col.x)
         ctx.strokeStyle = isMajor ? 'rgba(255,255,255,0.28)' : 'rgba(255,255,255,0.08)'
         ctx.lineWidth = isMajor ? 1.5 : 1
         ctx.beginPath()
@@ -1288,9 +1299,8 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         ctx.fillText((col.index + 1).toString(), x + w / 2, 6)
 
         if (isMajor) {
-          const bar = Math.floor(col.x / 768) + 1
-          const tps = (storeState.bpm / 60) * 192 // PPQ=192
-          const seconds = (col.x / tps).toFixed(2)
+          const bar = getBarNumberAtTick(storeState.meterMap, storeState.timeSignature, col.x)
+          const seconds = conductorSecondsAtTick(storeState.tempoMap, storeState.bpm, col.x).toFixed(2)
 
           ctx.textAlign = 'left'
           ctx.textBaseline = 'top'
@@ -1485,7 +1495,6 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
       const gridHeight = numRows * gridSizeY
       const width = cols[cols.length - 1].x + cols[cols.length - 1].width
       const shadeEvery = Math.max(1, storeState.gridShadeEvery)
-      const majorEveryColumns = Math.max(shadeEvery, Math.round(768 / Math.max(1, storeState.gridBlockTicks)))
 
       // Viewport culling boundaries in grid coordinates (with safe margins)
       const viewMarginX = 200 / zoom
@@ -1542,7 +1551,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
           ctx.fillRect(col.x, TIMELINE_HEIGHT, col.width, gridHeight)
         }
 
-        if (col.index % majorEveryColumns === 0) {
+        if (isBarStartTick(storeState.meterMap, storeState.timeSignature, col.x)) {
           ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)'
           ctx.lineWidth = 2 / zoom
         } else {
@@ -4238,6 +4247,14 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
             </div>
           )}
         </div>
+      )}
+      {instrumentTracks.length > 0 && (
+        <ConductorLane
+          getView={getConductorView}
+          tickToX={tickToX}
+          xToTick={xToTick}
+          sidebarWidth={SIDEBAR_WIDTH}
+        />
       )}
       {/* Main canvas area — takes all space minus the footer */}
       <div

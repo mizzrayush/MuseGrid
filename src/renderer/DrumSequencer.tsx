@@ -51,10 +51,31 @@ export default function DrumSequencer() {
 
   const drumSteps = useStore(s => s.drumSteps)
   const setDrumSteps = useStore(s => s.setDrumSteps)
+  const updateTrack = useStore(s => s.updateTrack)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tick: number; noteId?: string } | null>(null)
   const contextMenuRef = useRef<HTMLDivElement | null>(null)
   useContextMenuDismissal(contextMenu !== null, setContextMenu, contextMenuRef)
   const contextMenuPosition = useContextMenuPosition(contextMenu !== null, contextMenu?.x ?? 0, contextMenu?.y ?? 0, contextMenuRef)
+
+  // 16 rows are the starting template, not a limit: channels grow as far as MIDI pitches allow.
+  const addChannel = () => {
+    if (!editTrack || isReadOnly) return
+    const baseRows = editTrack.drumRows ?? DEFAULT_DRUM_ROWS
+    const nextPitch = Math.max(15, ...baseRows.map(r => r.pitch)) + 1
+    if (nextPitch > 127) {
+      useStore.getState().showToast('All 128 MIDI channels are in use', 'error')
+      return
+    }
+    const index = nextPitch - 15
+    updateTrack(editTrack.id, {
+      drumRows: [...baseRows, {
+        name: `Custom Channel ${index}`,
+        pitch: nextPitch,
+        color: `hsl(${(index * 73) % 360}, 80%, 65%)`,
+        defaultName: `Custom Channel ${index}`
+      }]
+    })
+  }
 
   const notes = allNotes.filter(note => drumTrackIds.has(note.trackId))
   const editTrackNotes = editTrack ? notes.filter(note => note.trackId === editTrack.id) : []
@@ -144,7 +165,22 @@ export default function DrumSequencer() {
             </div>
           </div>
         </div>
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', rowGap: '6px' }}>
+          <span style={{ fontSize: '10px', color: '#555', fontWeight: 600 }}>Channels</span>
+          <div
+            style={{ display: 'flex', gap: '6px', alignItems: 'center', background: 'rgba(0,0,0,0.15)', padding: '2px 8px', borderRadius: '4px' }}
+            title="16 channels are the starting template. Add more, or rename/prune them from the Track pane."
+          >
+            <span style={{ fontSize: '10px', color: '#4dabf7', fontWeight: 800, minWidth: '14px', textAlign: 'center' }}>{rows.length}</span>
+            <button
+              onClick={addChannel}
+              disabled={isReadOnly}
+              title="Add a drum channel"
+              style={{ background: 'none', border: 'none', padding: 0, color: isReadOnly ? '#444' : '#4dabf7', fontSize: '13px', fontWeight: 800, lineHeight: 1, cursor: isReadOnly ? 'default' : 'pointer' }}
+            >
+              +
+            </button>
+          </div>
           <span style={{ fontSize: '10px', color: '#555', fontWeight: 600 }}>Steps</span>
           <div style={{ display: 'flex', gap: '6px', alignItems: 'center', background: 'rgba(0,0,0,0.15)', padding: '2px 8px', borderRadius: '4px' }}>
             {[16, 32, 64].map(s => (

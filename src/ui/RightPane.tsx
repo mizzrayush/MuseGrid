@@ -4,6 +4,7 @@ import { SYNTH_PRESETS, DRUM_KITS, type SynthPreset, type DrumKit } from '../uti
 import { audioEngine } from '../engine/AudioEngine'
 import { NOTE_FX_DEFAULTS, noteFxChainId } from '../utils/noteFxChain'
 import { NOTE_NAMES_SHARP, snapToScale, detectChord, detectScaleDegree } from '../utils/musicTheory'
+import { ARTICULATION_FIELDS, captureArticulation, hasCustomArticulation, type ArticulationPreset } from '../utils/articulations'
 import { applyRatchet, applyMicroNudge } from '../utils/midiEditing'
 import { IconX, IconVolume, IconTimeline, IconMusic, IconDrum, IconSpeaker, IconTrash, IconPlus, IconOpen } from './Icons'
 
@@ -594,6 +595,13 @@ export const RightPane: React.FC = () => {
   const setDeduplicateOverlapThreshold = useStore(state => state.setDeduplicateOverlapThreshold)
   const setDeduplicateProximityTolerance = useStore(state => state.setDeduplicateProximityTolerance)
   const commitHistory = useStore(state => state.commitHistory)
+  const articulationPresets = useStore(state => state.articulationPresets)
+  const applyArticulationPreset = useStore(state => state.applyArticulationPreset)
+  const clearArticulation = useStore(state => state.clearArticulation)
+  const addArticulationPreset = useStore(state => state.addArticulationPreset)
+  const removeArticulationPreset = useStore(state => state.removeArticulationPreset)
+  const [articulationCaptureName, setArticulationCaptureName] = useState('')
+  const [isArticulationCaptureOpen, setIsArticulationCaptureOpen] = useState(false)
 
   // Find all selected notes
   const selectedNotes = useMemo(() => {
@@ -880,6 +888,32 @@ export const RightPane: React.FC = () => {
 
   const handleMPEChange = (key: keyof Note, value: any) => {
     updateNotes(selectedNoteIds, { [key]: value })
+  }
+
+  // A preset is active only when every expression field it owns matches on all selected notes.
+  const articulationMatches = (preset: ArticulationPreset) => {
+    if (selectedNotes.length === 0) return false
+    const keys: Array<keyof Note> = preset.updates.velocity !== undefined
+      ? [...ARTICULATION_FIELDS, 'velocity']
+      : ARTICULATION_FIELDS
+    return selectedNotes.every(note => keys.every(key => {
+      const expected = (preset.updates as any)[key]
+      const actual = (note as any)[key]
+      return (expected ?? null) === (actual ?? null)
+    }))
+  }
+
+  const handleSaveArticulationCapture = () => {
+    if (!firstNote) return
+    const name = articulationCaptureName.trim() || `Articulation ${articulationPresets.length + 1}`
+    addArticulationPreset({
+      id: `art_user_${Date.now().toString(36)}`,
+      name,
+      updates: captureArticulation(firstNote),
+    })
+    setArticulationCaptureName('')
+    setIsArticulationCaptureOpen(false)
+    useStore.getState().showToast(`Articulation "${name}" saved`, 'success')
   }
 
   const handleTranspose = (semitones: number) => {
@@ -1971,6 +2005,118 @@ export const RightPane: React.FC = () => {
                   ))}
                 </select>
               </div>
+            </div>
+          )}
+
+          {/* Articulation Presets */}
+          {trackType === 'synth' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', borderTop: '1px solid rgba(255,255,255,0.04)', paddingTop: '16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+                  <IconMusic size={12} style={{ color: '#69db7c' }} />
+                  <label style={{ fontSize: '11px', fontWeight: 700, color: '#69db7c', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Articulation</label>
+                  {selectedNotes.some(n => hasCustomArticulation(n)) && (
+                    <span style={{ fontSize: '9px', fontWeight: 800, color: '#69db7c', background: 'rgba(105, 219, 124, 0.12)', border: '1px solid rgba(105, 219, 124, 0.3)', padding: '1px 5px', borderRadius: '3px' }}>
+                      ACTIVE
+                    </span>
+                  )}
+                </div>
+                <div style={{ display: 'flex', gap: '4px', flexShrink: 0 }}>
+                  <button
+                    onClick={() => setIsArticulationCaptureOpen(v => !v)}
+                    title="Save the first selected note's expression as a preset"
+                    style={{
+                      background: isArticulationCaptureOpen ? 'rgba(77, 171, 247, 0.16)' : 'rgba(255,255,255,0.04)',
+                      border: `1px solid ${isArticulationCaptureOpen ? 'rgba(77, 171, 247, 0.45)' : 'rgba(255,255,255,0.08)'}`,
+                      color: isArticulationCaptureOpen ? '#4dabf7' : '#bbb',
+                      borderRadius: '5px', padding: '3px 7px', fontSize: '9px', fontWeight: 700, cursor: 'pointer'
+                    }}
+                  >
+                    Capture
+                  </button>
+                  <button
+                    onClick={() => clearArticulation(selectedNoteIds)}
+                    title="Remove all articulation from the selected notes"
+                    style={{
+                      background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+                      color: '#bbb', borderRadius: '5px', padding: '3px 7px', fontSize: '9px', fontWeight: 700, cursor: 'pointer'
+                    }}
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+
+              {isArticulationCaptureOpen && (
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <input
+                    value={articulationCaptureName}
+                    onChange={e => setArticulationCaptureName(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') { e.preventDefault(); handleSaveArticulationCapture() }
+                      if (e.key === 'Escape') setIsArticulationCaptureOpen(false)
+                    }}
+                    placeholder="Preset name"
+                    autoFocus
+                    style={{
+                      flex: 1, minWidth: 0, background: '#191b21', border: '1px solid rgba(255,255,255,0.08)',
+                      color: 'white', borderRadius: '5px', padding: '5px 8px', fontSize: '11px', outline: 'none'
+                    }}
+                  />
+                  <button
+                    onClick={handleSaveArticulationCapture}
+                    style={{
+                      background: 'rgba(105, 219, 124, 0.14)', border: '1px solid rgba(105, 219, 124, 0.35)',
+                      color: '#69db7c', borderRadius: '5px', padding: '5px 10px', fontSize: '10px', fontWeight: 700, cursor: 'pointer'
+                    }}
+                  >
+                    Save
+                  </button>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                {articulationPresets.map(preset => {
+                  const active = articulationMatches(preset)
+                  return (
+                    <div
+                      key={preset.id}
+                      style={{
+                        display: 'inline-flex', alignItems: 'center',
+                        background: active ? 'rgba(105, 219, 124, 0.13)' : 'rgba(255,255,255,0.02)',
+                        border: `1px solid ${active ? 'rgba(105, 219, 124, 0.55)' : 'rgba(255,255,255,0.08)'}`,
+                        borderRadius: '5px', overflow: 'hidden'
+                      }}
+                    >
+                      <button
+                        onClick={() => applyArticulationPreset(selectedNoteIds, preset.id)}
+                        title={Object.keys(preset.updates).length > 0 ? Object.keys(preset.updates).join(', ') : 'No expression overrides'}
+                        style={{
+                          background: 'transparent', border: 'none', cursor: 'pointer',
+                          color: active ? '#69db7c' : '#ccc', padding: '4px 7px', fontSize: '10px', fontWeight: 700
+                        }}
+                      >
+                        {preset.name}
+                      </button>
+                      {!preset.builtin && (
+                        <button
+                          onClick={() => removeArticulationPreset(preset.id)}
+                          title="Delete preset"
+                          style={{
+                            background: 'transparent', border: 'none', borderLeft: '1px solid rgba(255,255,255,0.06)',
+                            color: 'var(--text-muted)', padding: '4px 6px', fontSize: '10px', cursor: 'pointer'
+                          }}
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+              <span style={{ fontSize: '9px', color: 'var(--text-muted)' }}>
+                Replaces vibrato, tremolo, filter, glide and per-hit shape on the selection.
+              </span>
             </div>
           )}
 

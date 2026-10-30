@@ -5,6 +5,7 @@ import { buildNativeNoteOnCommand, type NativeNoteOnCommand } from '../engine/na
 import { buildGlideIntoMap, resolveGlidePlayback } from './midiEditing'
 import { getLaneValueAtTick } from './automation'
 import { applyAudioBufferFadeOut, normalizeAudioBuffer, stitchAudioBuffers } from './audioRender'
+import { tempoMapIsActive } from './conductor'
 
 export type NativeBitDepth = 16 | 24 | 32
 
@@ -98,6 +99,9 @@ export function canUseNativeBounce(): boolean {
 export function buildNativeBouncePayload(state: AppState, request: NativeBounceRequest, bitDepth: NativeBitDepth): NativeBouncePayload | null {
   if (request.exportRegionMode) return null
   if (request.includeProceduralFx && state.studioSettings.proceduralFxEnabled) return null
+  // The JUCE engine bounces at one constant BPM; a conductor map needs the
+  // tick-integrated Tone renderer instead.
+  if (tempoMapIsActive(state.tempoMap, state.bpm)) return null
 
   const globalTPS = (state.bpm / 60) * TICKS_PER_BEAT
   if (!(globalTPS > 0)) return null
@@ -141,7 +145,8 @@ export function buildNativeBouncePayload(state: AppState, request: NativeBounceR
       glideInto,
       state.automationTargets[note.trackId] ?? 'velocity',
       state.automationLanes?.[note.trackId],
-      state.automationCurves
+      state.automationCurves,
+      state.tempoMap
     )
     const command = buildNativeNoteOnCommand({
       trackId: note.trackId,

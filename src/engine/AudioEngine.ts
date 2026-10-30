@@ -10,6 +10,12 @@ import { buildNativeNoteOnCommand } from './nativeNoteCommand'
 import { buildNoteFxChain } from '../utils/noteFxChain'
 import { buildCurveLut, evaluateGlideCurve } from '../utils/glideCurves'
 import { createTrackChannel, setTrackChannelPan } from '../utils/toneChannel'
+import {
+  clampConductorBpm,
+  getTempoAtTick,
+  tempoMapIsActive,
+  getMeterPositionAtTick,
+} from '../utils/conductor'
 import { attachDrumHitModulation, resolveDrumHitModulation, type DrumHitModulation, type DrumModulationRig } from '../utils/drumModulation'
 import {
   drumSampleShouldLoop,
@@ -3280,6 +3286,8 @@ class AudioEngine {
   private activeVoicePreviewGeneration = 0
   private vst3AutomationTimer: any = null
   private vst3AutomationLastTicks = 0
+  private conductorTempoTimer: any = null
+  private conductorLastAppliedBpm = 0
 
   constructor() {
     try {
@@ -3300,6 +3308,7 @@ class AudioEngine {
             Tone.Transport.start()
             this.resumeActiveNotes()
             this.startVst3Automation()
+            this.startConductorTempoTracking()
             if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
               (window as any).juceAudioBridge.postCommand({ type: 'play' })
             }
@@ -3309,6 +3318,7 @@ class AudioEngine {
             Tone.Transport.pause()
             this.stopActiveNotes()
             this.stopVst3Automation()
+            this.stopConductorTempoTracking()
             if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
               (window as any).juceAudioBridge.postCommand({ type: 'stop' })
             }
@@ -3316,6 +3326,80 @@ class AudioEngine {
         }
       }
     })
+
+    // The conductor map owns Transport tempo while it is active; moving the
+    // playhead while paused also retunes the transport so playback starts at
+    // the right tempo for that song position.
+    useStore.subscribe((state, prevState) => {
+      if (state.tempoMap !== prevState.tempoMap) {
+        if (tempoMapIsActive(state.tempoMap, state.bpm)) {
+          this.applyConductorTempo(true)
+          if (state.isPlaying) this.startConductorTempoTracking()
+        } else {
+          this.stopConductorTempoTracking(true)
+        }
+      }
+      if (
+        !state.isPlaying &&
+        state.playheadPosition !== prevState.playheadPosition &&
+        tempoMapIsActive(state.tempoMap, state.bpm)
+      ) {
+        this.applyConductorTempo(true)
+      }
+    })
+  }
+
+  private startConductorTempoTracking() {
+    if (this.conductorTempoTimer !== null) return
+    this.conductorLastAppliedBpm = 0
+    this.applyConductorTempo(true)
+    this.conductorTempoTimer = window.setInterval(() => this.applyConductorTempo(), 40)
+  }
+
+  private stopConductorTempoTracking(resetToBase = false) {
+    if (this.conductorTempoTimer !== null) {
+      window.clearInterval(this.conductorTempoTimer)
+      this.conductorTempoTimer = null
+    }
+    this.conductorLastAppliedBpm = 0
+    if (!resetToBase) return
+    const state = useStore.getState()
+    const base = clampConductorBpm(state.bpm)
+    if (Math.abs(Tone.Transport.bpm.value - base) > 0.01) {
+      Tone.Transport.bpm.rampTo(base, 0.05)
+    }
+    if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
+      (window as any).juceAudioBridge.postCommand({ type: 'setBpm', bpm: base })
+    }
+    if (this.wasmNode) {
+      this.wasmNode.port.postMessage({
+        type: 'global-settings',
+        sampleRate: Tone.getContext().rawContext.sampleRate,
+        bpm: base
+      })
+    }
+  }
+
+  private applyConductorTempo(force = false) {
+    const state = useStore.getState()
+    if (!tempoMapIsActive(state.tempoMap, state.bpm)) return
+    const tick = state.isPlaying ? Tone.Transport.ticks : state.playheadPosition
+    const bpm = getTempoAtTick(state.tempoMap, state.bpm, tick)
+    if (!force && Math.abs(bpm - this.conductorLastAppliedBpm) < 0.02) return
+    this.conductorLastAppliedBpm = bpm
+    if (Math.abs(Tone.Transport.bpm.value - bpm) > 0.01) {
+      Tone.Transport.bpm.rampTo(bpm, 0.05)
+    }
+    if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
+      (window as any).juceAudioBridge.postCommand({ type: 'setBpm', bpm })
+    }
+    if (this.wasmNode) {
+      this.wasmNode.port.postMessage({
+        type: 'global-settings',
+        sampleRate: Tone.getContext().rawContext.sampleRate,
+        bpm
+      })
+    }
   }
 
   async init() {
@@ -3342,7 +3426,7 @@ class AudioEngine {
             }
           })
         }
-        if (state.bpm !== prevState.bpm) {
+        if (state.bpm !== prevState.bpm && !tempoMapIsActive(state.tempoMap, state.bpm)) {
           if (Math.abs(Tone.Transport.bpm.value - state.bpm) > 0.01) {
             Tone.Transport.bpm.value = state.bpm
           }
@@ -3527,7 +3611,7 @@ class AudioEngine {
           try { d.snare?.triggerRelease?.() } catch(_) {}
         });
       }
-      if (state.bpm !== prevState.bpm) {
+      if (state.bpm !== prevState.bpm && !tempoMapIsActive(state.tempoMap, state.bpm)) {
         if (Math.abs(Tone.Transport.bpm.value - state.bpm) > 0.01) {
           Tone.Transport.bpm.rampTo(state.bpm, 0.05);
         }
@@ -4991,7 +5075,7 @@ class AudioEngine {
       } else if (!state.isRecording && state.loopEnabled && state.loopEnd > state.loopStart && ticks >= state.loopEnd) {
         Tone.Transport.ticks = state.loopStart
       } else {
-        if (Math.abs(Tone.Transport.bpm.value - state.bpm) > 0.01) {
+        if (Math.abs(Tone.Transport.bpm.value - state.bpm) > 0.01 && !tempoMapIsActive(state.tempoMap, state.bpm)) {
           Tone.Transport.bpm.value = state.bpm
         }
 
@@ -5015,13 +5099,17 @@ class AudioEngine {
       if (!state.metronomeEnabled) return
       const s = state.metronomeSettings
 
-      const numerator = parseInt(state.timeSignature.split('/')[0])
-      const beat = Math.floor(Tone.Transport.ticks / 192) % numerator
-      const note = beat === 0 ? s.downbeatPitch : s.upbeatPitch
-      const velBase = beat === 0 ? s.downbeatVel : s.upbeatVel
+      // The interval is a 16th so meter changes with an 8th/16th denominator
+      // still land on their beat; non-beat ticks are skipped.
+      const tick = Math.round(Tone.Transport.getTicksAtTime(time))
+      const position = getMeterPositionAtTick(state.meterMap, state.timeSignature, tick)
+      if (Math.abs(tick - position.beatStartTick) > 1) return
+      const isDownbeat = position.beatIndex === 0
+      const note = isDownbeat ? s.downbeatPitch : s.upbeatPitch
+      const velBase = isDownbeat ? s.downbeatVel : s.upbeatVel
       const velocity = Math.max(0, Math.min(1, state.metronomeVolume * velBase))
       this.metronome.triggerAttackRelease(note, '32n', time, velocity)
-    }, '4n')
+    }, '16n')
   }
 
   triggerMetronomeClick(accent: boolean = false) {
@@ -5253,10 +5341,13 @@ class AudioEngine {
     if (bpm <= 0 || isNaN(bpm)) return; // Failsafe to prevent Tone.js crashes
     const state = useStore.getState()
     const prevBpm = state.bpm
-    Tone.Transport.bpm.rampTo(bpm, 0.1)
+    if (!tempoMapIsActive(state.tempoMap, bpm)) {
+      Tone.Transport.bpm.rampTo(bpm, 0.1)
+    }
     state.setBpm(bpm)
 
-    if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
+    if (!tempoMapIsActive(state.tempoMap, bpm) &&
+      (window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
       (window as any).juceAudioBridge.postCommand({ type: 'setBpm', bpm });
     }
 

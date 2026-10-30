@@ -118,6 +118,7 @@ void SampleEngine::setConfig(const Config& newConfig, const juce::String& base64
             {
                 v.cfg = config;
                 v.sustainLevel = config.sustain;
+                v.loopWhileHeld = v.loopWhileHeld || config.loop;
             }
         }
         return;
@@ -236,6 +237,13 @@ void SampleEngine::noteOn(int noteId, float pitchMidi, float velocity, float dur
     v->sustainLevel = config.sustain;
     v->decayAmount = 1.0f - config.sustain;
     v->usingReverse = config.reverse;
+    // The web sampler extends long notes by looping the trimmed region; a JUCE voice that only
+    // looped on config.loop would cut every held note off at the region end. Mirror the web rule
+    // (note longer than the region => loop it) so both engines play the same tail.
+    const double sr = atomicSampleRate.load(std::memory_order_relaxed);
+    const double regionSeconds = (sr > 0.0 && rate > 0.0) ? (e - s) / (sr * rate) : 0.0;
+    v->loopWhileHeld = config.loop
+        || (durationSeconds > 0.0f && regionSeconds > 0.0 && (double)durationSeconds > regionSeconds + 0.05);
     v->bufCh0 = 0;
     v->bufCh1 = buf->getNumChannels() >= 2 ? 1 : 0;
     v->position = config.reverse ? juce::jlimit(0.0, dur - 1.0, dur - 1.0 - e) : s;
@@ -395,7 +403,7 @@ void SampleEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, 
 
             if (v.stage == EnvStage::Release) continue;
 
-            if (v.cfg.loop)
+            if (v.loopWhileHeld)
             {
                 if (v.position >= posEnd || v.position < posStart)
                     v.position = posStart + std::fmod(std::max(0.0, v.position - posStart), std::max(1.0, posEnd - posStart));

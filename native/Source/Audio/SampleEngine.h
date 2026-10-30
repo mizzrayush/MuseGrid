@@ -62,6 +62,9 @@ private:
         int bufCh0 = 0;
         int bufCh1 = 1;
         bool usingReverse = false;
+        // True when this voice should wrap inside its trimmed region instead of releasing at
+        // the region end: either the patch loops, or the note is longer than the region.
+        bool loopWhileHeld = false;
         float velocity = 1.0f;
         int fxChainId = 0;
         float remainingSeconds = -1.0f;

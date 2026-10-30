@@ -212,6 +212,7 @@ export const SynthStudioModal: React.FC = () => {
   const samplerFileInputRef = useRef<HTMLInputElement | null>(null)
   const samplerCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const samplerDragEdge = useRef<'start' | 'end' | null>(null)
+  const samplerAuditionRef = useRef<{ source: AudioBufferSourceNode; gain: GainNode } | null>(null)
 
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState<boolean>(false)
   const lastLoadedTrackIdRef = useRef<string | null>(null)
@@ -873,6 +874,72 @@ export const SynthStudioModal: React.FC = () => {
   }
 
   // Live Audition Key
+  const releaseSamplerVoice = (voice: { source: AudioBufferSourceNode; gain: GainNode }, releaseSeconds = 0.12) => {
+    const audioCtx = Tone.getContext().rawContext as AudioContext
+    const now = audioCtx.currentTime
+    try {
+      voice.gain.gain.cancelScheduledValues(now)
+      voice.gain.gain.setValueAtTime(Math.max(0.0001, voice.gain.gain.value), now)
+      voice.gain.gain.exponentialRampToValueAtTime(0.0001, now + releaseSeconds)
+      voice.source.stop(now + releaseSeconds + 0.01)
+    } catch (_) {}
+  }
+
+  const stopSamplerAudition = (releaseSeconds = 0.12) => {
+    const voice = samplerAuditionRef.current
+    samplerAuditionRef.current = null
+    if (voice) releaseSamplerVoice(voice, releaseSeconds)
+  }
+
+  // Region + loop aware preview: the audition should sound like the sampler will in the grid,
+  // where a held note wraps the trimmed region instead of always playing a fixed 0.8s blip.
+  const createSamplerVoice = (shiftedMidi: number, velocity: number): { source: AudioBufferSourceNode; gain: GainNode } | null => {
+    if (!samplerBuffer) return null
+    try {
+      const audioCtx = Tone.getContext().rawContext as AudioContext
+      const bufferToPlay = sampler.reverse ? getReversedAudioBuffer(audioCtx, samplerBuffer) : samplerBuffer
+      const source = audioCtx.createBufferSource()
+      source.buffer = bufferToPlay
+      const semitoneDiff = shiftedMidi - (sampler.rootNote ?? 60) + (sampler.tuning ?? 0) + (sampler.fineTune ?? 0) / 100 + fineDetune / 100
+      const rate = Math.pow(2, semitoneDiff / 12)
+      source.playbackRate.value = rate
+
+      const now = audioCtx.currentTime
+      const gainNode = audioCtx.createGain()
+      const attack = Math.max(0.001, sampler.attack ?? 0.005)
+      const decay = Math.max(0.01, sampler.decay ?? 0.25)
+      const sustain = Math.max(0.0001, velocity * Math.max(0, Math.min(1, sampler.sustain ?? 0.6)))
+      gainNode.gain.setValueAtTime(0.0001, now)
+      gainNode.gain.linearRampToValueAtTime(velocity, now + attack)
+      gainNode.gain.exponentialRampToValueAtTime(sustain, now + attack + decay)
+
+      const startSec = Math.max(0, Math.min(bufferToPlay.duration - 0.001, sampler.startOffset * bufferToPlay.duration))
+      const endSec = Math.max(startSec + 0.001, Math.min(bufferToPlay.duration, sampler.endOffset * bufferToPlay.duration))
+
+      source.connect(gainNode)
+      gainNode.connect(audioCtx.destination)
+
+      if (sampler.loop) {
+        source.loop = true
+        source.loopStart = startSec
+        source.loopEnd = endSec
+        source.start(now, startSec)
+      } else {
+        source.start(now, startSec, (endSec - startSec) / (rate || 1))
+      }
+      return { source, gain: gainNode }
+    } catch (err) {
+      console.warn('Sampler audition error:', err)
+      return null
+    }
+  }
+
+  const startSamplerAudition = (shiftedMidi: number, velocity = 0.9) => {
+    stopSamplerAudition(0.03)
+    const voice = createSamplerVoice(shiftedMidi, velocity)
+    if (voice) samplerAuditionRef.current = voice
+  }
+
   const handleAuditionKey = (note: string) => {
     if (!targetTrack) return
     setActiveKey(note)
@@ -880,31 +947,27 @@ export const SynthStudioModal: React.FC = () => {
     const shiftedMidi = effectiveMidi + octave * 12 + semitone
 
     if (samplerMode && samplerBuffer) {
-      try {
-        const audioCtx = Tone.getContext().rawContext as AudioContext
-        const bufferToPlay = sampler.reverse ? getReversedAudioBuffer(audioCtx, samplerBuffer) : samplerBuffer
-        const source = audioCtx.createBufferSource()
-        source.buffer = bufferToPlay
-        const semitoneDiff = shiftedMidi - (sampler.rootNote ?? 60) + (sampler.tuning ?? 0) + (sampler.fineTune ?? 0) / 100 + fineDetune / 100
-        source.playbackRate.value = Math.pow(2, semitoneDiff / 12)
-        const gainNode = audioCtx.createGain()
-        gainNode.gain.setValueAtTime(0.001, audioCtx.currentTime)
-        gainNode.gain.linearRampToValueAtTime(0.9, audioCtx.currentTime + 0.02)
-        gainNode.gain.linearRampToValueAtTime(0.001, audioCtx.currentTime + 0.8)
-        source.connect(gainNode)
-        gainNode.connect(audioCtx.destination)
-        const startSec = Math.max(0, Math.min(bufferToPlay.duration - 0.001, sampler.startOffset * bufferToPlay.duration))
-        source.start(audioCtx.currentTime, startSec, 0.8)
-      } catch (err) {
-        console.warn('Sampler audition error:', err)
-      }
-    } else {
-      const noteSound = Tone.Frequency(shiftedMidi, 'midi').toNote()
-      audioEngine.playNote(targetTrack.id, 'synth', noteSound, '8n', undefined, 1, undefined, fineDetune)
+      startSamplerAudition(shiftedMidi)
+      return
     }
 
+    const noteSound = Tone.Frequency(shiftedMidi, 'midi').toNote()
+    audioEngine.playNote(targetTrack.id, 'synth', noteSound, '8n', undefined, 1, undefined, fineDetune)
     setTimeout(() => setActiveKey(null), 250)
   }
+
+  const handleAuditionKeyUp = () => {
+    setActiveKey(null)
+    if (samplerMode) stopSamplerAudition()
+  }
+
+  useEffect(() => () => {
+    const voice = samplerAuditionRef.current
+    samplerAuditionRef.current = null
+    if (voice) {
+      try { voice.source.stop() } catch (_) {}
+    }
+  }, [])
 
   // Randomize Patch
   const handleRandomizePatch = () => {
@@ -952,22 +1015,8 @@ export const SynthStudioModal: React.FC = () => {
       setTimeout(() => {
         const shiftedMidi = midi + octave * 12 + semitone
         if (samplerMode && samplerBuffer) {
-          try {
-            const audioCtx = Tone.getContext().rawContext as AudioContext
-            const bufferToPlay = sampler.reverse ? getReversedAudioBuffer(audioCtx, samplerBuffer) : samplerBuffer
-            const source = audioCtx.createBufferSource()
-            source.buffer = bufferToPlay
-            const semitoneDiff = shiftedMidi - (sampler.rootNote ?? 60) + (sampler.tuning ?? 0) + (sampler.fineTune ?? 0) / 100 + fineDetune / 100
-            source.playbackRate.value = Math.pow(2, semitoneDiff / 12)
-            const gainNode = audioCtx.createGain()
-            gainNode.gain.setValueAtTime(0.001, audioCtx.currentTime)
-            gainNode.gain.linearRampToValueAtTime(0.85, audioCtx.currentTime + 0.02)
-            gainNode.gain.linearRampToValueAtTime(0.001, audioCtx.currentTime + 0.45)
-            source.connect(gainNode)
-            gainNode.connect(audioCtx.destination)
-            const startSec = Math.max(0, Math.min(bufferToPlay.duration - 0.001, sampler.startOffset * bufferToPlay.duration))
-            source.start(audioCtx.currentTime, startSec, 0.45)
-          } catch (_) {}
+          const voice = createSamplerVoice(shiftedMidi, 0.85)
+          if (voice) setTimeout(() => releaseSamplerVoice(voice, 0.25), 650)
         } else {
           const noteSound = Tone.Frequency(shiftedMidi, 'midi').toNote()
           audioEngine.playNote(
@@ -2092,7 +2141,9 @@ export const SynthStudioModal: React.FC = () => {
                 LIVE AUDITION KEYBOARD
               </span>
               <span style={{ fontSize: '10px', color: '#666' }}>
-                Click keys to test your synth patch in real time
+                {samplerMode && samplerBuffer
+                  ? 'Hold keys to preview the trimmed region (LOOP extends long notes)'
+                  : 'Click keys to test your synth patch in real time'}
               </span>
             </div>
 
@@ -2103,7 +2154,10 @@ export const SynthStudioModal: React.FC = () => {
                   return (
                     <button
                       key={k.note}
-                      onClick={() => handleAuditionKey(k.note)}
+                      onPointerDown={e => { e.preventDefault(); handleAuditionKey(k.note) }}
+                      onPointerUp={handleAuditionKeyUp}
+                      onPointerLeave={handleAuditionKeyUp}
+                      onPointerCancel={handleAuditionKeyUp}
                       style={{
                         flex: 1,
                         height: '100%',
@@ -2131,7 +2185,10 @@ export const SynthStudioModal: React.FC = () => {
                 return (
                   <button
                     key={k.note}
-                    onClick={() => handleAuditionKey(k.note)}
+                    onPointerDown={e => { e.preventDefault(); handleAuditionKey(k.note) }}
+                    onPointerUp={handleAuditionKeyUp}
+                    onPointerLeave={handleAuditionKeyUp}
+                    onPointerCancel={handleAuditionKeyUp}
                     style={{
                       width: '24px',
                       height: '60px',

@@ -205,7 +205,8 @@ export function buildNativeBouncePayload(state: AppState, request: NativeBounceR
     ? state.tracks.map(t => ({ trackId: t.id, muted: !selectedIds.has(t.id), soloed: false }))
     : []
 
-  const parsedBeatsPerMeasure = parseInt(state.timeSignature.split('/')[0], 10)
+  const timeSignature = typeof state.timeSignature === 'string' ? state.timeSignature : '4/4'
+  const parsedBeatsPerMeasure = parseInt(timeSignature.split('/')[0], 10)
   const click = state.metronomeSettings
   const metronome: NativeMetronomeConfig | undefined = request.includeMetronome ? {
     bpm: state.bpm,

@@ -3,7 +3,7 @@ import { useStore } from '../engine/store'
 import { snapToScale } from '../utils/musicTheory'
 import { audioEngine } from '../engine/AudioEngine'
 import { IconSkipBack, IconSliders, IconTrash } from '../ui/Icons'
-import { useContextMenuDismissal } from '../ui/useContextMenuDismissal'
+import { useContextMenuDismissal, useContextMenuPosition } from '../ui/useContextMenuDismissal'
 import * as Tone from 'tone'
 
 import { getEdoStepInfo } from '../utils/edoNomenclature'
@@ -107,6 +107,7 @@ export default function ScoreEditor() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tick: number; noteId?: string } | null>(null)
   const contextMenuRef = useRef<HTMLDivElement | null>(null)
   useContextMenuDismissal(contextMenu !== null, setContextMenu, contextMenuRef)
+  const contextMenuPosition = useContextMenuPosition(contextMenu !== null, contextMenu?.x ?? 0, contextMenu?.y ?? 0, contextMenuRef)
 
   const [sigNum, sigDen] = useMemo(() => {
     const parts = timeSignature.split('/')
@@ -946,8 +947,8 @@ export default function ScoreEditor() {
         <div
           style={{
             position: 'fixed',
-            top: contextMenu.y,
-            left: contextMenu.x,
+            top: contextMenuPosition.top,
+            left: contextMenuPosition.left,
             background: '#12121a',
             border: '1px solid rgba(255,255,255,0.08)',
             borderRadius: '6px',

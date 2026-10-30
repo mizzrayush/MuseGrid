@@ -11,6 +11,7 @@ import { buildNoteFxChain } from '../utils/noteFxChain'
 import { buildCurveLut, evaluateGlideCurve } from '../utils/glideCurves'
 import { createTrackChannel, setTrackChannelPan } from '../utils/toneChannel'
 import { attachDrumHitModulation, resolveDrumHitModulation, type DrumHitModulation, type DrumModulationRig } from '../utils/drumModulation'
+import { getSamplerPlaybackPlan, usesWebAudioSamplePlayback } from '../utils/audioPlayback'
 
 interface TrackRack {
   input: Tone.Gain
@@ -540,17 +541,19 @@ class DrumMachine {
         chainNodes.push(fadeNode)
       }
 
-      if (this.lastDestination) {
-        const rawDest = (this.lastDestination as any).input || this.lastDestination
-        if (rawDest._nativeAudioNode || rawDest._nativeGainNode) {
-          outputNode.connect(rawDest._nativeAudioNode || rawDest._nativeGainNode)
-        } else if (typeof rawDest.connect === 'function') {
-          outputNode.connect(rawDest)
-        } else {
-          outputNode.connect(ctx.destination)
-        }
-      } else {
-        outputNode.connect(ctx.destination)
+      const destination: any = this.lastDestination
+        ? ((this.lastDestination as any).input || this.lastDestination)
+        : ctx.destination
+      try {
+        outputNode.connect(destination)
+      } catch (err) {
+        // Tone hands back standardized-audio-context wrappers, not native AudioNodes, and a
+        // wrapper refuses a raw native peer. Retry with both ends unwrapped only if the direct
+        // connection failed, so wrapper-to-wrapper routing keeps its own bookkeeping.
+        const nativeOut: any = (outputNode as any)._nativeAudioNode || outputNode
+        const nativeDest: any = destination._nativeAudioNode || destination._nativeGainNode || destination
+        if (nativeOut === outputNode && nativeDest === destination) throw err
+        nativeOut.connect(nativeDest)
       }
 
       const startOffset = Math.max(0, Math.min(0.99, sampleConfig?.startOffset ?? 0))
@@ -1212,6 +1215,10 @@ export class ChromaticSampler {
     return ChromaticSampler.bufferCache.get(uri)
   }
 
+  static remember(uri: string, buffer: AudioBuffer) {
+    ChromaticSampler.bufferCache.set(uri, buffer)
+  }
+
   private ctx: AudioContext
   private rackInput: GainNode
   private cfg: SynthSamplerConfig
@@ -1356,10 +1363,8 @@ export class ChromaticSampler {
         }
       }
     }
-    // Enable looping if loop option is toggled OR if note duration exceeds sample region length so notes extend naturally
     const regionDur = regionSec / rate
-    const isExtended = durSec > regionDur + 0.05
-    const shouldLoop = cfg.loop || isExtended
+    const { shouldLoop, sourceDuration } = getSamplerPlaybackPlan(durSec, regionDur, !!cfg.loop)
     if (shouldLoop) {
       source.loop = true
       source.loopStart = regionStart
@@ -1411,11 +1416,10 @@ export class ChromaticSampler {
     this.voices.push(voice)
     source.onended = () => this.retireVoice(voice)
 
-    if (cfg.loop) {
+    if (sourceDuration === undefined) {
       source.start(now, regionStart)
-      source.stop(releaseAt + release + 0.02)
     } else {
-      source.start(now, regionStart, regionSec)
+      source.start(now, regionStart, sourceDuration)
     }
 
     if (!cfg.loop) {
@@ -3710,7 +3714,7 @@ class AudioEngine {
         ab = await (await fetch(dataUri)).arrayBuffer()
       }
       const decoded = await ctx.decodeAudioData(ab)
-      if (decoded) ChromaticSampler.bufferCache.set(dataUri, decoded)
+      if (decoded) ChromaticSampler.remember(dataUri, decoded)
       return decoded
     } catch (e) {
       console.warn('Synth sampler buffer decode failed:', e)
@@ -5745,22 +5749,14 @@ class AudioEngine {
     const state = useStore.getState()
     const track = state.tracks.find(t => t.id === trackId)
     const playTime = time !== undefined ? time : Tone.now()
+    const samplePitch = typeof pitch === 'number' ? pitch : Tone.Frequency(pitch).toMidi()
+    const usesWebAudioSample = usesWebAudioSamplePlayback(track, type, samplePitch)
 
-    if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge) {
-      const pitchNum = typeof pitch === 'number' ? pitch : Tone.Frequency(pitch).toMidi()
-      const isCustomDrumSample = (type === 'drum' || track?.instrument === 'drum') && (
-        track?.drumPadModes?.[pitchNum] === 'sample' || !!(track?.drumPadSamples?.[pitchNum])
+    if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge && !usesWebAudioSample) {
+      (window as any).juceAudioBridge.postCommand(
+        buildNativeNoteOnCommand({ trackId, type, pitch, duration, velocity, detune, pitchEnd, noteData, track })
       )
-      const isCustomSynthSampler = (type === 'synth' || track?.instrument === 'synth') && (
-        track?.synthMode === 'sampler' || !!(track?.synthSampler?.audioBase64)
-      )
-
-      if (!isCustomDrumSample && !isCustomSynthSampler) {
-        (window as any).juceAudioBridge.postCommand(
-          buildNativeNoteOnCommand({ trackId, type, pitch, duration, velocity, detune, pitchEnd, noteData, track })
-        );
-        return;
-      }
+      return
     }
 
     // VST3 instrument overrides are hosted by JUCE only. Tone keeps the track sound.
@@ -5768,7 +5764,7 @@ class AudioEngine {
       instrumentOverride = undefined
     }
 
-    if (state.engineMode === 'wasm' && this.wasmNode) {
+    if (state.engineMode === 'wasm' && this.wasmNode && !usesWebAudioSample) {
       const wasmIdx = this.getTrackWasmIndex(trackId);
       
       let startMidi = 0;
@@ -6263,6 +6259,17 @@ class AudioEngine {
           drum.drumDetunes = track?.drumDetunes
           drum.drumSlides = track?.drumSlides
           drum.drumSlideTimes = track?.drumSlideTimes
+          // A custom sample pad has to survive a per-note kit override: the override machine
+          // owns playback for that hit, so it needs the same sample map the track machine has.
+          if (track?.drumPadModes) drum.padModes = { ...track.drumPadModes }
+          if (track?.drumPadSamples) {
+            drum.padSamples = { ...track.drumPadSamples }
+            const mainDrum = this.drums.get(trackId)
+            if (mainDrum) {
+              for (const [pad, buffer] of mainDrum.padAudioBuffers) drum.padAudioBuffers.set(pad, buffer)
+            }
+            this.syncDrumPadSampleBuffers(drum, track.drumPadSamples)
+          }
           const rack = this.getRack(trackId)
           drum.connect(rack.input)
           trackOverrides.set(drumKit, drum)

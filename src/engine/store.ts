@@ -1641,11 +1641,38 @@ export const createDefaultTracks = (): Track[] => [
   }
 ]
 
+// Projects saved by older builds stored [numerator, denominator]; every consumer
+// expects an "n/d" string, so coerce once at the load boundary.
+export function normalizeTimeSignature(value: unknown): string {
+  if (typeof value === 'string') {
+    const match = value.match(/^\s*(\d+)\s*\/\s*(\d+)\s*$/)
+    if (match) return `${parseInt(match[1], 10)}/${parseInt(match[2], 10)}`
+    const single = parseInt(value, 10)
+    return Number.isFinite(single) && single > 0 ? `${single}/4` : '4/4'
+  }
+  if (Array.isArray(value) && value.length >= 2) {
+    const numerator = Number(value[0])
+    const denominator = Number(value[1])
+    if (Number.isFinite(numerator) && numerator > 0 && Number.isFinite(denominator) && denominator > 0) {
+      return `${Math.round(numerator)}/${Math.round(denominator)}`
+    }
+  }
+  if (value && typeof value === 'object') {
+    const record = value as { numerator?: unknown; denominator?: unknown }
+    const numerator = Number(record.numerator)
+    const denominator = Number(record.denominator)
+    if (Number.isFinite(numerator) && numerator > 0 && Number.isFinite(denominator) && denominator > 0) {
+      return `${Math.round(numerator)}/${Math.round(denominator)}`
+    }
+  }
+  return '4/4'
+}
+
 export const createBlankProjectData = (projectName = 'Untitled Project') => ({
   projectName,
   projectFilePath: null,
   bpm: 120,
-  timeSignature: [4, 4],
+  timeSignature: '4/4',
   loopEnabled: false,
   loopStart: 0,
   loopEnd: 768,
@@ -1706,7 +1733,7 @@ export const applyProjectDataToEngineAndStore = (data: any, tabName?: string, fi
     history: [],
     historyIndex: -1,
     bpm: data.bpm || 120,
-    timeSignature: data.timeSignature || [4, 4],
+    timeSignature: normalizeTimeSignature(data.timeSignature),
     scaleLock: data.scaleLock || { enabled: false, root: 0, mode: 'major', accidental: 'sharp' },
     loopEnabled: !!data.loopEnabled,
     loopStart: data.loopStart || 0,
@@ -3337,8 +3364,9 @@ if (firstTrack) {
 
     setDrumSteps: (drumSteps) => set({ drumSteps }),
     setTimeSignature: (sig) => {
-      const numerator = parseInt(sig.split('/')[0])
-      set({ timeSignature: sig, gridShadeEvery: numerator })
+      const normalized = normalizeTimeSignature(sig)
+      const numerator = parseInt(normalized.split('/')[0], 10) || 4
+      set({ timeSignature: normalized, gridShadeEvery: numerator })
     },
     setProjectExportData: (projectExportData) => set({ projectExportData }),
     setExportRegionMode: (exportRegionMode) => set({ exportRegionMode }),

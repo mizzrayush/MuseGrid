@@ -2,7 +2,7 @@ import { useState, useRef } from 'react'
 import { useStore, DEFAULT_DRUM_ROWS } from '../engine/store'
 import { audioEngine } from '../engine/AudioEngine'
 import { IconPin, IconSliders, IconTrash } from '../ui/Icons'
-import { useContextMenuDismissal } from '../ui/useContextMenuDismissal'
+import { useContextMenuDismissal, useContextMenuPosition } from '../ui/useContextMenuDismissal'
 import { sliderProgress } from '../ui/AppSlider'
 
 // We'll use the store's snapResolution as the dynamic STEP_TICKS
@@ -54,6 +54,7 @@ export default function DrumSequencer() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tick: number; noteId?: string } | null>(null)
   const contextMenuRef = useRef<HTMLDivElement | null>(null)
   useContextMenuDismissal(contextMenu !== null, setContextMenu, contextMenuRef)
+  const contextMenuPosition = useContextMenuPosition(contextMenu !== null, contextMenu?.x ?? 0, contextMenu?.y ?? 0, contextMenuRef)
 
   const notes = allNotes.filter(note => drumTrackIds.has(note.trackId))
   const editTrackNotes = editTrack ? notes.filter(note => note.trackId === editTrack.id) : []
@@ -289,7 +290,7 @@ export default function DrumSequencer() {
 
       {contextMenu && (
         <div
-          style={{ position: 'fixed', top: contextMenu.y, left: contextMenu.x, background: '#12121a', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '6px', zIndex: 9999, minWidth: '160px', boxShadow: '0 4px 12px rgba(0,0,0,0.5)', overflow: 'hidden' }}
+          style={{ position: 'fixed', top: contextMenuPosition.top, left: contextMenuPosition.left, background: '#12121a', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '6px', zIndex: 9999, minWidth: '160px', boxShadow: '0 4px 12px rgba(0,0,0,0.5)', overflow: 'hidden' }}
           ref={contextMenuRef}
         >
           <button

@@ -5,7 +5,7 @@ import {
   IconVolume, IconVolumeX, IconCopy, IconPaste, IconScissors, IconZap,
   IconLayers, IconArrowUp, IconArrowDown, IconSparkles, IconShuffle, IconList, IconAlign
 } from '../ui/Icons'
-import { useContextMenuDismissal } from '../ui/useContextMenuDismissal'
+import { useContextMenuDismissal, useContextMenuPosition } from '../ui/useContextMenuDismissal'
 import { useStore, DEFAULT_DRUM_ROWS, EXPRESSION_LANE_TARGETS, expressionLaneLabel, parseAutomationTarget, getTrackAutomationPoints, type ExpressionLaneTarget, type Note } from '../engine/store'
 import { audioEngine } from '../engine/AudioEngine'
 import type { Vst3ParameterInfo } from '../engine/AudioEngine'
@@ -442,6 +442,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   })
   const contextMenuRef = useRef<HTMLDivElement | null>(null)
   useContextMenuDismissal(contextMenu !== null, setContextMenu, contextMenuRef)
+  const contextMenuPosition = useContextMenuPosition(contextMenu !== null, contextMenu?.x ?? 0, contextMenu?.y ?? 0, contextMenuRef)
 
   // Custom Scrollbars Drag States
   const [dragScrollY, setDragScrollY] = useState<{ startY: number, startPanY: number } | null>(null)
@@ -4619,8 +4620,8 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         <div
           style={{
             position: 'fixed',
-            top: contextMenu.mode === 'glide' ? Math.max(8, Math.min(contextMenu.y, window.innerHeight - 360)) : Math.max(8, Math.min(contextMenu.y, window.innerHeight - 520)),
-            left: contextMenu.mode === 'glide' ? Math.max(8, Math.min(contextMenu.x, window.innerWidth - 260)) : Math.max(8, Math.min(contextMenu.x, window.innerWidth - 280)),
+            top: contextMenuPosition.top,
+            left: contextMenuPosition.left,
             background: '#14141c',
             border: '1px solid rgba(255, 255, 255, 0.08)',
             borderRadius: '8px',

@@ -6,7 +6,7 @@ import * as Tone from 'tone'
 import { useStore, DEFAULT_DRUM_ROWS, DEFAULT_VOICE_PRESETS, defaultGrooveTemplates, isPluginDrum, isPluginSynth, getPluginInstrumentType, type Track, type DrumRowConfig, type CustomFxConfig, type Note, type VoicePreset } from '../engine/store'
 import { audioEngine, type AudioDeviceSetup } from '../engine/AudioEngine'
 import { getTrackFxInstances } from '../engine/fxDefaults'
-import { useContextMenuDismissal } from './useContextMenuDismissal'
+import { useContextMenuDismissal, useContextMenuPosition } from './useContextMenuDismissal'
 import { AppSlider, sliderProgress } from './AppSlider'
 import { NOTE_NAMES_SHARP, NOTE_NAMES_FLAT, CHORD_VOICINGS, snapTick, snapToScale, getDiatonicChord, SCALE_MODES, GENRE_PROGRESSIONS, type GenreProgression, CHORD_STAMPS } from '../utils/musicTheory'
 
@@ -1609,6 +1609,7 @@ export default function LeftPane() {
   const [prevProjectId, setPrevProjectId] = useState(projectId)
   const contextMenuRef = useRef<HTMLDivElement | null>(null)
   useContextMenuDismissal(contextMenu !== null, setContextMenu, contextMenuRef)
+  const contextMenuPosition = useContextMenuPosition(contextMenu !== null, contextMenu?.x ?? 0, contextMenu?.y ?? 0, contextMenuRef)
   const [nTimesPromptTrackId, setNTimesPromptTrackId] = useState<{ id: string, multi: boolean } | null>(null)
   const [nTimesInput, setNTimesInput] = useState<string>('4')
 
@@ -3062,8 +3063,8 @@ export default function LeftPane() {
       progress: 0,
       renderElapsedSeconds: 0,
       renderTotalSeconds: 0,
-      startTick: state.loopEnabled ? state.loopStart : 0,
-      endTick: state.loopEnabled ? state.loopEnd : lastNoteTick,
+      startTick: state.loopEnabled ? state.loopStart : startTick,
+      endTick: state.loopEnabled ? state.loopEnd : Math.max(startTick + 1, endTick),
       includeProceduralFx: format === 'midi' ? false : state.studioSettings.proceduralFxEnabled,
       mp3Kbps: 320,
       bounceMode: 'hybrid',
@@ -12770,16 +12771,15 @@ for (let channel = 0; channel < input.length; channel++) {
         <div
           style={{
             position: 'fixed',
-            top: contextMenu.y,
-            left: contextMenu.x,
+            top: contextMenuPosition.top,
+            left: contextMenuPosition.left,
             background: '#14141c',
             border: '1px solid rgba(255,255,255,0.08)',
             borderRadius: '10px',
             zIndex: 9999,
             minWidth: '170px',
             boxShadow: '0 10px 30px rgba(0,0,0,0.6)',
-            overflow: 'hidden',
-            transform: `${contextMenu.x > window.innerWidth / 2 ? 'translateX(-100%)' : ''} ${contextMenu.y > window.innerHeight / 2 ? 'translateY(-100%)' : ''}`.trim()
+            overflow: 'hidden'
           }}
           ref={contextMenuRef}
           onClick={e => e.stopPropagation()}

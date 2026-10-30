@@ -20,6 +20,7 @@ import {
 import { DRUM_SAMPLE_PRESETS, bufferToDataUri } from '../utils/drumSamplePresets'
 import { QuickMicRecorder } from '../utils/micRecorder'
 import { AppSlider } from './AppSlider'
+import { drumSampleShouldLoop, resolveSamplerLoopMode, resolveSamplerRegion } from '../utils/audioPlayback'
 import {
   generateCurveLut,
   sampleCurveLut,
@@ -440,7 +441,26 @@ export const DrumDesignerModal: React.FC = () => {
         const bufDuration = bufToPlay.duration / rate
         const decayTime = sampleConfig?.decay ?? (overrides?.decay ?? padDecaysRef.current[pitch] ?? bufDuration)
         const effectiveDuration = Math.min(bufDuration, decayTime)
-        if (effectiveDuration < bufDuration) {
+
+        // Looping pads preview as a short held note; one-shots keep the decay-trimmed envelope.
+        const loopMode = sampleConfig?.loopMode ?? 'off'
+        const noteSec = loopMode === 'off' ? 0 : 0.9
+        const region = resolveSamplerRegion(sampleConfig ?? {})
+        const shouldLoop = drumSampleShouldLoop(noteSec, region, bufToPlay.duration, rate, loopMode)
+        const tailSec = loopMode === 'releaseTail'
+          ? Math.max(0, region.playEnd - region.loopEnd) * bufToPlay.duration / rate
+          : 0
+        const noteEnd = now + noteSec
+        let loopFadeEnd = noteEnd
+
+        if (shouldLoop) {
+          const fade = Math.max(0.02, decayTime)
+          const holdEnd = noteEnd + (tailSec > 0.01 ? tailSec : 0)
+          gainNode.gain.setValueAtTime(peakGain, noteEnd)
+          gainNode.gain.setValueAtTime(peakGain, holdEnd)
+          gainNode.gain.linearRampToValueAtTime(0.0001, holdEnd + fade)
+          loopFadeEnd = holdEnd + fade
+        } else if (effectiveDuration < bufDuration) {
           gainNode.gain.setValueAtTime(peakGain, now + Math.max(0.005, effectiveDuration * 0.75))
           gainNode.gain.exponentialRampToValueAtTime(0.0001, now + effectiveDuration)
         }
@@ -457,18 +477,51 @@ export const DrumDesignerModal: React.FC = () => {
 
         outputNode.connect(audioCtx.destination)
 
-        // Trimming offset slices
-        const startOffset = Math.max(0, Math.min(0.99, sampleConfig?.startOffset ?? 0))
-        const endOffset = Math.max(startOffset + 0.01, Math.min(1.0, sampleConfig?.endOffset ?? 1.0))
-        const startTimeInBuf = startOffset * bufToPlay.duration
-        const playDuration = ((endOffset - startOffset) * bufToPlay.duration) / rate
+        const startTimeInBuf = region.playStart * bufToPlay.duration
+        const playDuration = Math.max(0.005, (region.playEnd - region.playStart) * bufToPlay.duration) / rate
 
-        source.connect(gainNode)
-        source.start(now, startTimeInBuf, Math.min(playDuration, effectiveDuration + 0.05))
+        let loopGain: GainNode | undefined
+        let tailSource: AudioBufferSourceNode | undefined
+        let tailGain: GainNode | undefined
 
-        source.onended = () => {
+        if (shouldLoop) {
+          source.loop = true
+          source.loopStart = region.loopStart * bufToPlay.duration
+          source.loopEnd = region.loopEnd * bufToPlay.duration
+          loopGain = audioCtx.createGain()
+          loopGain.gain.setValueAtTime(1, now)
+          source.connect(loopGain)
+          loopGain.connect(gainNode)
+          source.start(now, startTimeInBuf)
+          if (tailSec > 0.01) {
+            tailSource = audioCtx.createBufferSource()
+            tailSource.buffer = bufToPlay
+            tailSource.playbackRate.setValueAtTime(rate, now)
+            tailGain = audioCtx.createGain()
+            tailGain.gain.setValueAtTime(0.0001, noteEnd)
+            tailGain.gain.linearRampToValueAtTime(1, noteEnd + 0.008)
+            tailSource.connect(tailGain)
+            tailGain.connect(gainNode)
+            tailSource.start(noteEnd, region.loopEnd * bufToPlay.duration)
+            tailSource.stop(loopFadeEnd + 0.02)
+            loopGain.gain.setValueAtTime(1, noteEnd)
+            loopGain.gain.linearRampToValueAtTime(0.0001, noteEnd + 0.008)
+            source.stop(noteEnd + 0.02)
+          } else {
+            source.stop(loopFadeEnd + 0.02)
+          }
+        } else {
+          source.connect(gainNode)
+          source.start(now, startTimeInBuf, Math.min(playDuration, effectiveDuration + 0.05))
+        }
+
+        const auditionEnd = tailSource ?? source
+        auditionEnd.onended = () => {
           try {
             source.disconnect()
+            loopGain?.disconnect()
+            tailSource?.disconnect()
+            tailGain?.disconnect()
             gainNode.disconnect()
             if (outputNode !== gainNode) outputNode.disconnect()
           } catch (_) {}
@@ -526,6 +579,7 @@ export const DrumDesignerModal: React.FC = () => {
       setPadSamples(prev => ({ ...prev, [pitch]: sampleData }))
       setPadModes(prev => ({ ...prev, [pitch]: 'sample' }))
       setPadBuffers(prev => new Map(prev).set(pitch, decoded))
+      setHasUnsavedChanges(true)
 
       if (targetTrack) {
         audioEngine.setDrumPadSample(targetTrack.id, pitch, sampleData, decoded)
@@ -620,6 +674,7 @@ export const DrumDesignerModal: React.FC = () => {
       setPadSamples(prev => ({ ...prev, [pitch]: sampleData }))
       setPadModes(prev => ({ ...prev, [pitch]: 'sample' }))
       setPadBuffers(prev => new Map(prev).set(pitch, buffer))
+      setHasUnsavedChanges(true)
 
       if (targetTrack) {
         audioEngine.setDrumPadSample(targetTrack.id, pitch, sampleData, buffer)
@@ -633,6 +688,7 @@ export const DrumDesignerModal: React.FC = () => {
 
   const handleSetPadMode = (pitch: number, mode: 'synth' | 'sample') => {
     setPadModes(prev => ({ ...prev, [pitch]: mode }))
+    setHasUnsavedChanges(true)
     if (targetTrack) {
       audioEngine.setDrumPadMode(targetTrack.id, pitch, mode)
     }
@@ -672,6 +728,7 @@ export const DrumDesignerModal: React.FC = () => {
       next.delete(pitch)
       return next
     })
+    setHasUnsavedChanges(true)
     if (targetTrack) {
       audioEngine.setDrumPadSample(targetTrack.id, pitch, null)
     }
@@ -687,6 +744,7 @@ export const DrumDesignerModal: React.FC = () => {
       }
       return { ...prev, [pitch]: updated }
     })
+    setHasUnsavedChanges(true)
   }, [targetTrack, padBuffers])
 
   const handleNormalizeSample = (pitch: number) => {
@@ -1149,6 +1207,35 @@ export const DrumDesignerModal: React.FC = () => {
           ctx.fillRect(endX, 0, width - endX, height)
         }
 
+        // Sustain loop span + release tail, blue so the trim handles stay readable
+        if ((currentSample?.loopMode ?? 'off') !== 'off') {
+          const loopStartOff = Math.max(startOff, Math.min(currentSample?.loopStartOffset ?? startOff, endOff))
+          const loopEndOff = Math.max(loopStartOff + 0.005, Math.min(currentSample?.loopEndOffset ?? endOff, endOff))
+          const loopStartX = loopStartOff * width
+          const loopEndX = loopEndOff * width
+
+          ctx.fillStyle = 'rgba(77, 171, 247, 0.10)'
+          ctx.fillRect(loopStartX, 0, loopEndX - loopStartX, height)
+          ctx.fillStyle = 'rgba(77, 171, 247, 0.7)'
+          ctx.fillRect(loopStartX, 0, loopEndX - loopStartX, 3)
+
+          if (resolveSamplerLoopMode(currentSample?.loopMode) === 'releaseTail' && loopEndX < endX) {
+            ctx.fillStyle = 'rgba(77, 171, 247, 0.05)'
+            ctx.fillRect(loopEndX, 0, endX - loopEndX, height)
+            ctx.fillStyle = 'rgba(77, 171, 247, 0.35)'
+            ctx.fillRect(loopEndX, height - 3, endX - loopEndX, 3)
+          }
+
+          ctx.strokeStyle = '#4dabf7'
+          ctx.lineWidth = 1.5
+          ctx.setLineDash([3, 3])
+          ctx.beginPath()
+          ctx.moveTo(loopStartX, 0); ctx.lineTo(loopStartX, height)
+          ctx.moveTo(loopEndX, 0); ctx.lineTo(loopEndX, height)
+          ctx.stroke()
+          ctx.setLineDash([])
+        }
+
         // Draggable Start Marker (Green line + handle)
         ctx.strokeStyle = '#00ff88'
         ctx.lineWidth = 2
@@ -1324,6 +1411,7 @@ export const DrumDesignerModal: React.FC = () => {
 
     setPadDecays(p.decays)
     setPadPitches(p.pitches)
+    setHasUnsavedChanges(true)
     updateTrack(targetTrack.id, {
       drumKit: p.kit,
       drumDecays: p.decays
@@ -1434,6 +1522,7 @@ export const DrumDesignerModal: React.FC = () => {
               drumPadSamples: cfg.padSamples || padSamples
             })
           }
+          setHasUnsavedChanges(true)
           useStore.getState().showToast(`Loaded Drum Kit: ${parsed.name || file.name}`, 'success')
         } catch {
           useStore.getState().showToast('Failed to parse .muzins Drum Kit file', 'error')
@@ -2856,6 +2945,107 @@ export const DrumDesignerModal: React.FC = () => {
                         ⇪ NORMALIZE
                       </button>
                     </div>
+                  </div>
+                </div>
+
+                {/* 1b. Sample Loop & Release Tail */}
+                <div
+                  style={{
+                    background: 'rgba(255, 255, 255, 0.02)',
+                    border: '1px solid rgba(255, 255, 255, 0.06)',
+                    borderRadius: '14px',
+                    padding: '14px 16px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '12px'
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: '11px', fontWeight: 800, color: '#aaa', letterSpacing: '0.06em' }}>
+                      SAMPLE LOOP & RELEASE TAIL
+                    </span>
+                    <span style={{ fontSize: '10px', color: '#666' }}>
+                      Holds a hit longer than its first pass
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px' }}>
+                    {([
+                      { id: 'off', label: 'ONE-SHOT', title: 'Play the trim once, no looping' },
+                      { id: 'sustain', label: 'SUSTAIN', title: 'Loop the blue span while the note is held' },
+                      { id: 'releaseTail', label: 'RELEASE TAIL', title: 'Loop while held, then play loop end to trim end' }
+                    ] as const).map(opt => {
+                      const isActive = (currentSample?.loopMode ?? 'off') === opt.id
+                      return (
+                        <button
+                          key={opt.id}
+                          onClick={() => {
+                            updateSampleParam(selectedPitch, { loopMode: opt.id })
+                            triggerPad(selectedPitch, 1)
+                          }}
+                          title={opt.title}
+                          style={{
+                            background: isActive ? 'rgba(77, 171, 247, 0.2)' : 'rgba(255, 255, 255, 0.04)',
+                            border: `1px solid ${isActive ? '#4dabf7' : 'rgba(255, 255, 255, 0.08)'}`,
+                            color: isActive ? '#ffffff' : '#bbb',
+                            borderRadius: '6px',
+                            padding: '6px 4px',
+                            fontSize: '9px',
+                            fontWeight: 800,
+                            cursor: 'pointer',
+                            transition: 'background 0.15s ease'
+                          }}
+                        >
+                          {opt.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', fontSize: '11px', marginBottom: '4px', whiteSpace: 'nowrap' }}>
+                        <span style={{ color: '#bbb' }}>Loop Start</span>
+                        <span style={{ fontWeight: 700, color: '#4dabf7', fontFamily: 'monospace' }}>
+                          {(((currentSample?.loopStartOffset ?? currentSample?.startOffset ?? 0) * 100)).toFixed(1)}%
+                        </span>
+                      </div>
+                      <AppSlider
+                        min={currentSample?.startOffset ?? 0}
+                        max={currentSample?.endOffset ?? 1}
+                        step={0.005}
+                        value={currentSample?.loopStartOffset ?? currentSample?.startOffset ?? 0}
+                        color="#4dabf7"
+                        onChange={(val) => updateSampleParam(selectedPitch, {
+                          loopStartOffset: +Math.min(val, (currentSample?.loopEndOffset ?? currentSample?.endOffset ?? 1) - 0.005).toFixed(3)
+                        })}
+                      />
+                    </div>
+
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', fontSize: '11px', marginBottom: '4px', whiteSpace: 'nowrap' }}>
+                        <span style={{ color: '#bbb' }}>Loop End</span>
+                        <span style={{ fontWeight: 700, color: '#4dabf7', fontFamily: 'monospace' }}>
+                          {(((currentSample?.loopEndOffset ?? currentSample?.endOffset ?? 1) * 100)).toFixed(1)}%
+                        </span>
+                      </div>
+                      <AppSlider
+                        min={currentSample?.startOffset ?? 0}
+                        max={currentSample?.endOffset ?? 1}
+                        step={0.005}
+                        value={currentSample?.loopEndOffset ?? currentSample?.endOffset ?? 1}
+                        color="#4dabf7"
+                        onChange={(val) => updateSampleParam(selectedPitch, {
+                          loopEndOffset: +Math.max(val, (currentSample?.loopStartOffset ?? currentSample?.startOffset ?? 0) + 0.005).toFixed(3)
+                        })}
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ fontSize: '9px', color: '#666', fontFamily: 'monospace' }}>
+                    trim {(((currentSample?.endOffset ?? 1) - (currentSample?.startOffset ?? 0)) * (currentBuffer?.duration || 0)).toFixed(3)}s
+                    {' · '}loop {(((currentSample?.loopEndOffset ?? currentSample?.endOffset ?? 1) - (currentSample?.loopStartOffset ?? currentSample?.startOffset ?? 0)) * (currentBuffer?.duration || 0)).toFixed(3)}s
+                    {' · '}tail {(Math.max(0, (currentSample?.endOffset ?? 1) - (currentSample?.loopEndOffset ?? currentSample?.endOffset ?? 1)) * (currentBuffer?.duration || 0)).toFixed(3)}s
                   </div>
                 </div>
 

@@ -11,7 +11,13 @@ import { buildNoteFxChain } from '../utils/noteFxChain'
 import { buildCurveLut, evaluateGlideCurve } from '../utils/glideCurves'
 import { createTrackChannel, setTrackChannelPan } from '../utils/toneChannel'
 import { attachDrumHitModulation, resolveDrumHitModulation, type DrumHitModulation, type DrumModulationRig } from '../utils/drumModulation'
-import { getSamplerPlaybackPlan, usesWebAudioSamplePlayback } from '../utils/audioPlayback'
+import {
+  drumSampleShouldLoop,
+  getSamplerPlayPlan,
+  resolveSamplerLoopMode,
+  resolveSamplerRegion,
+  usesWebAudioSamplePlayback,
+} from '../utils/audioPlayback'
 
 interface TrackRack {
   input: Tone.Gain
@@ -355,6 +361,12 @@ export interface DrumOutputOptions {
   fadeOut?: number
 }
 
+interface DrumChokeVoice {
+  source: AudioBufferSourceNode
+  gainNode: GainNode
+  tailSource?: AudioBufferSourceNode
+}
+
 /** One automatable parameter of the track's VST3 instrument (values normalized 0..1). */
 export interface Vst3ParameterInfo {
   index: number
@@ -429,7 +441,7 @@ class DrumMachine {
   padModes: Record<number, 'synth' | 'sample'> = {}
   padSamples: Record<number, DrumPadSample> = {}
   padAudioBuffers: Map<number, AudioBuffer> = new Map()
-  activeChokeVoices: Map<number, { source: AudioBufferSourceNode; gainNode: GainNode }[]> = new Map()
+  activeChokeVoices: Map<number, DrumChokeVoice[]> = new Map()
   reversedBufferCache: Map<number, { original: AudioBuffer; reversed: AudioBuffer }> = new Map()
 
   setPadBuffer(pitch: number, buffer: AudioBuffer) {
@@ -459,7 +471,7 @@ class DrumMachine {
     pitch: number,
     sampleConfig: DrumPadSample | undefined,
     buffer: AudioBuffer,
-    _duration: string,
+    duration: string,
     time?: number,
     velocity = 1,
     pitchOffset = 0,
@@ -479,6 +491,7 @@ class DrumMachine {
               v.gainNode.gain.setValueAtTime(v.gainNode.gain.value, now)
               v.gainNode.gain.linearRampToValueAtTime(0.0001, now + 0.005)
               v.source.stop(now + 0.006)
+              if (v.tailSource) v.tailSource.stop(now + 0.006)
             } catch (_) {}
           })
           this.activeChokeVoices.set(chokeGroup, [])
@@ -490,6 +503,14 @@ class DrumMachine {
       const totalSemitones = tuningSemitones + (fineTuneCents / 100)
       const playbackRate = Math.max(0.05, Math.min(16.0, Math.pow(2, totalSemitones / 12)))
 
+      const noteSec = Math.max(0.02, Tone.Time(duration).toSeconds())
+      const loopMode = sampleConfig?.loopMode ?? 'off'
+      const region = resolveSamplerRegion(sampleConfig ?? {})
+      const shouldLoop = drumSampleShouldLoop(noteSec, region, buffer.duration, playbackRate, loopMode)
+      const plan = getSamplerPlayPlan(noteSec, region, buffer.duration, playbackRate, false, resolveSamplerLoopMode(loopMode))
+      const tailMode = shouldLoop && plan.loopMode === 'releaseTail' && plan.tailDurationSeconds > 0.01
+      const noteEnd = now + noteSec
+
       const source = ctx.createBufferSource()
       if (sampleConfig?.reverse) {
         source.buffer = this.getReversedBuffer(pitch, buffer)
@@ -497,6 +518,11 @@ class DrumMachine {
         source.buffer = buffer
       }
       source.playbackRate.setValueAtTime(playbackRate, now)
+      if (shouldLoop) {
+        source.loop = true
+        source.loopStart = region.loopStart * buffer.duration
+        source.loopEnd = region.loopEnd * buffer.duration
+      }
 
       const gainNode = ctx.createGain()
       const sampleVol = sampleConfig?.volume !== undefined ? sampleConfig.volume : 1.0
@@ -508,7 +534,16 @@ class DrumMachine {
       const decayTime = sampleConfig?.decay ?? this.drumDecays?.[pitch] ?? bufDuration
       const effectiveDuration = Math.min(bufDuration, decayTime)
 
-      if (effectiveDuration < bufDuration) {
+      let loopFadeEnd = noteEnd
+      if (shouldLoop) {
+        // The pad's decay becomes the fade after the note lets go, matching the one-shot envelope.
+        const fade = Math.max(0.02, decayTime)
+        const holdEnd = tailMode ? noteEnd + plan.tailDurationSeconds : noteEnd
+        gainNode.gain.setValueAtTime(peakGain, noteEnd)
+        gainNode.gain.setValueAtTime(peakGain, holdEnd)
+        gainNode.gain.linearRampToValueAtTime(0.0001, holdEnd + fade)
+        loopFadeEnd = holdEnd + fade
+      } else if (effectiveDuration < bufDuration) {
         const rampStart = now + Math.max(0.005, effectiveDuration * 0.75)
         const rampEnd = now + effectiveDuration
         gainNode.gain.setValueAtTime(peakGain, rampStart)
@@ -556,36 +591,68 @@ class DrumMachine {
         nativeOut.connect(nativeDest)
       }
 
-      const startOffset = Math.max(0, Math.min(0.99, sampleConfig?.startOffset ?? 0))
-      const endOffset = Math.max(startOffset + 0.01, Math.min(1.0, sampleConfig?.endOffset ?? 1.0))
-      const startTimeInBuf = startOffset * buffer.duration
-      const playDuration = ((endOffset - startOffset) * buffer.duration) / playbackRate
+      const startTimeInBuf = region.playStart * buffer.duration
+      const playDuration = Math.max(0.005, (region.playEnd - region.playStart) * buffer.duration) / playbackRate
 
-      source.connect(gainNode)
-      source.start(now, startTimeInBuf, Math.min(playDuration, effectiveDuration + 0.05))
+      let loopGain: GainNode | undefined
+      let tailSource: AudioBufferSourceNode | undefined
+      let tailGain: GainNode | undefined
 
-      if (chokeGroup > 0) {
-        const groupList = this.activeChokeVoices.get(chokeGroup) || []
-        groupList.push({ source, gainNode })
-        this.activeChokeVoices.set(chokeGroup, groupList)
-        source.onended = () => {
-          const list = this.activeChokeVoices.get(chokeGroup) || []
-          this.activeChokeVoices.set(chokeGroup, list.filter(v => v.source !== source))
-          try {
-            source.disconnect()
-            gainNode.disconnect()
-            chainNodes.forEach(node => { try { node.disconnect() } catch (_) {} })
-          } catch (_) {}
+      if (shouldLoop) {
+        loopGain = ctx.createGain()
+        loopGain.gain.setValueAtTime(1, now)
+        source.connect(loopGain)
+        loopGain.connect(gainNode)
+        source.start(now, startTimeInBuf)
+        if (tailMode) {
+          // Release-tail resumes loop end -> trim end after the note instead of fading the loop.
+          tailSource = ctx.createBufferSource()
+          tailSource.buffer = source.buffer
+          tailSource.playbackRate.setValueAtTime(playbackRate, now)
+          tailGain = ctx.createGain()
+          tailGain.gain.setValueAtTime(0.0001, noteEnd)
+          tailGain.gain.linearRampToValueAtTime(1, noteEnd + 0.008)
+          tailSource.connect(tailGain)
+          tailGain.connect(gainNode)
+          tailSource.start(noteEnd, plan.tailStartSeconds)
+          tailSource.stop(loopFadeEnd + 0.02)
+          loopGain.gain.setValueAtTime(1, noteEnd)
+          loopGain.gain.linearRampToValueAtTime(0.0001, noteEnd + 0.008)
+          try { source.stop(noteEnd + 0.02) } catch (_) {}
+        } else {
+          source.stop(loopFadeEnd + 0.02)
         }
       } else {
-        source.onended = () => {
-          try {
-            source.disconnect()
-            gainNode.disconnect()
-            chainNodes.forEach(node => { try { node.disconnect() } catch (_) {} })
-          } catch (_) {}
-        }
+        source.connect(gainNode)
+        source.start(now, startTimeInBuf, Math.min(playDuration, effectiveDuration + 0.05))
       }
+
+      const voice: DrumChokeVoice = { source, gainNode, tailSource }
+      if (chokeGroup > 0) {
+        const groupList = this.activeChokeVoices.get(chokeGroup) || []
+        groupList.push(voice)
+        this.activeChokeVoices.set(chokeGroup, groupList)
+      }
+
+      let retired = false
+      const retire = () => {
+        if (retired) return
+        retired = true
+        if (chokeGroup > 0) {
+          const list = this.activeChokeVoices.get(chokeGroup) || []
+          this.activeChokeVoices.set(chokeGroup, list.filter(v => v !== voice))
+        }
+        try {
+          source.disconnect()
+          loopGain?.disconnect()
+          tailSource?.disconnect()
+          tailGain?.disconnect()
+          gainNode.disconnect()
+          chainNodes.forEach(node => { try { node.disconnect() } catch (_) {} })
+        } catch (_) {}
+      }
+      if (tailSource) tailSource.onended = retire
+      else source.onended = retire
     } catch (err) {
       console.warn(`DrumMachine sample trigger failed for pad ${pitch}:`, err)
     }
@@ -1205,6 +1272,9 @@ interface SamplerVoice {
   gain: GainNode
   output: AudioNode
   ended: boolean
+  loopGain?: GainNode
+  tailSource?: AudioBufferSourceNode
+  tailGain?: GainNode
 }
 
 export class ChromaticSampler {
@@ -1330,11 +1400,12 @@ export class ChromaticSampler {
 
     const buf = cfg.reverse ? this.getReversed() : this.buffer
     const duration = buf.duration
-    const startN = Math.max(0, Math.min(0.99, cfg.startOffset ?? 0))
-    const endN = Math.max(startN + 0.01, Math.min(1.0, cfg.endOffset ?? 1.0))
-    const regionStart = (cfg.reverse ? 1 - endN : startN) * duration
-    const regionEnd = (cfg.reverse ? 1 - startN : endN) * duration
-    const regionSec = Math.max(0.005, regionEnd - regionStart)
+    const region = resolveSamplerRegion(cfg)
+    const playStart = region.playStart * duration
+    const playEnd = region.playEnd * duration
+    const loopStart = region.loopStart * duration
+    const loopEnd = region.loopEnd * duration
+    const playDur = Math.max(0.005, playEnd - playStart) / rate
 
     if (this.voices.length >= ChromaticSampler.MAX_VOICES) {
       this.releaseVoice(this.voices[0], now, 0.02)
@@ -1363,12 +1434,13 @@ export class ChromaticSampler {
         }
       }
     }
-    const regionDur = regionSec / rate
-    const { shouldLoop, sourceDuration } = getSamplerPlaybackPlan(durSec, regionDur, !!cfg.loop)
+    const plan = getSamplerPlayPlan(durSec, region, duration, rate, !!cfg.loop, resolveSamplerLoopMode(cfg.loopMode))
+    const shouldLoop = plan.shouldLoop
+    const tailMode = shouldLoop && plan.loopMode === 'releaseTail' && plan.tailDurationSeconds > 0.01
     if (shouldLoop) {
       source.loop = true
-      source.loopStart = regionStart
-      source.loopEnd = regionEnd
+      source.loopStart = loopStart
+      source.loopEnd = loopEnd
     }
 
     const peak = Math.max(0.0001, Math.min(2.5, velocity * (cfg.volume !== undefined ? cfg.volume : 1))) * Math.max(0.0001, noteGain)
@@ -1384,10 +1456,19 @@ export class ChromaticSampler {
     gain.gain.exponentialRampToValueAtTime(susLevel, now + attack + decay)
 
     const noteEnd = now + Math.max(0.02, durSec)
-    const releaseAt = shouldLoop ? noteEnd : Math.min(noteEnd, now + regionDur)
-    const holdAt = Math.max(now + attack + decay, releaseAt)
-    gain.gain.setValueAtTime(susLevel, holdAt)
-    gain.gain.exponentialRampToValueAtTime(0.0001, releaseAt + release)
+    if (tailMode) {
+      // Release-tail notes hold the loop level through the resumed tail, then fade.
+      const holdAt = Math.max(now + attack + decay, noteEnd)
+      const tailEndAt = holdAt + plan.tailDurationSeconds
+      gain.gain.setValueAtTime(susLevel, holdAt)
+      gain.gain.setValueAtTime(susLevel, tailEndAt)
+      gain.gain.exponentialRampToValueAtTime(0.0001, tailEndAt + release)
+    } else {
+      const releaseAt = shouldLoop ? noteEnd : Math.min(noteEnd, now + playDur)
+      const holdAt = Math.max(now + attack + decay, releaseAt)
+      gain.gain.setValueAtTime(susLevel, holdAt)
+      gain.gain.exponentialRampToValueAtTime(0.0001, releaseAt + release)
+    }
 
     let output: AudioNode = gain
     const fadeIn = Math.max(0, opts?.fadeIn ?? 0)
@@ -1410,22 +1491,56 @@ export class ChromaticSampler {
       output = panner
     }
     output.connect(this.rackInput)
-    source.connect(gain)
 
     const voice: SamplerVoice = { key, source, gain, output, ended: false }
-    this.voices.push(voice)
-    source.onended = () => this.retireVoice(voice)
-
-    if (sourceDuration === undefined) {
-      source.start(now, regionStart)
+    if (shouldLoop) {
+      const loopGain = this.ctx.createGain()
+      loopGain.gain.setValueAtTime(1, now)
+      source.connect(loopGain)
+      loopGain.connect(gain)
+      voice.loopGain = loopGain
     } else {
-      source.start(now, regionStart, sourceDuration)
+      source.connect(gain)
     }
 
-    if (!cfg.loop) {
-      const tailEnd = releaseAt + release + 0.02
-      const alreadyScheduled = holdAt + 0.001 >= tailEnd
-      if (!alreadyScheduled && tailEnd > now) source.stop(tailEnd)
+    this.voices.push(voice)
+
+    if (shouldLoop) {
+      source.start(now, playStart)
+    } else {
+      source.start(now, playStart, playDur)
+    }
+
+    if (tailMode) {
+      // Grid notes end through the scheduled envelope rather than a noteOff call, so the tail is
+      // armed at note end and crossfaded in from the loop.
+      const tailSource = this.ctx.createBufferSource()
+      tailSource.buffer = buf
+      tailSource.playbackRate.setValueAtTime(rate, now)
+      const tailGain = this.ctx.createGain()
+      tailGain.gain.setValueAtTime(0.0001, noteEnd)
+      tailGain.gain.linearRampToValueAtTime(1, noteEnd + 0.008)
+      tailSource.connect(tailGain)
+      tailGain.connect(gain)
+      tailSource.start(noteEnd, plan.tailStartSeconds)
+      tailSource.stop(noteEnd + plan.tailDurationSeconds + release + 0.02)
+      voice.tailSource = tailSource
+      voice.tailGain = tailGain
+      if (voice.loopGain) {
+        voice.loopGain.gain.setValueAtTime(1, noteEnd)
+        voice.loopGain.gain.linearRampToValueAtTime(0.0001, noteEnd + 0.008)
+      }
+      try { source.stop(noteEnd + 0.02) } catch (_) {}
+      tailSource.onended = () => this.retireVoice(voice)
+    } else {
+      source.onended = () => this.retireVoice(voice)
+      if (!cfg.loop) {
+        const releaseAt = shouldLoop ? noteEnd : Math.min(noteEnd, now + playDur)
+        const holdAt = Math.max(now + attack + decay, releaseAt)
+        const tailEnd = releaseAt + release + 0.02
+        const alreadyScheduled = holdAt + 0.001 >= tailEnd
+        if (!alreadyScheduled && tailEnd > now) source.stop(tailEnd)
+      }
     }
   }
 
@@ -1451,6 +1566,7 @@ export class ChromaticSampler {
       g.setValueAtTime(Math.max(0.0001, g.value), when)
       g.exponentialRampToValueAtTime(0.0001, when + release)
       voice.source.stop(when + release + 0.02)
+      if (voice.tailSource) voice.tailSource.stop(when + release + 0.02)
     } catch (_) {}
   }
 
@@ -1459,6 +1575,9 @@ export class ChromaticSampler {
     voice.ended = true
     try {
       voice.source.disconnect()
+      if (voice.loopGain) voice.loopGain.disconnect()
+      if (voice.tailSource) voice.tailSource.disconnect()
+      if (voice.tailGain) voice.tailGain.disconnect()
       voice.gain.disconnect()
       if (voice.output !== voice.gain) voice.output.disconnect()
     } catch (_) {}
@@ -1471,7 +1590,11 @@ export class ChromaticSampler {
     for (const v of this.voices) {
       try {
         v.source.stop(now)
+        if (v.tailSource) v.tailSource.stop(now)
         v.source.disconnect()
+        if (v.loopGain) v.loopGain.disconnect()
+        if (v.tailSource) v.tailSource.disconnect()
+        if (v.tailGain) v.tailGain.disconnect()
         v.gain.disconnect()
         if (v.output !== v.gain) v.output.disconnect()
       } catch (_) {}
@@ -3651,6 +3774,9 @@ class AudioEngine {
       fineTune: cfg?.fineTune ?? 0,
       startOffset: cfg?.startOffset ?? 0,
       endOffset: cfg?.endOffset ?? 1,
+      loopStartOffset: cfg?.loopStartOffset ?? cfg?.startOffset ?? 0,
+      loopEndOffset: cfg?.loopEndOffset ?? cfg?.endOffset ?? 1,
+      loopMode: cfg?.loopMode === 'releaseTail' ? 1 : 0,
       attack: cfg?.attack ?? 0.005,
       decay: cfg?.decay ?? 0.25,
       sustain: cfg?.sustain ?? 0.6,

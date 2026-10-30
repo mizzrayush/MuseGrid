@@ -21,6 +21,9 @@ public:
         float fineTune   = 0.0f;   // cents
         float startOffset = 0.0f;  // normalized 0..1
         float endOffset   = 1.0f;  // normalized 0..1
+        float loopStartOffset = -1.0f; // normalized; < 0 means "same as startOffset"
+        float loopEndOffset   = -1.0f; // normalized; < 0 means "same as endOffset"
+        int   loopMode   = 0;          // 0 = sustain while held, 1 = release tail after the note
         bool  loop     = false;
         bool  reverse  = false;
         float attack   = 0.005f;
@@ -59,12 +62,20 @@ private:
         double rate = 1.0;
         double startIdx = 0.0;
         double endIdx = 0.0;
+        // Sustain span in original-buffer sample coordinates (mapped for reverse at render time).
+        double loopStartIdx = 0.0;
+        double loopEndIdx = 0.0;
         int bufCh0 = 0;
         int bufCh1 = 1;
         bool usingReverse = false;
         // True when this voice should wrap inside its trimmed region instead of releasing at
         // the region end: either the patch loops, or the note is longer than the region.
         bool loopWhileHeld = false;
+        // Release-tail voices resume loop end -> trim end once the note lets go.
+        bool releaseTail = false;
+        bool tailJumpPending = false;
+        float tailSeconds = 0.0f;
+        float releaseSeconds = 0.35f;
         float velocity = 1.0f;
         int fxChainId = 0;
         float remainingSeconds = -1.0f;

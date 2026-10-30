@@ -1017,6 +1017,12 @@ void JuceBridge::handleAudioCommand(const juce::Array<juce::var>& args, juce::We
         cfg.fineTune    = getF("fineTune", 0.0f);
         cfg.startOffset = getF("startOffset", 0.0f);
         cfg.endOffset   = getF("endOffset", 1.0f);
+        cfg.loopStartOffset = getF("loopStartOffset", -1.0f);
+        cfg.loopEndOffset   = getF("loopEndOffset", -1.0f);
+        const juce::var loopModeVar = obj->getProperty("loopMode");
+        cfg.loopMode = loopModeVar.isString()
+            ? (loopModeVar.toString() == "releaseTail" ? 1 : 0)
+            : (int)getF("loopMode", 0.0f);
         cfg.loop        = (bool)obj->getProperty("loop") || obj->getProperty("loop").toString().toLowerCase() == "true";
         cfg.reverse     = (bool)obj->getProperty("reverse") || obj->getProperty("reverse").toString().toLowerCase() == "true";
         cfg.attack      = getF("attack", 0.005f);

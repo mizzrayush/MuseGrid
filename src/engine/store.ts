@@ -782,6 +782,9 @@ export interface DrumPadSample {
   decay?: number             // Envelope decay cutoff / trim in seconds (0.01 to 10)
   startOffset?: number       // Normalized start offset (0 to 1)
   endOffset?: number         // Normalized end offset (0 to 1)
+  loopStartOffset?: number   // Normalized loop start; defaults to startOffset
+  loopEndOffset?: number     // Normalized loop end; defaults to endOffset
+  loopMode?: 'off' | 'sustain' | 'releaseTail' // off = one-shot, releaseTail resumes the tail after the note
   volume?: number            // Linear gain (0 to 2)
   pan?: number               // Panning (-1 to 1)
   chokeGroup?: number        // 0 = none, 1, 2, 3, 4
@@ -796,6 +799,9 @@ export interface SynthSamplerConfig {
   fineTune: number           // Cents detune (-100 to +100)
   startOffset: number        // Normalized start offset (0 to 0.99)
   endOffset: number          // Normalized end offset (0.01 to 1.0)
+  loopStartOffset?: number   // Normalized loop start; defaults to startOffset
+  loopEndOffset?: number     // Normalized loop end; defaults to endOffset
+  loopMode?: 'sustain' | 'releaseTail' // releaseTail plays loop end -> trim end after the note
   loop: boolean              // Loop playback while note held
   reverse: boolean           // Reverse sample playback
   attack?: number            // ADSR attack in seconds (0.001 to 2.0)

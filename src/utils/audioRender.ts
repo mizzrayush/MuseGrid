@@ -10,6 +10,7 @@ import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET, type SynthPreset, type DrumKit 
 import { CustomScriptProcessorNode, DPreverbNode, audioEngine, VocalModelVoice, PhysicalModelVoice, type DrumOutputOptions } from '../engine/AudioEngine'
 import { getActiveDPreverbInstances, getTrackFxInstances, getTrackFxSetting as readTrackFxSetting, type BuiltInFxType } from '../engine/fxDefaults'
 import { createTrackChannel } from './toneChannel'
+import { drumSampleShouldLoop, getSamplerPlayPlan, resolveSamplerLoopMode, resolveSamplerRegion } from './audioPlayback'
 
 const PPQ = 192
 
@@ -235,9 +236,22 @@ function triggerDrum(
     const totalSemitones = tuningSemitones + (fineTuneCents / 100)
     const rate = Math.max(0.05, Math.min(16.0, Math.pow(2, totalSemitones / 12)))
 
+    const noteSec = Math.max(0.02, duration)
+    const loopMode = padSample.loopMode ?? 'off'
+    const region = resolveSamplerRegion(padSample)
+    const shouldLoop = drumSampleShouldLoop(noteSec, region, bufToPlay.duration, rate, loopMode)
+    const plan = getSamplerPlayPlan(noteSec, region, bufToPlay.duration, rate, false, resolveSamplerLoopMode(loopMode))
+    const tailMode = shouldLoop && plan.loopMode === 'releaseTail' && plan.tailDurationSeconds > 0.01
+    const noteEnd = now + noteSec
+
     const source = rawCtx.createBufferSource()
     source.buffer = bufToPlay
     source.playbackRate.setValueAtTime(rate, now)
+    if (shouldLoop) {
+      source.loop = true
+      source.loopStart = region.loopStart * bufToPlay.duration
+      source.loopEnd = region.loopEnd * bufToPlay.duration
+    }
 
     const gainNode = rawCtx.createGain()
     const sampleVol = padSample.volume !== undefined ? padSample.volume : 1.0
@@ -247,7 +261,16 @@ function triggerDrum(
     const bufDuration = bufToPlay.duration / rate
     const decayTime = padSample.decay ?? (padCustom?.decay ?? track.drumDecays?.[pitch] ?? bufDuration)
     const effectiveDuration = Math.min(bufDuration, decayTime)
-    if (effectiveDuration < bufDuration) {
+
+    let loopFadeEnd = noteEnd
+    if (shouldLoop) {
+      const fade = Math.max(0.02, decayTime)
+      const holdEnd = tailMode ? noteEnd + plan.tailDurationSeconds : noteEnd
+      gainNode.gain.setValueAtTime(peakGain, noteEnd)
+      gainNode.gain.setValueAtTime(peakGain, holdEnd)
+      gainNode.gain.linearRampToValueAtTime(0.0001, holdEnd + fade)
+      loopFadeEnd = holdEnd + fade
+    } else if (effectiveDuration < bufDuration) {
       gainNode.gain.setValueAtTime(peakGain, now + Math.max(0.005, effectiveDuration * 0.75))
       gainNode.gain.exponentialRampToValueAtTime(0.0001, now + effectiveDuration)
     }
@@ -263,14 +286,36 @@ function triggerDrum(
 
     const targetDest: AudioNode = (dest as any).input ? (dest as any).input : (dest as any)
     outNode.connect(targetDest)
-    source.connect(gainNode)
 
-    const startOffset = Math.max(0, Math.min(0.99, padSample.startOffset ?? 0))
-    const endOffset = Math.max(startOffset + 0.01, Math.min(1.0, padSample.endOffset ?? 1.0))
-    const startTimeInBuf = startOffset * bufToPlay.duration
-    const playDuration = ((endOffset - startOffset) * bufToPlay.duration) / rate
+    const startTimeInBuf = region.playStart * bufToPlay.duration
+    const playDuration = (region.playEnd - region.playStart) * bufToPlay.duration / rate
 
-    source.start(now, startTimeInBuf, Math.min(playDuration, effectiveDuration + 0.05))
+    if (shouldLoop) {
+      const loopGain = rawCtx.createGain()
+      loopGain.gain.setValueAtTime(1, now)
+      source.connect(loopGain)
+      loopGain.connect(gainNode)
+      source.start(now, startTimeInBuf)
+      if (tailMode) {
+        const tailSource = rawCtx.createBufferSource()
+        tailSource.buffer = bufToPlay
+        tailSource.playbackRate.setValueAtTime(rate, now)
+        const tailGain = rawCtx.createGain()
+        tailGain.gain.setValueAtTime(0.0001, noteEnd)
+        tailGain.gain.linearRampToValueAtTime(1, noteEnd + 0.008)
+        tailSource.connect(tailGain)
+        tailGain.connect(gainNode)
+        tailSource.start(noteEnd, plan.tailStartSeconds)
+        loopGain.gain.setValueAtTime(1, noteEnd)
+        loopGain.gain.linearRampToValueAtTime(0.0001, noteEnd + 0.008)
+        source.stop(noteEnd + 0.02)
+      } else {
+        source.stop(loopFadeEnd + 0.02)
+      }
+    } else {
+      source.connect(gainNode)
+      source.start(now, startTimeInBuf, Math.min(playDuration, effectiveDuration + 0.05))
+    }
     return
   }
 
@@ -938,19 +983,21 @@ function renderTrackNotesWithTransform(
 
             const bufToPlay = cfg.reverse ? getReversedAudioBuffer(rawCtx, sampleBuf) : sampleBuf
             const durationBuf = bufToPlay.duration
-            const startN = Math.max(0, Math.min(0.99, cfg.startOffset ?? 0))
-            const endN = Math.max(startN + 0.01, Math.min(1.0, cfg.endOffset ?? 1.0))
-            const regionStart = (cfg.reverse ? 1 - endN : startN) * durationBuf
-            const regionEnd = (cfg.reverse ? 1 - startN : endN) * durationBuf
-            const regionSec = Math.max(0.005, regionEnd - regionStart)
+            const region = resolveSamplerRegion(cfg)
+            const playStart = region.playStart * durationBuf
+            const loopStart = region.loopStart * durationBuf
+            const loopEnd = region.loopEnd * durationBuf
+            const regionSec = Math.max(0.005, (region.playEnd - region.playStart) * durationBuf)
 
             const source = rawCtx.createBufferSource()
             source.buffer = bufToPlay
             source.playbackRate.setValueAtTime(rate, now)
+            let tailRate = rate
 
             if (glideSemis && glideSeconds > 0) {
               const targetSemis = (playback.pitch + glideSemis - (cfg.rootNote || 60)) + (cfg.tuning || 0) + totalTranspose + (cfg.fineTune || 0) / 100 + (noteDetune / 100)
               const targetRate = Math.max(0.05, Math.min(16.0, Math.pow(2, targetSemis / 12)))
+              tailRate = targetRate
               if (Math.abs(targetRate - rate) > 1e-6) {
                 if (glideCurveLut && glideCurveLut.length >= 2) {
                   const steps = Math.max(8, Math.min(120, Math.round(glideSeconds * 60)))
@@ -975,11 +1022,16 @@ function renderTrackNotesWithTransform(
             const sus = Math.max(0, Math.min(1, cfg.sustain ?? 0.8))
             const rel = Math.max(0.01, cfg.release ?? 0.2)
 
+            const plan = getSamplerPlayPlan(duration, region, durationBuf, rate, !!cfg.loop, resolveSamplerLoopMode(cfg.loopMode))
+            const tailMode = plan.shouldLoop && plan.loopMode === 'releaseTail' && plan.tailDurationSeconds > 0.01
+
             gainNode.gain.setValueAtTime(0, now)
             gainNode.gain.linearRampToValueAtTime(targetGain, now + atk)
             gainNode.gain.linearRampToValueAtTime(targetGain * sus, now + atk + dec)
+            const tailEndAt = now + duration + (tailMode ? plan.tailDurationSeconds : 0)
             gainNode.gain.setValueAtTime(targetGain * sus, now + duration)
-            gainNode.gain.linearRampToValueAtTime(0.0001, now + duration + rel)
+            if (tailMode) gainNode.gain.setValueAtTime(targetGain * sus, tailEndAt)
+            gainNode.gain.linearRampToValueAtTime(0.0001, tailEndAt + rel)
 
             let outNode: AudioNode = gainNode
             const finalPan = Math.max(-1, Math.min(1, (cfg.pan ?? 0) + notePan))
@@ -991,16 +1043,41 @@ function renderTrackNotesWithTransform(
             }
 
             outNode.connect(trackInput.input as GainNode)
-            source.connect(gainNode)
 
-            const loop = !!cfg.loop
-            source.loop = loop
-            if (loop) {
-              source.loopStart = regionStart
-              source.loopEnd = regionEnd
-              source.start(now, regionStart, duration + rel)
+            if (tailMode) {
+              const loopGain = rawCtx.createGain()
+              loopGain.gain.setValueAtTime(1, now)
+              loopGain.gain.setValueAtTime(1, now + duration)
+              loopGain.gain.linearRampToValueAtTime(0.0001, now + duration + 0.008)
+              source.connect(loopGain)
+              loopGain.connect(gainNode)
+
+              const tailSource = rawCtx.createBufferSource()
+              tailSource.buffer = bufToPlay
+              tailSource.playbackRate.setValueAtTime(tailRate, now)
+              const tailGain = rawCtx.createGain()
+              tailGain.gain.setValueAtTime(0.0001, now + duration)
+              tailGain.gain.linearRampToValueAtTime(1, now + duration + 0.008)
+              tailSource.connect(tailGain)
+              tailGain.connect(gainNode)
+              tailSource.start(now + duration, plan.tailStartSeconds)
+              tailSource.stop(now + duration + plan.tailDurationSeconds + rel + 0.02)
+
+              source.loop = true
+              source.loopStart = loopStart
+              source.loopEnd = loopEnd
+              source.start(now, playStart)
+              source.stop(now + duration + 0.02)
             } else {
-              source.start(now, regionStart, Math.min(regionSec / rate, duration + rel))
+              source.connect(gainNode)
+              source.loop = plan.shouldLoop
+              if (plan.shouldLoop) {
+                source.loopStart = loopStart
+                source.loopEnd = loopEnd
+                source.start(now, playStart, duration + rel)
+              } else {
+                source.start(now, playStart, Math.min(regionSec / rate, duration + rel))
+              }
             }
           } catch (e) {
             console.error("Offline synth sampler render error:", e)

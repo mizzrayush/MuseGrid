@@ -7,6 +7,7 @@ import { saveFileWithDialog } from '../utils/fileExport'
 import { IconX, IconShuffle, IconZap, IconPlay, IconDownload, IconSync, IconUpload, IconWaveform, IconLoop, IconMic, IconSave } from './Icons'
 import { CHROMATIC_SAMPLE_PRESETS, bufferToDataUri, type ChromaticSamplePreset } from '../utils/chromaticSamplePresets'
 import { QuickMicRecorder } from '../utils/micRecorder'
+import { resolveSamplerLoopMode, resolveSamplerRegion } from '../utils/audioPlayback'
 import type { SynthSamplerConfig } from '../engine/store'
 import { evaluateMathExpression, MATH_FORMULA_PRESETS } from '../utils/mathWaveform'
 import {
@@ -73,6 +74,9 @@ const DEFAULT_SAMPLER: SynthSamplerConfig = {
   fineTune: 0,
   startOffset: 0,
   endOffset: 1,
+  loopStartOffset: 0,
+  loopEndOffset: 1,
+  loopMode: 'sustain',
   loop: false,
   reverse: false,
   attack: 0.005,
@@ -85,6 +89,20 @@ const DEFAULT_SAMPLER: SynthSamplerConfig = {
 
 const midiToNoteName = (midi: number) => {
   try { return Tone.Frequency(midi, 'midi').toNote() } catch (_) { return `MIDI ${midi}` }
+}
+
+type SamplerAuditionVoice = {
+  source: AudioBufferSourceNode
+  gain: GainNode
+  loopGain?: GainNode
+  startTime: number
+  firstPassSeconds: number
+  tail?: {
+    buffer: AudioBuffer
+    rate: number
+    tailStartSeconds: number
+    tailDurationSeconds: number
+  }
 }
 
 const SamplerCard: React.FC<{ title: string; accent?: string; hint?: string; children: React.ReactNode }> = ({ title, accent = '#00e6ff', hint, children }) => (
@@ -212,13 +230,20 @@ export const SynthStudioModal: React.FC = () => {
   const samplerFileInputRef = useRef<HTMLInputElement | null>(null)
   const samplerCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const samplerDragEdge = useRef<'start' | 'end' | null>(null)
-  const samplerAuditionRef = useRef<{ source: AudioBufferSourceNode; gain: GainNode } | null>(null)
+  const samplerAuditionRef = useRef<SamplerAuditionVoice | null>(null)
 
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState<boolean>(false)
   const lastLoadedTrackIdRef = useRef<string | null>(null)
 
   const commitSampler = useCallback((updates: Partial<SynthSamplerConfig>) => {
-    setSampler(prev => ({ ...prev, ...updates }))
+    setSampler(prev => {
+      const next = { ...prev, ...updates }
+      const start = Math.max(0, Math.min(0.99, next.startOffset))
+      const end = Math.max(start + 0.01, Math.min(1, next.endOffset))
+      const loopStart = Math.min(Math.max(next.loopStartOffset ?? start, start), end - 0.005)
+      const loopEnd = Math.max(Math.min(next.loopEndOffset ?? end, end), loopStart + 0.005)
+      return { ...next, startOffset: start, endOffset: end, loopStartOffset: loopStart, loopEndOffset: loopEnd }
+    })
     setSamplerMode(true)
     setHasUnsavedChanges(true)
   }, [])
@@ -346,9 +371,15 @@ export const SynthStudioModal: React.FC = () => {
 
     const startPx = sampler.startOffset * w
     const endPx = Math.max(startPx + 2, sampler.endOffset * w)
+    const loopStartPx = (sampler.loopStartOffset ?? sampler.startOffset) * w
+    const loopEndPx = Math.max(loopStartPx + 2, (sampler.loopEndOffset ?? sampler.endOffset) * w)
 
     ctx.fillStyle = 'rgba(0, 230, 255, 0.07)'
     ctx.fillRect(startPx, 0, endPx - startPx, h)
+    ctx.fillStyle = 'rgba(105, 219, 124, 0.10)'
+    ctx.fillRect(loopStartPx, 0, loopEndPx - loopStartPx, h)
+    ctx.fillStyle = 'rgba(105, 219, 124, 0.7)'
+    ctx.fillRect(loopStartPx, 0, loopEndPx - loopStartPx, 3)
 
     if (samplerBuffer) {
       const data = samplerBuffer.getChannelData(0)
@@ -392,7 +423,23 @@ export const SynthStudioModal: React.FC = () => {
     ctx.fillStyle = '#00e6ff'
     ctx.fillRect(startPx - 1.5, 0, 3, h)
     ctx.fillRect(endPx - 1.5, 0, 3, h)
-  }, [samplerBuffer, sampler.startOffset, sampler.endOffset, sampler.reverse])
+
+    // Sustain loop span (independent from the trim)
+    ctx.strokeStyle = '#69db7c'
+    ctx.setLineDash([2, 4])
+    ctx.beginPath()
+    ctx.moveTo(loopStartPx, 0); ctx.lineTo(loopStartPx, h)
+    ctx.moveTo(loopEndPx, 0); ctx.lineTo(loopEndPx, h)
+    ctx.stroke()
+    ctx.setLineDash([])
+
+    if (resolveSamplerLoopMode(sampler.loopMode) === 'releaseTail' && loopEndPx < endPx) {
+      ctx.fillStyle = 'rgba(105, 219, 124, 0.06)'
+      ctx.fillRect(loopEndPx, 0, endPx - loopEndPx, h)
+      ctx.fillStyle = 'rgba(105, 219, 124, 0.35)'
+      ctx.fillRect(loopEndPx, h - 3, endPx - loopEndPx, 3)
+    }
+  }, [samplerBuffer, sampler.startOffset, sampler.endOffset, sampler.loopStartOffset, sampler.loopEndOffset, sampler.loopMode, sampler.reverse])
 
   useEffect(() => {
     if (isVisible && samplerMode) drawSamplerWaveform()
@@ -874,10 +921,44 @@ export const SynthStudioModal: React.FC = () => {
   }
 
   // Live Audition Key
-  const releaseSamplerVoice = (voice: { source: AudioBufferSourceNode; gain: GainNode }, releaseSeconds = 0.12) => {
+  const releaseSamplerVoice = (voice: SamplerAuditionVoice, releaseSeconds = 0.12, allowTail = true) => {
     const audioCtx = Tone.getContext().rawContext as AudioContext
     const now = audioCtx.currentTime
     try {
+      if (allowTail && voice.tail && now - voice.startTime >= voice.firstPassSeconds) {
+        // Release-tail: fade the loop out, resume loop end -> trim end, then fade the tail.
+        const { buffer, rate, tailStartSeconds, tailDurationSeconds } = voice.tail
+        const fade = Math.max(0.01, sampler.release ?? 0.35)
+        const tailSource = audioCtx.createBufferSource()
+        tailSource.buffer = buffer
+        tailSource.playbackRate.value = rate
+        const tailGain = audioCtx.createGain()
+        tailGain.gain.setValueAtTime(0.0001, now)
+        tailGain.gain.linearRampToValueAtTime(1, now + 0.008)
+        tailSource.connect(tailGain)
+        tailGain.connect(voice.gain)
+        tailSource.start(now, tailStartSeconds)
+        tailSource.stop(now + tailDurationSeconds + fade + 0.02)
+        if (voice.loopGain) {
+          voice.loopGain.gain.cancelScheduledValues(now)
+          voice.loopGain.gain.setValueAtTime(1, now)
+          voice.loopGain.gain.linearRampToValueAtTime(0.0001, now + 0.008)
+        }
+        voice.source.stop(now + 0.02)
+        const level = Math.max(0.0001, voice.gain.gain.value)
+        voice.gain.gain.cancelScheduledValues(now)
+        voice.gain.gain.setValueAtTime(level, now)
+        voice.gain.gain.setValueAtTime(level, now + tailDurationSeconds)
+        voice.gain.gain.exponentialRampToValueAtTime(0.0001, now + tailDurationSeconds + fade)
+        tailSource.onended = () => {
+          try {
+            tailSource.disconnect()
+            tailGain.disconnect()
+            voice.gain.disconnect()
+          } catch (_) {}
+        }
+        return
+      }
       voice.gain.gain.cancelScheduledValues(now)
       voice.gain.gain.setValueAtTime(Math.max(0.0001, voice.gain.gain.value), now)
       voice.gain.gain.exponentialRampToValueAtTime(0.0001, now + releaseSeconds)
@@ -885,15 +966,15 @@ export const SynthStudioModal: React.FC = () => {
     } catch (_) {}
   }
 
-  const stopSamplerAudition = (releaseSeconds = 0.12) => {
+  const stopSamplerAudition = (releaseSeconds = 0.12, allowTail = true) => {
     const voice = samplerAuditionRef.current
     samplerAuditionRef.current = null
-    if (voice) releaseSamplerVoice(voice, releaseSeconds)
+    if (voice) releaseSamplerVoice(voice, releaseSeconds, allowTail)
   }
 
   // Region + loop aware preview: the audition should sound like the sampler will in the grid,
   // where a held note wraps the trimmed region instead of always playing a fixed 0.8s blip.
-  const createSamplerVoice = (shiftedMidi: number, velocity: number): { source: AudioBufferSourceNode; gain: GainNode } | null => {
+  const createSamplerVoice = (shiftedMidi: number, velocity: number): SamplerAuditionVoice | null => {
     if (!samplerBuffer) return null
     try {
       const audioCtx = Tone.getContext().rawContext as AudioContext
@@ -913,21 +994,41 @@ export const SynthStudioModal: React.FC = () => {
       gainNode.gain.linearRampToValueAtTime(velocity, now + attack)
       gainNode.gain.exponentialRampToValueAtTime(sustain, now + attack + decay)
 
-      const startSec = Math.max(0, Math.min(bufferToPlay.duration - 0.001, sampler.startOffset * bufferToPlay.duration))
-      const endSec = Math.max(startSec + 0.001, Math.min(bufferToPlay.duration, sampler.endOffset * bufferToPlay.duration))
+      const region = resolveSamplerRegion(sampler)
+      const playStartSec = region.playStart * bufferToPlay.duration
+      const loopStartSec = region.loopStart * bufferToPlay.duration
+      const loopEndSec = region.loopEnd * bufferToPlay.duration
+      const loopMode = resolveSamplerLoopMode(sampler.loopMode)
+      const firstPassSeconds = Math.max(0, loopEndSec - playStartSec) / rate
+      const tailDurationSeconds = Math.max(0, region.playEnd - region.loopEnd) * bufferToPlay.duration / rate
 
-      source.connect(gainNode)
+      let loopGain: GainNode | undefined
+      if (loopMode === 'releaseTail') {
+        loopGain = audioCtx.createGain()
+        loopGain.gain.setValueAtTime(1, now)
+        source.connect(loopGain)
+        loopGain.connect(gainNode)
+      } else {
+        source.connect(gainNode)
+      }
       gainNode.connect(audioCtx.destination)
 
-      if (sampler.loop) {
-        source.loop = true
-        source.loopStart = startSec
-        source.loopEnd = endSec
-        source.start(now, startSec)
-      } else {
-        source.start(now, startSec, (endSec - startSec) / (rate || 1))
+      // A held key is a long note: play the trim into the loop span, then keep wrapping it
+      // until release. Short taps never reach the loop end, so they still sound one-shot.
+      source.loop = true
+      source.loopStart = loopStartSec
+      source.loopEnd = loopEndSec
+      source.start(now, playStartSec)
+      return {
+        source,
+        gain: gainNode,
+        loopGain,
+        startTime: now,
+        firstPassSeconds,
+        tail: loopMode === 'releaseTail' && tailDurationSeconds > 0.01
+          ? { buffer: bufferToPlay, rate, tailStartSeconds: loopEndSec, tailDurationSeconds }
+          : undefined
       }
-      return { source, gain: gainNode }
     } catch (err) {
       console.warn('Sampler audition error:', err)
       return null
@@ -935,7 +1036,7 @@ export const SynthStudioModal: React.FC = () => {
   }
 
   const startSamplerAudition = (shiftedMidi: number, velocity = 0.9) => {
-    stopSamplerAudition(0.03)
+    stopSamplerAudition(0.03, false)
     const voice = createSamplerVoice(shiftedMidi, velocity)
     if (voice) samplerAuditionRef.current = voice
   }
@@ -2062,6 +2163,27 @@ export const SynthStudioModal: React.FC = () => {
                     <SamplerPill label="Loop while held" active={!!sampler.loop} onClick={() => commitSampler({ loop: !sampler.loop })} />
                     <SamplerPill label="Reverse" active={!!sampler.reverse} accent="#ff3366" onClick={() => commitSampler({ reverse: !sampler.reverse })} />
                   </div>
+
+                  <div>
+                    <label style={{ fontSize: '10px', fontWeight: 700, color: '#888', textTransform: 'uppercase', marginBottom: '6px', display: 'block' }}>
+                      Loop Mode
+                    </label>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+                      <SamplerPill
+                        label="Sustain"
+                        active={resolveSamplerLoopMode(sampler.loopMode) === 'sustain'}
+                        title="The green span repeats until the note lets go"
+                        onClick={() => commitSampler({ loopMode: 'sustain' })}
+                      />
+                      <SamplerPill
+                        label="Release tail"
+                        active={resolveSamplerLoopMode(sampler.loopMode) === 'releaseTail'}
+                        accent="#69db7c"
+                        title="On note off, resume from loop end to the trim end"
+                        onClick={() => commitSampler({ loopMode: 'releaseTail' })}
+                      />
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -2079,7 +2201,7 @@ export const SynthStudioModal: React.FC = () => {
                   <SamplerSlider label="FINE TUNE" value={sampler.fineTune} min={-100} max={100} step={1} display={`${sampler.fineTune > 0 ? '+' : ''}${sampler.fineTune} ct`} onChange={v => commitSampler({ fineTune: v })} />
                 </SamplerCard>
 
-                <SamplerCard title="PLAYBACK" accent="#4dabf7" hint="region trim">
+                <SamplerCard title="PLAYBACK" accent="#4dabf7" hint="trim + loop">
                   <SamplerSlider
                     label="START OFFSET"
                     value={sampler.startOffset}
@@ -2100,8 +2222,32 @@ export const SynthStudioModal: React.FC = () => {
                     accent="#4dabf7"
                     onChange={v => commitSampler({ endOffset: Math.max(v, sampler.startOffset + 0.01) })}
                   />
+                  <SamplerSlider
+                    label="LOOP START"
+                    value={sampler.loopStartOffset ?? sampler.startOffset}
+                    min={sampler.startOffset}
+                    max={sampler.endOffset}
+                    step={0.005}
+                    display={`${((sampler.loopStartOffset ?? sampler.startOffset) * 100).toFixed(1)}%`}
+                    accent="#69db7c"
+                    onChange={v => commitSampler({ loopStartOffset: v })}
+                  />
+                  <SamplerSlider
+                    label="LOOP END"
+                    value={sampler.loopEndOffset ?? sampler.endOffset}
+                    min={sampler.startOffset}
+                    max={sampler.endOffset}
+                    step={0.005}
+                    display={`${((sampler.loopEndOffset ?? sampler.endOffset) * 100).toFixed(1)}%`}
+                    accent="#69db7c"
+                    onChange={v => commitSampler({ loopEndOffset: v })}
+                  />
                   <div style={{ fontSize: '9px', color: '#666', fontFamily: 'monospace' }}>
-                    region {((sampler.endOffset - sampler.startOffset) * (samplerBuffer?.duration || 0)).toFixed(3)}s · {sampler.loop ? 'LOOP' : 'ONE-SHOT'}
+                    trim {((sampler.endOffset - sampler.startOffset) * (samplerBuffer?.duration || 0)).toFixed(3)}s
+                    {' · '}loop {(((sampler.loopEndOffset ?? sampler.endOffset) - (sampler.loopStartOffset ?? sampler.startOffset)) * (samplerBuffer?.duration || 0)).toFixed(3)}s
+                    {resolveSamplerLoopMode(sampler.loopMode) === 'releaseTail' && (
+                      <>{' · '}tail {(Math.max(0, sampler.endOffset - (sampler.loopEndOffset ?? sampler.endOffset)) * (samplerBuffer?.duration || 0)).toFixed(3)}s</>
+                    )}
                   </div>
                 </SamplerCard>
 
@@ -2117,7 +2263,11 @@ export const SynthStudioModal: React.FC = () => {
                   <SamplerSlider label="PAN" value={sampler.pan ?? 0} min={-1} max={1} step={0.01} display={(sampler.pan ?? 0).toFixed(2)} accent="#69db7c" onChange={v => commitSampler({ pan: v })} />
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '9px', color: '#666' }}>
                     <IconLoop size={11} color="#69db7c" />
-                    {sampler.loop ? 'Sustains until note off' : 'Plays trimmed region once, then releases'}
+                    {sampler.loop
+                      ? (resolveSamplerLoopMode(sampler.loopMode) === 'releaseTail'
+                        ? 'Loops until note off, then plays loop end → trim end'
+                        : 'Loops the green span until note off')
+                      : 'Plays trim once; long notes repeat the green loop span'}
                   </div>
                 </SamplerCard>
               </div>
@@ -2142,7 +2292,7 @@ export const SynthStudioModal: React.FC = () => {
               </span>
               <span style={{ fontSize: '10px', color: '#666' }}>
                 {samplerMode && samplerBuffer
-                  ? 'Hold keys to preview the trimmed region (LOOP extends long notes)'
+                  ? 'Hold keys to preview: trim plays once, then the green loop span repeats (LOOP holds it)'
                   : 'Click keys to test your synth patch in real time'}
               </span>
             </div>

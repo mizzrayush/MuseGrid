@@ -208,6 +208,17 @@ void SampleEngine::noteOn(int noteId, float pitchMidi, float velocity, float dur
     double s = juce::jlimit(0.0, 0.98, (double)config.startOffset) * dur;
     double e = juce::jlimit(0.01, 1.0, (double)config.endOffset) * dur;
     if (e <= s + 1.0) e = dur;
+    // Sustain loop inside the trim; unset offsets fall back to the trim so old patches keep
+    // repeating the whole region.
+    const double loopStartN = config.loopStartOffset >= 0.0f ? (double)config.loopStartOffset : (double)config.startOffset;
+    const double loopEndN   = config.loopEndOffset   >= 0.0f ? (double)config.loopEndOffset   : (double)config.endOffset;
+    double ls = juce::jlimit(s, e, juce::jlimit(0.0, 1.0, loopStartN) * dur);
+    double le = juce::jlimit(ls, e, juce::jlimit(0.0, 1.0, loopEndN) * dur);
+    if (le - ls < 1.0)
+    {
+        ls = s;
+        le = e;
+    }
 
     v->active = true;
     v->noteId = noteId;
@@ -228,6 +239,8 @@ void SampleEngine::noteOn(int noteId, float pitchMidi, float velocity, float dur
     v->pan = juce::jlimit(-1.0f, 1.0f, expression.pan);
     v->startIdx = s;
     v->endIdx = e;
+    v->loopStartIdx = ls;
+    v->loopEndIdx = le;
     v->velocity = juce::jlimit(0.0f, 2.0f, velocity);
     v->remainingSeconds = durationSeconds > 0.0f ? durationSeconds : -1.0f;
     v->stage = EnvStage::Attack;
@@ -237,13 +250,18 @@ void SampleEngine::noteOn(int noteId, float pitchMidi, float velocity, float dur
     v->sustainLevel = config.sustain;
     v->decayAmount = 1.0f - config.sustain;
     v->usingReverse = config.reverse;
-    // The web sampler extends long notes by looping the trimmed region; a JUCE voice that only
-    // looped on config.loop would cut every held note off at the region end. Mirror the web rule
-    // (note longer than the region => loop it) so both engines play the same tail.
+    // The web sampler extends long notes by looping the sustain span; a JUCE voice that only
+    // looped on config.loop would cut every held note off at the loop end. Mirror the web rule
+    // (note longer than the first pass => loop) so both engines play the same tail.
     const double sr = atomicSampleRate.load(std::memory_order_relaxed);
-    const double regionSeconds = (sr > 0.0 && rate > 0.0) ? (e - s) / (sr * rate) : 0.0;
+    const double firstPassSamples = config.reverse ? (e - ls) : (le - s);
+    const double firstPassSeconds = (sr > 0.0 && rate > 0.0) ? firstPassSamples / (sr * rate) : 0.0;
     v->loopWhileHeld = config.loop
-        || (durationSeconds > 0.0f && regionSeconds > 0.0 && (double)durationSeconds > regionSeconds + 0.05);
+        || (durationSeconds > 0.0f && firstPassSeconds > 0.0 && (double)durationSeconds > firstPassSeconds + 0.05);
+    v->releaseTail = config.loopMode == 1;
+    v->tailJumpPending = false;
+    v->releaseSeconds = std::max(0.005f, config.release);
+    v->tailSeconds = (sr > 0.0 && rate > 0.0) ? (float)((e - le) / (sr * rate)) : 0.0f;
     v->bufCh0 = 0;
     v->bufCh1 = buf->getNumChannels() >= 2 ? 1 : 0;
     v->position = config.reverse ? juce::jlimit(0.0, dur - 1.0, dur - 1.0 - e) : s;
@@ -258,6 +276,12 @@ void SampleEngine::noteOff(int noteId)
             v.stage = EnvStage::Release;
             v.stageElapsed = 0.0f;
             v.releaseStartLevel = v.envValue;
+            if (v.releaseTail && v.loopWhileHeld && v.tailSeconds > 0.01f)
+            {
+                v.tailJumpPending = true;
+                v.loopWhileHeld = false;
+                v.releaseSeconds = juce::jmax(v.cfg.release, v.tailSeconds + 0.02f);
+            }
         }
     }
 }
@@ -307,8 +331,16 @@ void SampleEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, 
         const float* srcL = vb->getReadPointer(std::min(ch0, vLen - 1));
         const float* srcR = vb->getReadPointer(std::min(ch1, vLen - 1));
 
-        const double posStart = isRevVoice ? (vLen - 1.0 - v.endIdx) : v.startIdx;
         const double posEnd   = isRevVoice ? (vLen - 1.0 - v.startIdx) : v.endIdx;
+        const double loopStartPos = isRevVoice ? (vLen - 1.0 - v.loopEndIdx) : v.loopStartIdx;
+        const double loopEndPos   = isRevVoice ? (vLen - 1.0 - v.loopStartIdx) : v.loopEndIdx;
+
+        // A note-off that landed between blocks resumes the tail before the next sample is read.
+        if (v.tailJumpPending)
+        {
+            v.position = loopEndPos;
+            v.tailJumpPending = false;
+        }
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -359,7 +391,7 @@ void SampleEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, 
                 case EnvStage::Release:
                 {
                     v.stageElapsed += (float)sampleTime;
-                    const float rel = std::max(0.005f, v.cfg.release);
+                    const float rel = std::max(0.005f, v.releaseSeconds);
                     const float p = juce::jlimit(0.0f, 1.0f, v.stageElapsed / rel);
                     env = v.releaseStartLevel * releaseCurve.sample(p);
                     if (p >= 1.0f)
@@ -383,6 +415,12 @@ void SampleEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, 
                     v.stage = EnvStage::Release;
                     v.stageElapsed = 0.0f;
                     v.releaseStartLevel = env;
+                    if (v.releaseTail && v.loopWhileHeld && v.tailSeconds > 0.01f)
+                    {
+                        v.position = loopEndPos;
+                        v.loopWhileHeld = false;
+                        v.releaseSeconds = juce::jmax(v.cfg.release, v.tailSeconds + 0.02f);
+                    }
                 }
             }
 
@@ -405,8 +443,11 @@ void SampleEngine::renderBlock(float* leftOut, float* rightOut, int numSamples, 
 
             if (v.loopWhileHeld)
             {
-                if (v.position >= posEnd || v.position < posStart)
-                    v.position = posStart + std::fmod(std::max(0.0, v.position - posStart), std::max(1.0, posEnd - posStart));
+                // The intro plays through to the loop end, then playback wraps inside the
+                // sustain span; the trim end only matters for one-shots.
+                const double span = std::max(1.0, loopEndPos - loopStartPos);
+                if (v.position >= loopEndPos)
+                    v.position = loopStartPos + std::fmod(std::max(0.0, v.position - loopStartPos), span);
             }
             else if (v.position >= posEnd)
             {

@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import { useStore } from '../engine/store'
 import { IconX, IconDownload } from './Icons'
 import { generateMusicXML, downloadScore } from '../utils/scoreExport'
+import { parseMeterSignature, meterTicksPerBeat } from '../utils/conductor'
 import { saveFileWithDialog } from '../utils/fileExport'
 
 interface ScorePreviewModalProps {
@@ -75,11 +76,9 @@ export default function ScorePreviewModal({ onClose }: ScorePreviewModalProps) {
     return notes.filter(n => selectedTrackIds.includes(n.trackId)).sort((a, b) => a.time - b.time)
   }, [notes, selectedTrackIds])
 
-  // Determine measure count dynamically from time signature (e.g. 4/4 = 768 ticks per measure, 6/8 = 576 ticks per measure)
-  const [sigNum, sigDen] = (timeSignature || '4/4').split('/')
-  const beatsPerMeasure = parseInt(sigNum) || 4
-  const beatType = parseInt(sigDen) || 4
-  const ticksPerBeat = beatType === 8 ? 96 : (beatType === 2 ? 384 : 192)
+  // Derive bar length from the actual beat unit so 6/8, 3/16 and odd meters lay out correctly.
+  const { numerator: beatsPerMeasure, denominator: beatType } = parseMeterSignature(timeSignature || '4/4')
+  const ticksPerBeat = meterTicksPerBeat(beatType)
   const ticksPerMeasure = beatsPerMeasure * ticksPerBeat
   const maxTime = useMemo(() => {
     if (trackNotes.length === 0) return ticksPerMeasure * 4

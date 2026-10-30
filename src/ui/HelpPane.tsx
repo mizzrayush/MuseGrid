@@ -3,7 +3,7 @@ import { useStore } from '../engine/store';
 import {
   IconSettings, IconMusic, IconDrum, IconAlign, IconSave, IconPlay,
   IconTerminal, IconBook, IconDownload, IconCopy, IconTrash,
-  IconSearch, IconAlertCircle, IconAlertTriangle, IconInfo, IconCheck, IconX, IconMic, IconSliders
+  IconSearch, IconAlertCircle, IconAlertTriangle, IconInfo, IconCheck, IconX, IconMic, IconSliders, IconTimeline
 } from './Icons';
 import {
   subscribeToLogs, clearLogs, downloadLogsAsFile, copyLogsToClipboard,
@@ -75,6 +75,7 @@ export default function HelpPane() {
     { id: 'left_pane', label: 'Tracks & Instruments', icon: <IconMusic size={14} /> },
     { id: 'grid_canvas', label: 'Grid Canvas & Piano Roll', icon: <IconMusic size={14} /> },
     { id: 'automation_lanes', label: 'Automation & Modulation Lanes', icon: <IconSliders size={14} /> },
+    { id: 'tempo_meter', label: 'Tempo & Meter Conductor', icon: <IconTimeline size={14} /> },
     { id: 'drum_sequencer', label: 'Drum Sequencer', icon: <IconDrum size={14} /> },
     { id: 'right_pane', label: 'Advanced Tools & Gen', icon: <IconSettings size={14} /> },
     { id: 'midi_editing_suite', label: 'Advanced MIDI Suite & Theory', icon: <IconMusic size={14} /> },
@@ -566,7 +567,8 @@ export default function HelpPane() {
                 <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Playback & Tempo</h3>
                 <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
                   <li><strong>PLAY / STOP</strong>: Starts and stops audio playback. Shortcut: Spacebar.</li>
-                  <li><strong>BPM (Beats Per Minute)</strong>: The speed of your song. Click the number to type a new tempo.</li>
+                  <li><strong>BPM (Beats Per Minute)</strong>: The speed of your song. Click the number to type a new tempo. If the conductor has tempo points, the BPM at the playhead is shown and the tempo lane drives playback.</li>
+                  <li><strong>Time Signature Selector</strong>: Shows the signature currently in effect — including a custom one such as <code>1/11</code>, marked <em>(Custom)</em>. Pick a standard preset here; any other numerator or beat unit is set in Left Pane → Grid → Time Signature → Custom…, or as a meter point in the conductor lane.</li>
                   <li><strong>Align (Grid Icon)</strong>: Shifts the view of the grid so the playhead is perfectly visible on screen.</li>
                   <li><strong>Skip Back (Rewind Icon)</strong>: Immediately resets the playhead (the vertical playback line) back to the beginning (0:00).</li>
                 </ul>
@@ -633,6 +635,20 @@ export default function HelpPane() {
                   <li><strong>Drum Settings</strong>: Drum kit presets and physical modeling parameters (decay, tension, pitch drop) for Kick, Snare, and Hi-hats.</li>
                   <li><strong>Target BPM</strong>: Force this specific track to play at a different speed than the global BPM.</li>
                 </ul>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Time Signature &amp; Grid Rows</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Time Signature</strong>: In the Grid section, choose a preset or <strong>Custom…</strong> to enter any numerator and beat unit from 1 to 64. The project signature is the fallback for everything that is not covered by a conductor meter point.</li>
+                  <li><strong>Grid Rows / Pitch Anchors</strong>: Build a custom note-row map for scale-less instruments by typing a MIDI pitch (for example 60 for C4) into the Add Pitch Anchor field. Anchors can be reordered and removed.</li>
+                </ul>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Groove Pool &amp; Custom Groove Templates</h3>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>Groove templates are not a fixed library — you can make your own from your own playing:</p>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Apply</strong>: Choose an Active Groove Template, set Timing and Velocity Strength, then click <strong>Apply Groove to Selection</strong>.</li>
+                  <li><strong>Create your own</strong>: In <strong>Extract Groove from MIDI</strong>, choose Active Track or All Tracks, name the template, and click <strong>Extract &amp; Save Groove</strong>. The timing and velocity feel of the selected notes becomes a reusable template in the dropdown.</li>
+                  <li><strong>Bar length</strong>: Extraction and application assume a 16-step, 4/4 bar (768 ticks). Templates therefore follow straight 16ths, not odd meters or meter changes.</li>
+                </ul>
               </div>
             )}
 
@@ -666,6 +682,13 @@ export default function HelpPane() {
                   <li><strong>Snap (Magnet)</strong>: When enabled, notes snap cleanly to grid divisions (1/4 down to 1/64, triplets, dotted).</li>
                   <li><strong>Scale Lock (32 World Scales)</strong>: Choose a Key and Scale from 32 world traditions (Arabic Maqamat, Indian Ragas, Japanese Koto, Western Modes). Correct notes are highlighted in glowing green.</li>
                   <li><strong>Auto-Extend Grid</strong>: Placing notes near the end automatically lengthens the canvas.</li>
+                </ul>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Bar Lines &amp; Odd Signatures</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li>Bar lines and the bar/seconds labels come from the conductor's meter map, not from a fixed 4/4 grid. They are drawn at their exact ticks even when the signature places them between 16th-note columns (for example <code>1/11</code>).</li>
+                  <li>Loop snap-to-bar uses the same meter map, so a loop in 7/8 or an odd unit still starts and ends on real bar lines.</li>
+                  <li>For the full tempo and meter timeline, open <strong>Conductor</strong> in the bottom panel.</li>
                 </ul>
               </div>
             )}
@@ -729,6 +752,46 @@ export default function HelpPane() {
               </div>
             )}
 
+            {activeSection === 'tempo_meter' && (
+              <div>
+                <h1 style={{ margin: '0 0 20px', color: '#fff' }}>Tempo &amp; Meter Conductor</h1>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>
+                  The conductor is the project's tempo and meter timeline. Click <strong>Conductor</strong> in the bottom panel below the grid to expand it. The upper strip is the tempo lane, the lower strip is the meter lane, and both share the timeline zoom with the piano roll.
+                </p>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Tempo Automation</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Add a point</strong>: Click anywhere in the tempo lane at the height that matches the BPM you want. Clicking the playhead position is also available from the lane toolbar.</li>
+                  <li><strong>Shape a curve</strong>: Drag a point to move it in time and pitch (BPM). Select it to edit its BPM, change its curve, or delete it.</li>
+                  <li><strong>Curve types</strong>: <em>Step</em> holds the value until the next point, <em>Linear</em> ramps evenly, <em>Exponential</em> accelerates smoothly, and <em>Formula</em> evaluates a math expression for fully custom tempo trajectories.</li>
+                  <li><strong>Tempo applies everywhere</strong>: live playback, the metronome, grid seconds display, stem bounces, WAV/MP3 export, and native rendering all read the tempo map. A tempo point at tick 0 replaces the project BPM.</li>
+                </ul>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Meter Automation</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Add a meter change</strong>: Click the meter lane. The new point snaps to the nearest bar line and inherits the current signature, which you then edit.</li>
+                  <li><strong>Any signature</strong>: Both the beats-per-bar and the beat-unit fields accept <strong>any whole number from 1 to 64</strong> — 4/4, 7/8, 5/16, or 1/11 are all valid. There is no preset limit.</li>
+                  <li><strong>What changes</strong>: beat counting for the metronome, bar lines and bar numbers on the canvas, seconds display, loop snap-to-bar, score layout, and MusicXML measure boundaries.</li>
+                  <li><strong>Clear</strong>: The Clear button asks for a second click within four seconds, because there is no OS confirmation dialog.</li>
+                </ul>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Project Time Signature vs. the Tempo Bar Badge</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Left Pane → Grid → Time Signature</strong>: Pick a preset (4/4, 3/4, 2/4, 5/4, 6/4, 7/4, 6/8, 7/8, 12/8) or choose <strong>Custom…</strong> and type any numerator / beat unit pair.</li>
+                  <li><strong>Top bar selector</strong>: Shows the signature actually in effect (for example <code>1/11 (Custom)</code>), not a hard-coded 4/4. It offers the standard presets for quick changes; custom values are entered in the left pane or as a conductor meter point.</li>
+                  <li><strong>Precedence</strong>: The conductor meter map overrides the project signature from the tick of the first meter point onward. Before that point, the project signature applies.</li>
+                </ul>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Known Format Boundaries</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Standard MIDI files</strong>: The format stores the beat unit as a power of two, so an odd unit cannot survive a round trip. MuseGrid writes the nearest standard signature that keeps the bar length — for example <strong>1/11 becomes 3/32</strong> — and the export toast says the signature was approximated.</li>
+                  <li><strong>MusicXML</strong>: Preserves any <code>beat-type</code>, so odd meters survive the score export.</li>
+                  <li><strong>Native (JUCE) audio bounce metronome</strong>: Uses a constant BPM and an integer beats-per-bar for the click. It does not follow tempo automation, meter changes, or odd beat units. Live playback and the WebAudio bounce do follow the conductor.</li>
+                  <li><strong>Groove templates</strong>: Extraction and application work on a 16-step, 4/4 bar grid (768 ticks) regardless of the signature. See the Groove Pool note in the Left Pane section.</li>
+                </ul>
+              </div>
+            )}
+
             {activeSection === 'right_pane' && (
               <div>
                 <h1 style={{ margin: '0 0 20px', color: '#fff' }}>Note Inspector & Advanced Tools (Right Pane)</h1>
@@ -749,6 +812,18 @@ export default function HelpPane() {
                   <li><strong>Sub-Grid Micro-Nudge (±1t, ±6t)</strong>: Pocket selected notes forward or backward by minute tick offsets.</li>
                   <li><strong>MPE Pitch Glides</strong>: Add smooth exponential glides or stepped glissandos up to ±24 semitones.</li>
                   <li><strong>Filter Sweeps & Vibrato</strong>: Automate note-level cutoff sweeps and vibrato wobbles.</li>
+                  <li><strong>Unlink Glides (n)</strong>: Appears in the section header when the selection is part of a glide. Removes glide links and pitch slides on the selected notes <em>and</em> clears links arriving from unselected notes, so no connector is left dangling. The count shows how many notes will be rewritten.</li>
+                  <li><strong>Reset MPE</strong>: Clears pitch glide, vibrato, tremolo and filter sweep on the selected notes and unlinks their glides. Drum tuning (octaves, resonance, decay) is deliberately left untouched. Use the individual sliders to zero only one expression instead.</li>
+                </ul>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Articulation Presets</h3>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>
+                  Articulation presets capture a note's full expression state — velocity, glide, vibrato, tremolo, filter sweep, detune and related MPE fields — and apply it in one click.
+                </p>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Save a preset</strong>: Shape a note the way you want it, open the Articulation capture field in the Right Pane, name it, and save. It becomes available on every project alongside the built-in presets.</li>
+                  <li><strong>Apply</strong>: Click a preset to apply it to all selected notes. A preset shows as active only when every field it owns matches on the whole selection.</li>
+                  <li><strong>Clear</strong>: The Clear button in the Articulation row resets those expression fields without touching pitch, timing or the note's drum tuning.</li>
                 </ul>
 
                 <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Generative Matrix</h3>
@@ -906,7 +981,15 @@ export default function HelpPane() {
                 <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
                   <li><strong>Global Swing</strong>: Skews every off-beat note late by a certain percentage, creating a "bouncing" or "shuffling" feel.</li>
                   <li><strong>Groove Timing / Velocity Strength</strong>: Introduces humanized micro-imperfections in timing and velocity across the grid so it doesn't sound robotic.</li>
+                  <li><strong>Custom Groove Templates</strong>: The Groove Pool can extract your own timing and velocity feel from selected MIDI (Active Track or All Tracks) and save it as a named template. Extraction assumes a 16-step, 4/4 bar.</li>
                   <li><strong>Note Deduplication Engine</strong>: MuseGrid actively protects against double-triggered notes. You can configure the "Proximity Tolerance" (how close notes must be to be considered duplicates) and "Overlap Threshold".</li>
+                </ul>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Preview &amp; Note Scheduling</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Preview Lead</strong>: How far ahead (0–120 ms) synth and drum auditions, keyboard previews and arpeggio chords are booked on the audio clock. A small lead absorbs render and IPC latency so repeated previews keep a steady spacing instead of drifting.</li>
+                  <li><strong>Schedule Native Note-On</strong>: When running inside the JUCE app, each note can carry a wall-clock start time; the native engine holds the voice until it is due instead of firing when the message arrives. Disable it to fall back to immediate triggering.</li>
+                  <li><strong>Scheduling Lead</strong>: The default head start used for native notes that do not already carry an explicit time. Raise it if dense native passages still sound early or uneven.</li>
                 </ul>
               </div>
             )}
@@ -1155,6 +1238,15 @@ MuseState.showToast('Batch Render Complete!', 'success');`}
                   <li>In the export menu, you can apply global transposition, Auto-Fade out, Auto-Normalization to 0dB, and choose to <strong>Include Procedural FX</strong>.</li>
                   <li>If you enable the Loop brace in the timeline, the export will only render the looped area.</li>
                   <li><strong>Include Metronome</strong> places the click in the file using the sound, gain, downbeat and upbeat settings from the Click panel.</li>
+                </ul>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>MIDI Export, Tempo &amp; Odd Time Signatures</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Tempo</strong>: The exported MIDI contains the conductor's tempo map, not just the project BPM, so tempo automation arrives in the file as tempo events.</li>
+                  <li><strong>Meter changes</strong>: Conductor meter points are written as time-signature events.</li>
+                  <li><strong>The power-of-two limit</strong>: Standard MIDI files store the beat unit as a power of two (1, 2, 4, 8, 16, 32). A custom unit such as 11 cannot be encoded. MuseGrid writes the closest standard signature that <em>preserves the bar length</em> — <code>1/11</code> becomes <code>3/32</code>, which is 0.375 quarter notes instead of 0.364 — so loops and bar alignment stay intact. The success toast states that the signature was approximated; it never claims an exact odd-meter export.</li>
+                  <li><strong>MusicXML / Score export</strong>: Keeps the exact numerator and any <code>beat-type</code>, so odd meters are preserved there.</li>
+                  <li><strong>Groove templates</strong>: Extraction and application operate on a 16-step, 4/4 bar (768 ticks) and do not follow meter changes.</li>
                 </ul>
 
                 <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Audio Render Engine & Bounce Modes</h3>

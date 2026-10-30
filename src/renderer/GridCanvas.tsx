@@ -25,11 +25,12 @@ import {
   applyVelocityRamp,
   applyMicroNudge,
   applyGlideChain,
-  clearNoteGlides,
+  unlinkGlides,
+  countLinkedGlides,
   type GlideChainOptions
 } from '../utils/midiEditing'
 import { getEdoStepInfo } from '../utils/edoNomenclature'
-import { conductorSecondsAtTick, getBarNumberAtTick, isBarStartTick } from '../utils/conductor'
+import { conductorSecondsAtTick, getBarNumberAtTick, getNextBarTick, isBarStartTick } from '../utils/conductor'
 
 const TRACK_COLORS = ['#4dabf7', '#ff9900', '#69db7c', '#da77f2', '#ff6b6b', '#00e6ff', '#ffd43b']
 const newId = () => Math.random().toString(36).substr(2, 9)
@@ -1317,6 +1318,24 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         }
       })
 
+      // Bar lines at their true ticks: odd beat units land between grid columns, and
+      // snapping them to a column would hide every bar boundary.
+      {
+        const fromTick = Math.max(0, Math.floor((-effectivePanX - SIDEBAR_WIDTH) / zoom))
+        const toTick = Math.ceil((width - effectivePanX - SIDEBAR_WIDTH) / zoom)
+        let boundary = getNextBarTick(storeState.meterMap, storeState.timeSignature, fromTick)
+        ctx.strokeStyle = 'rgba(255,255,255,0.28)'
+        ctx.lineWidth = 1.5
+        for (let guard = 0; boundary <= toTick && guard < 512; guard += 1) {
+          const barX = effectivePanX + SIDEBAR_WIDTH + tickToX(boundary) * zoom
+          ctx.beginPath()
+          ctx.moveTo(barX, 0)
+          ctx.lineTo(barX, height)
+          ctx.stroke()
+          boundary = getNextBarTick(storeState.meterMap, storeState.timeSignature, boundary + 0.5)
+        }
+      }
+
       if (storeState.loopEnabled) {
         const loopXStart = effectivePanX + SIDEBAR_WIDTH + tickToX(storeState.loopStart) * zoom
         const loopWidth = (tickToX(storeState.loopEnd) - tickToX(storeState.loopStart)) * zoom
@@ -1560,6 +1579,22 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         }
         ctx.stroke()
       })
+
+      // Same rule in tick space: meter boundaries are not tied to column edges.
+      {
+        const fromTick = Math.max(0, Math.floor(minVisibleX))
+        const toTick = Math.ceil(maxVisibleX)
+        let boundary = getNextBarTick(storeState.meterMap, storeState.timeSignature, fromTick)
+        ctx.strokeStyle = 'rgba(255,255,255,0.2)'
+        ctx.lineWidth = 2 / zoom
+        for (let guard = 0; boundary <= toTick && guard < 512; guard += 1) {
+          ctx.beginPath()
+          ctx.moveTo(boundary, TIMELINE_HEIGHT)
+          ctx.lineTo(boundary, TIMELINE_HEIGHT + gridHeight)
+          ctx.stroke()
+          boundary = getNextBarTick(storeState.meterMap, storeState.timeSignature, boundary + 0.5)
+        }
+      }
 
       // Scale row highlighting (synth 12-TET only)
       if (!isDrum && !isMicroEdo && scaleLock.enabled) {
@@ -2903,17 +2938,25 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
     setContextMenu(null)
   }
 
-  const handleClearGlideChain = () => {
+  const handleUnlinkGlides = () => {
     const state = useStore.getState()
-    const selected = state.notes.filter(n => selectedNoteIds.includes(n.id))
-    if (selected.length === 0) return
+    if (selectedNoteIds.length === 0) return
+    const { notes: nextNotes, cleared } = unlinkGlides(state.notes, selectedNoteIds)
+    if (cleared === 0) {
+      state.showToast('No linked glides in the selection', 'info')
+      setContextMenu(null)
+      return
+    }
     state.commitHistory()
-    const updated = clearNoteGlides(selected)
-    const byId = new Map(updated.map(n => [n.id, n]))
-    useStore.setState(s => ({ notes: s.notes.map(n => byId.get(n.id) ?? n) }))
-    state.showToast('Glide chain cleared', 'success')
+    useStore.setState({ notes: nextNotes })
+    state.showToast(`Unlinked ${cleared} glide${cleared === 1 ? '' : 's'}`, 'success')
     setContextMenu(null)
   }
+
+  const linkedGlideCount = useMemo(
+    () => countLinkedGlides(allNotes, selectedNoteIds),
+    [allNotes, selectedNoteIds]
+  )
 
   const glideCandidateCount = useMemo(() => {
     const drumTrackIds = new Set(tracks.filter(t => t.instrument === 'drum').map(t => t.id))
@@ -5117,6 +5160,19 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                     </button>
                   )}
 
+                  {linkedGlideCount > 0 && (
+                    <button
+                      style={{ width: '100%', padding: '6px 12px', background: 'none', border: 'none', color: '#da77f2', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600 }}
+                      onClick={handleUnlinkGlides}
+                      title="Remove glide links and pitch slides on the selected notes, including links arriving from unselected notes"
+                      onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                      onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                    >
+                      <IconMusic size={13} /> Unlink Glides
+                      <span style={{ marginLeft: 'auto', fontSize: '10px', color: '#8b7b9a', fontWeight: 600 }}>{linkedGlideCount}</span>
+                    </button>
+                  )}
+
                   <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />
 
                   {/* Delete */}
@@ -5504,24 +5560,27 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                     <IconMusic size={12} /> Apply to {glideCandidateCount} Notes
                   </button>
 
-                  <button
-                    onClick={handleClearGlideChain}
-                    style={{
-                      width: '100%',
-                      padding: '6px 10px',
-                      background: 'none',
-                      border: '1px solid rgba(255,255,255,0.07)',
-                      borderRadius: '5px',
-                      color: '#999',
-                      cursor: 'pointer',
-                      fontSize: '10px',
-                      fontWeight: 600
-                    }}
-                    onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}
-                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
-                  >
-                    Clear Glides
-                  </button>
+                  {linkedGlideCount > 0 && (
+                    <button
+                      onClick={handleUnlinkGlides}
+                      style={{
+                        width: '100%',
+                        padding: '6px 10px',
+                        background: 'none',
+                        border: '1px solid rgba(255,255,255,0.07)',
+                        borderRadius: '5px',
+                        color: '#999',
+                        cursor: 'pointer',
+                        fontSize: '10px',
+                        fontWeight: 600
+                      }}
+                      title="Remove glide links and pitch slides on the selected notes, including links arriving from unselected notes"
+                      onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}
+                      onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                    >
+                      Unlink Glides ({linkedGlideCount})
+                    </button>
+                  )}
                 </div>
               )}
             </div>

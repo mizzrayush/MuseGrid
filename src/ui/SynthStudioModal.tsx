@@ -981,7 +981,7 @@ export const SynthStudioModal: React.FC = () => {
 
   // Region + loop aware preview: the audition should sound like the sampler will in the grid,
   // where a held note wraps the trimmed region instead of always playing a fixed 0.8s blip.
-  const createSamplerVoice = (shiftedMidi: number, velocity: number): SamplerAuditionVoice | null => {
+  const createSamplerVoice = (shiftedMidi: number, velocity: number, startAt?: number): SamplerAuditionVoice | null => {
     if (!samplerBuffer) return null
     try {
       const audioCtx = Tone.getContext().rawContext as AudioContext
@@ -992,7 +992,7 @@ export const SynthStudioModal: React.FC = () => {
       const rate = Math.pow(2, semitoneDiff / 12)
       source.playbackRate.value = rate
 
-      const now = audioCtx.currentTime
+      const now = Math.max(audioCtx.currentTime, startAt ?? 0)
       const gainNode = audioCtx.createGain()
       const attack = Math.max(0.001, sampler.attack ?? 0.005)
       const decay = Math.max(0.01, sampler.decay ?? 0.25)
@@ -1048,6 +1048,10 @@ export const SynthStudioModal: React.FC = () => {
     if (voice) samplerAuditionRef.current = voice
   }
 
+  // Previews are scheduled on the audio clock with a lead instead of firing on the spot: the
+  // lead is what absorbs IPC/render latency so repeated hits keep a steady distance apart.
+  const previewLead = () => Math.max(0, useStore.getState().studioSettings.previewLookaheadMs ?? 20) / 1000
+
   const handleAuditionKey = (note: string) => {
     if (!targetTrack) return
     setActiveKey(note)
@@ -1060,7 +1064,7 @@ export const SynthStudioModal: React.FC = () => {
     }
 
     const noteSound = Tone.Frequency(shiftedMidi, 'midi').toNote()
-    audioEngine.playNote(targetTrack.id, 'synth', noteSound, '8n', undefined, 1, undefined, fineDetune)
+    audioEngine.playNote(targetTrack.id, 'synth', noteSound, '8n', Tone.now() + previewLead(), 1, undefined, fineDetune)
     setTimeout(() => setActiveKey(null), 250)
   }
 
@@ -1115,30 +1119,38 @@ export const SynthStudioModal: React.FC = () => {
     useStore.getState().showToast('Randomized Synth Patch', 'success')
   }
 
-  // Audition preview chords
+  // Audition preview chords. Every step is booked on the audio clock up front, so the arpeggio
+  // keeps its spacing even when the main thread is busy rendering the editor.
   const handlePreview = () => {
     if (!targetTrack) return
+    const audioCtx = Tone.getContext().rawContext as AudioContext
+    const lead = previewLead()
+    const stepSeconds = 0.13
     const notes = [60, 64, 67, 72] // C4, E4, G4, C5 arpeggio
     notes.forEach((midi, idx) => {
-      setTimeout(() => {
-        const shiftedMidi = midi + octave * 12 + semitone
-        if (samplerMode && samplerBuffer) {
-          const voice = createSamplerVoice(shiftedMidi, 0.85)
-          if (voice) setTimeout(() => releaseSamplerVoice(voice, 0.25), 650)
-        } else {
-          const noteSound = Tone.Frequency(shiftedMidi, 'midi').toNote()
-          audioEngine.playNote(
-            targetTrack.id,
-            'synth',
-            noteSound,
-            '8n',
-            undefined,
-            0.85,
-            undefined,
-            fineDetune
+      const shiftedMidi = midi + octave * 12 + semitone
+      if (samplerMode && samplerBuffer) {
+        const at = audioCtx.currentTime + lead + idx * stepSeconds
+        const voice = createSamplerVoice(shiftedMidi, 0.85, at)
+        if (voice) {
+          setTimeout(
+            () => releaseSamplerVoice(voice, 0.25),
+            Math.max(0, (at + 0.65 - audioCtx.currentTime) * 1000)
           )
         }
-      }, idx * 130)
+      } else {
+        const noteSound = Tone.Frequency(shiftedMidi, 'midi').toNote()
+        audioEngine.playNote(
+          targetTrack.id,
+          'synth',
+          noteSound,
+          '8n',
+          Tone.now() + lead + idx * stepSeconds,
+          0.85,
+          undefined,
+          fineDetune
+        )
+      }
     })
   }
 

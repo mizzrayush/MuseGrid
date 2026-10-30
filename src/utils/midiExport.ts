@@ -3,6 +3,7 @@ import type { Note, Track } from '../engine/store'
 import {
   getMeterPositionAtTick,
   getTempoAtTick,
+  toSmfTimeSignature,
   type MeterPoint,
   type TempoPoint,
 } from './conductor'
@@ -54,13 +55,15 @@ export function createMidiData(notes: Note[], bpm: number, tracks?: Track[], opt
 
   if (meterMap.length > 0) {
     const signatureEvents = new Map<number, number[]>()
-    signatureEvents.set(0, [
-      getMeterPositionAtTick(meterMap, options?.timeSignature ?? '4/4', regionStart).meter.numerator,
-      getMeterPositionAtTick(meterMap, options?.timeSignature ?? '4/4', regionStart).meter.denominator,
-    ])
+    const baseMeter = getMeterPositionAtTick(meterMap, options?.timeSignature ?? '4/4', regionStart).meter
+    const baseSignature = toSmfTimeSignature(baseMeter.numerator, baseMeter.denominator)
+    signatureEvents.set(0, [baseSignature.numerator, baseSignature.denominator])
     meterMap.forEach(point => {
       if (point.tick < regionStart) return
-      signatureEvents.set(Math.round((point.tick - regionStart) * scale), [point.numerator, point.denominator])
+      // SMF stores the beat unit as log2, so odd denominators fall back to the closest
+      // signature that keeps the bar length (1/11 → 3/32 rather than a wrong 1/8).
+      const signature = toSmfTimeSignature(point.numerator, point.denominator)
+      signatureEvents.set(Math.round((point.tick - regionStart) * scale), [signature.numerator, signature.denominator])
     })
     midi.header.timeSignatures = [...signatureEvents.entries()]
       .sort((a, b) => a[0] - b[0])

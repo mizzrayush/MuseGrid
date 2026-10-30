@@ -9,6 +9,7 @@ import { getTrackFxInstances } from '../engine/fxDefaults'
 import { useContextMenuDismissal, useContextMenuPosition } from './useContextMenuDismissal'
 import { AppSlider, sliderProgress } from './AppSlider'
 import { NOTE_NAMES_SHARP, NOTE_NAMES_FLAT, CHORD_VOICINGS, snapTick, snapToScale, getDiatonicChord, SCALE_MODES, GENRE_PROGRESSIONS, type GenreProgression, CHORD_STAMPS } from '../utils/musicTheory'
+import { MAX_METER_BEATS, MAX_METER_DENOMINATOR, parseMeterSignature } from '../utils/conductor'
 
 import { createProceduralSuggestions, type ProceduralSuggestion, type SuggestionKind } from '../utils/proceduralSuggestions'
 import { applyAudioBufferFadeOut, mixAudioBuffers, normalizeAudioBuffer, renderProjectAudio, stitchAudioBuffers } from '../utils/audioRender'
@@ -841,6 +842,170 @@ function NoteMixerSection({ activeTrackId }: { activeTrackId: string | null }) {
   )
 }
 
+const TIME_SIGNATURE_PRESETS = ['4/4', '3/4', '2/4', '5/4', '6/4', '7/4', '6/8', '7/8', '12/8']
+
+const timeSignatureFieldStyle: React.CSSProperties = {
+  colorScheme: 'dark',
+  background: '#12141c',
+  color: '#e0e6ed',
+  border: '1px solid rgba(255, 255, 255, 0.12)',
+  borderRadius: '5px',
+  fontWeight: 'bold',
+  fontSize: '12px',
+  outline: 'none',
+  padding: '4px 8px',
+}
+
+/** Preset picker with a Custom… branch so any beats/beat-unit pair (e.g. 7/11) is reachable. */
+function TimeSignatureControl({ value, onChange }: { value: string; onChange: (signature: string) => void }) {
+  const parsed = parseMeterSignature(value)
+  const [custom, setCustom] = useState(!TIME_SIGNATURE_PRESETS.includes(value))
+  const [draftBeats, setDraftBeats] = useState(String(parsed.numerator))
+  const [draftUnit, setDraftUnit] = useState(String(parsed.denominator))
+
+  useEffect(() => {
+    const next = parseMeterSignature(value)
+    setDraftBeats(String(next.numerator))
+    setDraftUnit(String(next.denominator))
+    setCustom(!TIME_SIGNATURE_PRESETS.includes(value))
+  }, [value])
+
+  const commit = (beatsText: string, unitText: string): boolean => {
+    const beats = Number(beatsText)
+    const unit = Number(unitText)
+    if (!Number.isInteger(beats) || beats < 1 || beats > MAX_METER_BEATS) return false
+    if (!Number.isInteger(unit) || unit < 1 || unit > MAX_METER_DENOMINATOR) return false
+    onChange(`${beats}/${unit}`)
+    return true
+  }
+
+  const restoreDraft = () => {
+    if (commit(draftBeats, draftUnit)) return
+    setDraftBeats(String(parsed.numerator))
+    setDraftUnit(String(parsed.denominator))
+  }
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+      <StopPropSelect
+        value={custom ? 'custom' : value}
+        onChange={(e) => {
+          const next = e.target.value
+          if (next === 'custom') {
+            setCustom(true)
+            return
+          }
+          setCustom(false)
+          onChange(next)
+        }}
+        style={{ ...timeSignatureFieldStyle, cursor: 'pointer' }}
+      >
+        {TIME_SIGNATURE_PRESETS.map(signature => (
+          <option key={signature} value={signature} style={{ background: '#1a1a24' }}>{signature}</option>
+        ))}
+        <option value="custom" style={{ background: '#1a1a24' }}>Custom…</option>
+      </StopPropSelect>
+      {custom && (
+        <>
+          <input
+            type="number"
+            min={1}
+            max={MAX_METER_BEATS}
+            step={1}
+            value={draftBeats}
+            onChange={e => { setDraftBeats(e.target.value); commit(e.target.value, draftUnit) }}
+            onBlur={restoreDraft}
+            onMouseDown={e => e.stopPropagation()}
+            onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter') restoreDraft() }}
+            style={{ ...timeSignatureFieldStyle, width: '44px' }}
+            title="Beats per bar (1–64)"
+          />
+          <span style={{ color: '#6d7382', fontSize: '11px' }}>/</span>
+          <input
+            type="number"
+            min={1}
+            max={MAX_METER_DENOMINATOR}
+            step={1}
+            value={draftUnit}
+            onChange={e => { setDraftUnit(e.target.value); commit(draftBeats, e.target.value) }}
+            onBlur={restoreDraft}
+            onMouseDown={e => e.stopPropagation()}
+            onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter') restoreDraft() }}
+            style={{ ...timeSignatureFieldStyle, width: '44px' }}
+            title="Beat unit (1–64); any whole number works, e.g. 7/11"
+          />
+        </>
+      )}
+    </div>
+  )
+}
+
+function AddPitchAnchor({ onAdd }: { onAdd: (pitch: string) => void }) {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState('')
+  const pitch = Number(value.trim())
+  const valid = value.trim() !== '' && Number.isInteger(pitch) && pitch >= 0 && pitch <= 127
+
+  const commit = () => {
+    if (!valid) return
+    onAdd(String(pitch))
+    setValue('')
+    setEditing(false)
+  }
+
+  if (!editing) {
+    return (
+      <button onClick={() => setEditing(true)} style={{ ...buttonStyle('#4dabf7'), width: '100%', marginTop: '8px' }}>
+        Add Pitch Anchor
+      </button>
+    )
+  }
+
+  return (
+    <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
+      <input
+        autoFocus
+        type="text"
+        inputMode="numeric"
+        placeholder="MIDI pitch (0-127)"
+        value={value}
+        onChange={e => setValue(e.target.value)}
+        onKeyDown={e => {
+          e.stopPropagation()
+          if (e.key === 'Enter') commit()
+          if (e.key === 'Escape') { setValue(''); setEditing(false) }
+        }}
+        onMouseDown={e => e.stopPropagation()}
+        onMouseUp={e => e.stopPropagation()}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          fontSize: '11px',
+          color: '#4dabf7',
+          background: 'rgba(255,255,255,0.03)',
+          border: '1px solid rgba(255,255,255,0.08)',
+          borderRadius: '4px',
+          outline: 'none',
+          padding: '4px 8px',
+        }}
+      />
+      <button
+        onClick={commit}
+        disabled={!valid}
+        style={{ ...buttonStyle('#4dabf7'), flex: 'none', padding: '4px 12px', opacity: valid ? 1 : 0.4, cursor: valid ? 'pointer' : 'default' }}
+      >
+        Add
+      </button>
+      <button
+        onClick={() => { setValue(''); setEditing(false) }}
+        style={{ ...buttonStyle('#888'), flex: 'none', padding: '4px 10px' }}
+      >
+        Cancel
+      </button>
+    </div>
+  )
+}
+
 function GridRowReorderSection({ activeTrackId }: { activeTrackId: string | null }) {
   const activeTrack = useStore(s => s.tracks.find(t => t.id === activeTrackId))
   const updateTrack = useStore(s => s.updateTrack)
@@ -897,11 +1062,9 @@ function GridRowReorderSection({ activeTrackId }: { activeTrackId: string | null
       updateTrack(activeTrack.id, { customRowOrder: newRows })
     }
 
-    const addPitchToMap = () => {
-      const pitchStr = window.prompt("Enter MIDI Pitch to add to map (e.g. 60 for C4):")
-      if (pitchStr && !isNaN(Number(pitchStr))) {
-        updateTrack(activeTrack.id, { customRowOrder: [...order, pitchStr] })
-      }
+    const addPitchToMap = (pitchStr: string) => {
+      if (order.includes(pitchStr)) return
+      updateTrack(activeTrack.id, { customRowOrder: [...order, pitchStr] })
     }
 
     const removePitch = (idx: number) => {
@@ -932,9 +1095,7 @@ function GridRowReorderSection({ activeTrackId }: { activeTrackId: string | null
                 </div>
               </div>
             ))}
-            <button onClick={addPitchToMap} style={{ ...buttonStyle('#4dabf7'), width: '100%', marginTop: '8px' }}>
-              Add Pitch Anchor
-            </button>
+            <AddPitchAnchor onAdd={addPitchToMap} />
           </div>
         )}
       </div>
@@ -3585,19 +3746,28 @@ export default function LeftPane() {
       })
       if (!saved) return
 
+      // SMF cannot store a non power-of-two beat unit; midiExport keeps the bar length
+      // by rewriting it, so tell the user instead of letting the file silently differ.
+      const smfDenominators = [1, 2, 4, 8, 16, 32]
+      const oddMeter = (midiMeterMap ?? []).some(point => !smfDenominators.includes(point.denominator)) ||
+        !smfDenominators.includes(parseMeterSignature(state.timeSignature).denominator)
+      const midiMeterNote = oddMeter
+        ? ' Odd beat units were written as the nearest standard MIDI signature.'
+        : ''
+
       if (exportScala) {
         const microTracks = exportTracks.filter(t => t.instrument === 'synth' && t.edoDivision && t.edoDivision !== 12)
         if (microTracks.length > 0) {
           microTracks.forEach(t => {
             exportTrackScala(t, t.name ? t.name.replace(/\s+/g, '-').toLowerCase() : 'track')
           })
-          useStore.getState().showToast('Exported MIDI + Scala (.scl) tuning companion!', 'success')
+          useStore.getState().showToast(`Exported MIDI + Scala (.scl) tuning companion!${midiMeterNote}`, 'success')
         } else {
           exportTrackScala(targetTrack || exportTracks[0], filename.replace(/\.mid$/, ''))
-          useStore.getState().showToast('Exported MIDI + Scala (.scl) tuning companion!', 'success')
+          useStore.getState().showToast(`Exported MIDI + Scala (.scl) tuning companion!${midiMeterNote}`, 'success')
         }
       } else {
-        useStore.getState().showToast('Exported MIDI file successfully!', 'success')
+        useStore.getState().showToast(`Exported MIDI file successfully!${midiMeterNote}`, 'success')
       }
     } catch (e) {
       console.error(e)
@@ -3979,7 +4149,8 @@ export default function LeftPane() {
         nextTime += 32 * 48
       }
 
-      useStore.getState().loadState({ notes: [...notes, ...newNotes] })
+      useStore.getState().commitHistory()
+      useStore.getState().addNotes(newNotes)
       useStore.getState().showToast(`Generated ${morphSteps - 2} intermediate morph patterns!`, 'success')
 
     } catch (err: any) {
@@ -4026,7 +4197,7 @@ export default function LeftPane() {
         // ensure humanized notes are on this track
         humanizedNotes.forEach(n => { n.trackId = activeTrackId; n.id = newId() })
 
-        useStore.getState().loadState({ notes: [...otherTracksNotes, ...untouchedNotes, ...humanizedNotes] })
+        useStore.setState({ notes: [...otherTracksNotes, ...untouchedNotes, ...humanizedNotes] })
         useStore.getState().showToast('Groove Humanized!', 'success')
       }
     } catch (err: any) {
@@ -5445,6 +5616,51 @@ export default function LeftPane() {
             </div>
           </div>
 
+          {/* Preview timing & native note scheduling */}
+          <div style={{ display: 'flex', flexDirection: 'column', marginTop: '12px', marginBottom: '8px' }}>
+            <span style={{ fontSize: '11px', color: '#aaa', display: 'block', marginBottom: '6px', fontWeight: 600 }}>Preview & Note Scheduling</span>
+            <SliderRow
+              label="Preview Lead"
+              value={studioSettings.previewLookaheadMs ?? 20}
+              min={0} max={120} step={1}
+              color="#4dabf7" suffix=" ms"
+              onChange={v => updateStudio({ previewLookaheadMs: v })}
+            />
+            <span style={{ fontSize: '9px', color: '#666', marginTop: '-2px', marginBottom: '8px' }}>
+              Head start given to studio auditions and arpeggios so they land on the audio clock.
+            </span>
+            {Boolean((window as any).__isJuceNative__) && (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
+                  <span style={{ fontSize: '11px', color: '#aaa', fontWeight: 600 }}>Schedule Native Note-On</span>
+                  <label style={{ position: 'relative', display: 'inline-block', width: '36px', height: '20px', cursor: 'pointer', flexShrink: 0 }}>
+                    <input
+                      type="checkbox"
+                      checked={studioSettings.nativeNoteScheduling !== false}
+                      onChange={e => updateStudio({ nativeNoteScheduling: e.target.checked })}
+                      style={{ opacity: 0, width: 0, height: 0 }}
+                    />
+                    <span style={{ position: 'absolute', inset: 0, borderRadius: '20px', background: studioSettings.nativeNoteScheduling !== false ? '#4dabf7' : '#333', transition: 'background 0.2s' }}>
+                      <span style={{ position: 'absolute', top: '3px', left: studioSettings.nativeNoteScheduling !== false ? '19px' : '3px', width: '14px', height: '14px', borderRadius: '50%', background: 'white', transition: 'left 0.2s' }} />
+                    </span>
+                  </label>
+                </div>
+                <span style={{ fontSize: '9px', color: '#666', marginBottom: '8px' }}>
+                  JUCE holds each note until its scheduled time instead of firing when the message arrives.
+                </span>
+                {studioSettings.nativeNoteScheduling !== false && (
+                  <SliderRow
+                    label="Scheduling Lead"
+                    value={studioSettings.nativeScheduleLeadMs ?? 20}
+                    min={0} max={120} step={1}
+                    color="#4dabf7" suffix=" ms"
+                    onChange={v => updateStudio({ nativeScheduleLeadMs: v })}
+                  />
+                )}
+              </>
+            )}
+          </div>
+
           {/* Workstation Audio Driver & Hardware Setup */}
           <div style={{
             marginTop: '12px',
@@ -6577,18 +6793,7 @@ export default function LeftPane() {
         <Section title="Grid" defaultOpen={false}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
             <span style={{ fontSize: '12px', color: '#aaa' }}>Time Signature</span>
-            <StopPropSelect
-              value={timeSignature}
-              onChange={(e) => setTimeSignature(e.target.value)}
-              style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: 'white', fontWeight: 'bold', fontSize: '12px', outline: 'none', cursor: 'pointer', padding: '4px 8px', borderRadius: '4px' }}
-            >
-              <option value="4/4" style={{ background: '#1a1a24' }}>4/4</option>
-              <option value="3/4" style={{ background: '#1a1a24' }}>3/4</option>
-              <option value="2/4" style={{ background: '#1a1a24' }}>2/4</option>
-              <option value="5/4" style={{ background: '#1a1a24' }}>5/4</option>
-              <option value="6/4" style={{ background: '#1a1a24' }}>6/4</option>
-              <option value="7/4" style={{ background: '#1a1a24' }}>7/4</option>
-            </StopPropSelect>
+            <TimeSignatureControl value={timeSignature} onChange={setTimeSignature} />
           </div>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
             <span style={{ fontSize: '12px', color: '#aaa' }}>Snap</span>

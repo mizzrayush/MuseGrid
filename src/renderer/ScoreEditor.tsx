@@ -359,6 +359,9 @@ export default function ScoreEditor() {
               cursor: 'pointer'
             }}
           >
+            {!['4/4', '3/4', '2/4', '6/8'].includes(timeSignature) && (
+              <option value={timeSignature}>{timeSignature} (Custom)</option>
+            )}
             <option value="4/4">4/4</option>
             <option value="3/4">3/4</option>
             <option value="2/4">2/4</option>

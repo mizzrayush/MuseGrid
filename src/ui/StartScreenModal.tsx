@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
-import { useStore, removeRecentProject, clearAllRecentProjects, type RecentProjectItem, type ScaleLock } from '../engine/store'
+import { useStore, removeRecentProject, clearAllRecentProjects, getClosedSession, isAutoRecoverEnabled, setAutoRecoverEnabled, type RecentProjectItem, type ScaleLock } from '../engine/store'
 import { DAW_TEMPLATES, getUserTemplates, saveUserTemplate, deleteUserTemplate, buildPreviewPattern, type DawTemplate } from '../utils/dawTemplates'
 import { selectAndReadFile, parseProjectPayload } from '../utils/fileDialog'
 import { AppSlider } from './AppSlider'
@@ -85,6 +85,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
   const [showOnStartup, setShowOnStartup] = useState<boolean>(() => {
     return localStorage.getItem('musegrid_show_start_screen') !== 'false'
   })
+  const [autoRecover, setAutoRecover] = useState<boolean>(() => isAutoRecoverEnabled())
 
   // AI Generator Form State - Maximum Flexibility
   const [aiMode, setAiMode] = useState<'full' | 'melody' | 'drums' | 'trio' | 'bach'>('full')
@@ -339,6 +340,17 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
     localStorage.setItem('musegrid_show_start_screen', enabled ? 'true' : 'false')
   }
 
+  const handleToggleAutoRecover = (enabled: boolean) => {
+    setAutoRecover(enabled)
+    setAutoRecoverEnabled(enabled)
+    showToast(
+      enabled
+        ? 'Auto recover on: the project is cached while open'
+        : 'Auto recover off: closed projects are no longer cached',
+      'info'
+    )
+  }
+
   const handleClose = () => {
     if (embedded) {
       if (openTabs.length > 0) {
@@ -512,9 +524,24 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
       return
     }
 
-    // 4. Fallback: if user already has an active session, navigate into it
-    if (hasActiveSession) {
-      if (useStore.getState().activeTabId === 'start' && openTabs.length > 0) {
+    // 4. The tab was closed: reopen the session from the closed-project cache
+    const cached = getClosedSession(item.name, item.filePath)
+    if (cached) {
+      openProjectInTab({
+        name: item.name,
+        filePath: null,
+        projectData: { ...cached, projectFilePath: null }
+      })
+      setIsStartScreenOpen(false)
+      onProjectLoaded?.()
+      enterDawFullscreen()
+      showToast(`Recovered ${item.name}`, 'success')
+      return
+    }
+
+    // 5. Fallback: only navigate if a tab is actually open to return to
+    if (openTabs.length > 0) {
+      if (useStore.getState().activeTabId === 'start') {
         switchTab(openTabs[0].id)
       }
       setIsStartScreenOpen(false)
@@ -522,7 +549,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
       enterDawFullscreen()
       showToast(`Returned to active workspace`, 'info')
     } else {
-      showToast(`Project file not found on disk: ${item.name}`, 'error')
+      showToast(`"${item.name}" is no longer available: no file on disk and nothing cached`, 'error')
     }
   }
 
@@ -921,6 +948,15 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
                 style={{ accentColor: '#4dabf7', width: '14px', height: '14px', cursor: 'pointer' }}
               />
               <span>Show on app startup</span>
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '11.5px', color: '#999', userSelect: 'none' }}>
+              <input
+                type="checkbox"
+                checked={autoRecover}
+                onChange={e => handleToggleAutoRecover(e.target.checked)}
+                style={{ accentColor: '#4dabf7', width: '14px', height: '14px', cursor: 'pointer' }}
+              />
+              <span>Auto recover project</span>
             </label>
             <div style={{ fontSize: '10px', color: '#555', display: 'flex', justifyContent: 'space-between' }}>
               <span>MuseGrid Native v1.1.0</span>

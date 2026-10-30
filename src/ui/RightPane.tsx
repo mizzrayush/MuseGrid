@@ -5,7 +5,7 @@ import { audioEngine } from '../engine/AudioEngine'
 import { NOTE_FX_DEFAULTS, noteFxChainId } from '../utils/noteFxChain'
 import { NOTE_NAMES_SHARP, snapToScale, detectChord, detectScaleDegree } from '../utils/musicTheory'
 import { ARTICULATION_FIELDS, captureArticulation, hasCustomArticulation, type ArticulationPreset } from '../utils/articulations'
-import { applyRatchet, applyMicroNudge } from '../utils/midiEditing'
+import { applyRatchet, applyMicroNudge, unlinkGlides, countLinkedGlides } from '../utils/midiEditing'
 import { IconX, IconVolume, IconTimeline, IconMusic, IconDrum, IconSpeaker, IconTrash, IconPlus, IconOpen } from './Icons'
 
 const PITCH_TO_PIECE: Record<number, string> = {
@@ -569,6 +569,26 @@ const SelectRow: React.FC<SelectRowProps> = ({ label, value, options, onChange }
   </div>
 )
 
+const HeaderAction: React.FC<{ label: string; title: string; color: string; onClick: () => void }> = ({ label, title, color, onClick }) => (
+  <button
+    onClick={onClick}
+    title={title}
+    style={{ background: 'transparent', border: 'none', color, cursor: 'pointer', fontSize: '10px', fontWeight: 700, padding: 0 }}
+    onMouseEnter={e => e.currentTarget.style.opacity = '0.75'}
+    onMouseLeave={e => e.currentTarget.style.opacity = '1'}
+  >
+    {label}
+  </button>
+)
+
+// Expression fields the MPE panel owns. Drum tuning (octaves/resonance/decay) is edited in the
+// Drum Pitch Tuning card, so Reset MPE must not silently wipe it.
+const MPE_RESET_KEYS: Array<keyof Note> = [
+  ...ARTICULATION_FIELDS.filter(k => k !== 'octaves' && k !== 'resonance' && k !== 'decay'),
+  'glideVoice',
+  'glideToNoteId',
+]
+
 export const RightPane: React.FC = () => {
   const selectedNoteIds = useStore(state => state.selectedNoteIds)
   const notes = useStore(state => state.notes)
@@ -607,6 +627,11 @@ export const RightPane: React.FC = () => {
   const selectedNotes = useMemo(() => {
     return notes.filter(n => selectedNoteIds.includes(n.id))
   }, [notes, selectedNoteIds])
+
+  const linkedGlideCount = useMemo(
+    () => countLinkedGlides(notes, selectedNoteIds),
+    [notes, selectedNoteIds]
+  )
 
   // If no selected notes, or if inspector is disabled from left pane, or if the user hasn't explicitly opened it, the pane is hidden
   const isOpen = selectedNotes.length > 0 && noteInspectorEnabled && isRightPaneVisible
@@ -890,6 +915,46 @@ export const RightPane: React.FC = () => {
     updateNotes(selectedNoteIds, { [key]: value })
   }
 
+  const handleUnlinkGlides = () => {
+    if (selectedNoteIds.length === 0) return
+    const { notes: nextNotes, cleared } = unlinkGlides(useStore.getState().notes, selectedNoteIds)
+    if (cleared === 0) {
+      useStore.getState().showToast('No linked glides in the selection', 'info')
+      return
+    }
+    commitHistory()
+    useStore.setState({ notes: nextNotes })
+    useStore.getState().showToast(`Unlinked ${cleared} glide${cleared === 1 ? '' : 's'}`, 'success')
+  }
+
+  // Reset runs on the whole store: a link arriving from an unselected note has to go with the
+  // selection or the connector would be left dangling on a note that no longer glides.
+  const applyExpressionReset = (extra: Partial<Note> = {}) => {
+    const idSet = new Set(selectedNoteIds)
+    const { notes: unlinked, cleared } = unlinkGlides(useStore.getState().notes, idSet)
+    const next = unlinked.map(n => {
+      if (!idSet.has(n.id)) return n
+      const copy: any = { ...n, ...extra }
+      MPE_RESET_KEYS.forEach(key => { copy[key] = undefined })
+      return copy
+    })
+    commitHistory()
+    useStore.setState({ notes: next })
+    return cleared
+  }
+
+  const handleResetExpression = () => {
+    if (selectedNoteIds.length === 0) return
+    const cleared = applyExpressionReset()
+    const count = selectedNoteIds.length
+    useStore.getState().showToast(
+      cleared > 0
+        ? `Expression reset on ${count} note${count === 1 ? '' : 's'} · ${cleared} glide${cleared === 1 ? '' : 's'} unlinked`
+        : `Expression reset on ${count} note${count === 1 ? '' : 's'}`,
+      'success'
+    )
+  }
+
   // A preset is active only when every expression field it owns matches on all selected notes.
   const articulationMatches = (preset: ArticulationPreset) => {
     if (selectedNotes.length === 0) return false
@@ -1074,24 +1139,13 @@ export const RightPane: React.FC = () => {
   }
 
   const handleRestoreDefault = () => {
-    updateNotes(selectedNoteIds, {
+    applyExpressionReset({
       velocity: 100,
       bpm: undefined,
       instrumentOverride: undefined,
       velocityInspectorModified: false,
       completeNotesOnPause: undefined,
       detune: undefined,
-      pitchSlide: undefined,
-      pitchSlideTime: undefined,
-      pitchSlideRamp: undefined,
-      pitchSlideCustomCurve: undefined,
-      vibratoDepth: undefined,
-      vibratoRate: undefined,
-      filterStart: undefined,
-      filterEnd: undefined,
-      filterSweepTime: undefined,
-      tremoloDepth: undefined,
-      tremoloRate: undefined,
       lyric: undefined,
       voicePresetId: undefined
     })
@@ -2134,6 +2188,22 @@ export const RightPane: React.FC = () => {
                 ) && (
                     <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#ff3366', boxShadow: '0 0 6px #ff3366' }} title="Custom MPE parameters active" />
                   )}
+                <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  {linkedGlideCount > 0 && (
+                    <HeaderAction
+                      label={`Unlink Glides (${linkedGlideCount})`}
+                      title="Remove glide links and pitch slides on the selected notes, including links arriving from unselected notes"
+                      color="#da77f2"
+                      onClick={handleUnlinkGlides}
+                    />
+                  )}
+                  <HeaderAction
+                    label="Reset MPE"
+                    title="Clear pitch glide, vibrato, tremolo and filter sweep on the selected notes"
+                    color="#888"
+                    onClick={handleResetExpression}
+                  />
+                </div>
               </div>
 
               {/* Pitch Slide */}
@@ -2381,6 +2451,22 @@ export const RightPane: React.FC = () => {
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                 <IconTimeline size={12} style={{ color: '#ff3366' }} />
                 <label style={{ fontSize: '11px', fontWeight: 700, color: '#ff3366', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Infinite Expression (MPE)</label>
+                <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  {linkedGlideCount > 0 && (
+                    <HeaderAction
+                      label={`Unlink Glides (${linkedGlideCount})`}
+                      title="Remove glide links and pitch slides on the selected notes, including links arriving from unselected notes"
+                      color="#da77f2"
+                      onClick={handleUnlinkGlides}
+                    />
+                  )}
+                  <HeaderAction
+                    label="Reset MPE"
+                    title="Clear vibrato and tone sweep on the selected notes"
+                    color="#888"
+                    onClick={handleResetExpression}
+                  />
+                </div>
               </div>
 
               {/* Pad wobble */}

@@ -5,6 +5,8 @@ import {
   getBarStartTick,
   getMeterPositionAtTick,
   getTempoAtTick,
+  MAX_METER_BEATS,
+  MAX_METER_DENOMINATOR,
   type TempoCurve,
   type TempoPoint,
 } from '../utils/conductor'
@@ -89,6 +91,13 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const dragRef = useRef<{ kind: 'tempo'; id: string } | null>(null)
   const [selection, setSelection] = useState<Selection>(null)
+  // Clearing the whole map is a double-click confirmation instead of an OS dialog.
+  const [confirmClear, setConfirmClear] = useState(false)
+  useEffect(() => {
+    if (!confirmClear) return
+    const timer = setTimeout(() => setConfirmClear(false), 4000)
+    return () => clearTimeout(timer)
+  }, [confirmClear])
 
   const selectedTempo = selection?.kind === 'tempo'
     ? tempoMap.find(point => point.id === selection.id)
@@ -514,24 +523,24 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
                 <input
                   type="number"
                   min={1}
-                  max={32}
+                  max={MAX_METER_BEATS}
                   step={1}
                   value={selectedMeter.numerator}
                   onChange={e => useStore.getState().updateMeterPoint(selectedMeter.id, { numerator: Number(e.target.value) })}
                   style={inputStyle}
-                  title="Beats per bar"
+                  title="Beats per bar (1–64)"
                 />
                 <span style={{ color: '#6d7382', fontSize: '10px' }}>/</span>
-                <select
+                <input
+                  type="number"
+                  min={1}
+                  max={MAX_METER_DENOMINATOR}
+                  step={1}
                   value={selectedMeter.denominator}
                   onChange={e => useStore.getState().updateMeterPoint(selectedMeter.id, { denominator: Number(e.target.value) })}
                   style={{ ...inputStyle, width: '52px' }}
-                  title="Beat unit"
-                >
-                  {[1, 2, 4, 8, 16, 32].map(value => (
-                    <option key={value} value={value}>{value}</option>
-                  ))}
-                </select>
+                  title="Beat unit (1–64); any whole number works, e.g. 7/11"
+                />
                 <button
                   style={buttonStyle()}
                   onClick={() => {
@@ -547,17 +556,22 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
 
             <span style={{ flex: 1 }} />
             <button
-              style={buttonStyle()}
+              style={confirmClear ? { ...buttonStyle(true), color: '#ff6b8b', borderColor: 'rgba(255,51,102,0.45)', background: 'rgba(255,51,102,0.16)' } : buttonStyle()}
               onClick={() => {
                 if (tempoMap.length === 0 && meterMap.length === 0) return
-                if (window.confirm('Clear all tempo and meter points? The project BPM and time signature stay as they are.')) {
-                  useStore.getState().resetConductor()
-                  setSelection(null)
+                if (!confirmClear) {
+                  setConfirmClear(true)
+                  return
                 }
+                useStore.getState().resetConductor()
+                setSelection(null)
+                setConfirmClear(false)
               }}
-              title="Remove all conductor points"
+              title={confirmClear
+                ? 'Click again to clear all conductor points. The project BPM and time signature stay as they are.'
+                : 'Remove all conductor points'}
             >
-              Clear
+              {confirmClear ? 'Confirm Clear' : 'Clear'}
             </button>
           </div>
 

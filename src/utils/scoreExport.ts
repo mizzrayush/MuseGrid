@@ -1,6 +1,7 @@
 import type { Track, Note } from '../engine/store'
 import { ARTICULATION_FIELDS } from './articulations'
 import { saveFileWithDialog } from './fileExport'
+import { CONDUCTOR_PPQ, meterTicksPerBeat, parseMeterSignature } from './conductor'
 
 function escapeXml(unsafe: string): string {
   return unsafe.replace(/[<>&'"]/g, (c) => {
@@ -17,10 +18,19 @@ function escapeXml(unsafe: string): string {
 
 export function generateMusicXML(tracks: Track[], allNotes: Note[], bpm: number, timeSignature: string, includeLyrics = false): string {
   const timeSig = timeSignature || '4/4'
-  const [beats, beatType] = timeSig.split('/').map(Number)
-  const ticksPerBeat = beatType === 8 ? 96 : 192
+  const { numerator: beats, denominator: beatType } = parseMeterSignature(timeSig)
+  // Divisions are project ticks, so every note duration is already in the right unit.
+  // Beat lengths stay fractional for odd denominators; measure edges snap to whole ticks.
+  const ticksPerBeat = meterTicksPerBeat(beatType)
   const ticksPerMeasure = beats * ticksPerBeat
-  const divisions = ticksPerBeat
+  const divisions = CONDUCTOR_PPQ
+  const measureStartTick = (index: number) => Math.round(index * ticksPerMeasure)
+  const measureIndexAt = (tick: number): number => {
+    let index = Math.floor(tick / ticksPerMeasure)
+    while (index > 0 && tick < measureStartTick(index)) index -= 1
+    while (tick >= measureStartTick(index + 1)) index += 1
+    return index
+  }
 
   // Calculate maximum measure count across ALL tracks
   const maxTime = allNotes.length === 0 ? ticksPerMeasure * 4 : Math.max(...allNotes.map(n => n.time + n.duration))
@@ -132,16 +142,16 @@ export function generateMusicXML(tracks: Track[], allNotes: Note[], bpm: number,
     tieStop?: boolean;
   }
 
-  const sliceNoteForMeasures = (note: Note, measureTicks: number): SlicedNote[] => {
+  const sliceNoteForMeasures = (note: Note): SlicedNote[] => {
     const noteEnd = note.time + note.duration
     const slices: SlicedNote[] = []
     let curStart = note.time
 
     while (curStart < noteEnd) {
-      const curMeasureIndex = Math.floor(curStart / measureTicks)
-      const measureEnd = (curMeasureIndex + 1) * measureTicks
-      const curEnd = Math.min(noteEnd, measureEnd)
-      const curDur = Math.max(1, curEnd - curStart)
+      const curMeasureIndex = measureIndexAt(curStart)
+      const measureEnd = measureStartTick(curMeasureIndex + 1)
+      const curEnd = Math.max(curStart + 1, Math.min(noteEnd, measureEnd))
+      const curDur = curEnd - curStart
 
       const isFirst = curStart === note.time
       const isLast = curEnd === noteEnd
@@ -163,12 +173,12 @@ export function generateMusicXML(tracks: Track[], allNotes: Note[], bpm: number,
   tracks.forEach((track, idx) => {
     xml += `  <part id="P${idx + 1}">\n`
     const rawTrackNotes = allNotes.filter(n => n.trackId === track.id)
-    const trackNotes = rawTrackNotes.flatMap(n => sliceNoteForMeasures(n, ticksPerMeasure))
+    const trackNotes = rawTrackNotes.flatMap(n => sliceNoteForMeasures(n))
 
     for (let m = 0; m < totalMeasures; m++) {
       const measureNumber = m + 1
-      const startTick = m * ticksPerMeasure
-      const endTick = startTick + ticksPerMeasure
+      const startTick = measureStartTick(m)
+      const endTick = measureStartTick(m + 1)
 
       xml += `    <measure number="${measureNumber}">\n`
 

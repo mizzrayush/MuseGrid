@@ -47,6 +47,35 @@ private:
     // Real-time audio command dispatch
     void handleAudioCommand(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
 
+    // Notes that carry a `startTime` (Unix epoch ms, the clock the WebView also reads) are held
+    // here until they are due instead of firing when the IPC message lands. Waiting happens on a
+    // high-resolution timer so notes keep the spacing the JS scheduler asked for.
+    struct PendingNote
+    {
+        juce::var command;
+        juce::int64 dueTicks = 0;
+    };
+
+    class NoteScheduler : public juce::HighResolutionTimer
+    {
+    public:
+        explicit NoteScheduler(JuceBridge& bridgeToUse) : bridge(bridgeToUse) {}
+        void hiResTimerCallback() override { bridge.dispatchDueNotes(); }
+    private:
+        JuceBridge& bridge;
+    };
+
+    void dispatchDueNotes();
+    void cancelPendingNotes();
+
+    // Declared first so the timer stops before the queue it reads is destroyed.
+    NoteScheduler noteScheduler { *this };
+    const double epochAnchorMs = (double) juce::Time::currentTimeMillis();
+    const juce::int64 hrAnchorTicks = juce::Time::getHighResolutionTicks();
+    const double hrTicksPerMs = juce::Time::getHighResolutionTicksPerSecond() / 1000.0;
+    juce::CriticalSection pendingNotesLock;
+    std::vector<PendingNote> pendingNotes;
+
     // VST3 Hosting Handlers
     void handleVst3Scan(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);
     void handleVst3GetPlugins(const juce::Array<juce::var>& args, juce::WebBrowserComponent::NativeFunctionCompletion complete);

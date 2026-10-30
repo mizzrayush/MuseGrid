@@ -48,6 +48,11 @@ export interface NativeNoteOnCommand {
   pan?: number
   /** Per-note volume from the volume automation lane (0..1). */
   gain?: number
+  /**
+   * Unix epoch milliseconds the voice should start at. When present the bridge holds the note
+   * until that instant instead of triggering it on receipt; both sides read the same wall clock.
+   */
+  startTime?: number
 }
 
 const waveformIndex = (wave?: string) => wave === 'triangle' ? 1 : wave === 'square' ? 2 : 0

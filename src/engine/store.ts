@@ -5,6 +5,8 @@ import {
   normalizeTempoMap,
   normalizeMeterMap,
   parseMeterSignature,
+  getBarStartTick,
+  getNextBarTick,
   type TempoPoint,
   type MeterPoint,
 } from '../utils/conductor'
@@ -995,6 +997,9 @@ export interface StudioSettings {
   limiterThreshold: number    // dB
   persistenceEnabled: boolean // Whether local storage autosave is active
   sampleRate?: number         // AudioContext sample rate
+  previewLookaheadMs: number  // Lead time given to audition/arpeggio previews so they land on the audio clock
+  nativeNoteScheduling: boolean // Send a start time with native noteOn so JUCE holds the voice until it is due
+  nativeScheduleLeadMs: number  // Lead time used for native notes that carry no explicit time
 }
 
 export interface MicRecordingSettings {
@@ -1125,6 +1130,8 @@ export interface ProjectTab {
   isDirty: boolean
   lastSavedAt?: number
   projectData?: any
+  /** Launch placeholder for the autosaved session; replaced when the hub opens another project. */
+  restored?: boolean
 }
 
 export interface AppState {
@@ -1341,7 +1348,7 @@ export interface AppState {
   setPlayheadFollowMode: (mode: PlayheadFollowMode) => void
   requestCanvasAlign: () => void
   setColumnWidth: (index: number, width: number) => void
-  loadState: (state: Partial<AppState>) => void
+  loadState: (state: Partial<AppState>, options?: { restoredTab?: boolean }) => void
   setActiveTrackId: (id: string | null) => void
   toggleTrackSelection: (id: string, multi: boolean) => void
   setSelectedTrackIds: (ids: string[]) => void
@@ -1378,6 +1385,7 @@ export interface AppState {
   setProjectInfo: (info: Partial<{ projectName: string | null, projectFilePath: string | null }>) => void
   setIsDirty: (v: boolean) => void
   openProjectInTab: (tabData: { id?: string, name: string, filePath?: string | null, isDirty?: boolean, projectData?: any, previewSnippet?: string }) => string
+  clearProject: () => string
   switchTab: (tabId: string) => void
   closeTab: (tabId: string) => void
   updateActiveTab: (updates: Partial<ProjectTab>) => void
@@ -1889,6 +1897,106 @@ export function getRecentProjects(): RecentProjectItem[] {
     }
   } catch (e) {}
   return []
+}
+
+const AUTO_RECOVER_KEY = 'musegrid_auto_recover'
+const CLOSED_SESSIONS_KEY = 'musegrid_closed_sessions'
+const MAX_CLOSED_SESSIONS = 6
+
+// Off means the project is never cached: no autosave writes, no startup restore
+// and no closed-tab snapshot for the recent list.
+let autoRecoverCache: boolean | null = null
+
+export function isAutoRecoverEnabled(): boolean {
+  if (autoRecoverCache === null) {
+    try {
+      autoRecoverCache = localStorage.getItem(AUTO_RECOVER_KEY) !== 'false'
+    } catch {
+      autoRecoverCache = true
+    }
+  }
+  return autoRecoverCache
+}
+
+export function setAutoRecoverEnabled(enabled: boolean): void {
+  autoRecoverCache = enabled
+  try {
+    localStorage.setItem(AUTO_RECOVER_KEY, enabled ? 'true' : 'false')
+    if (!enabled) {
+      localStorage.removeItem('musegrid_autosave')
+      localStorage.removeItem(CLOSED_SESSIONS_KEY)
+    }
+  } catch (e) {}
+}
+
+function closedSessionKey(name: string | null | undefined, filePath?: string | null): string {
+  return filePath
+    ? `file:${filePath.toLowerCase()}`
+    : `name:${normalizeProjectName(name || '')}`
+}
+
+function readClosedSessions(): Record<string, { name: string, filePath?: string | null, projectData: any, closedAt: number }> {
+  try {
+    const raw = localStorage.getItem(CLOSED_SESSIONS_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+// Keeps the last state of a closed session project so the recent list can
+// reopen it. File-backed projects are re-read from disk instead.
+export function cacheClosedSession(name: string, filePath: string | null | undefined, projectData: any): void {
+  if (!isAutoRecoverEnabled() || filePath || !projectData) return
+  try {
+    const all = readClosedSessions()
+    all[closedSessionKey(name, filePath)] = {
+      name,
+      filePath: filePath || null,
+      projectData,
+      closedAt: Date.now()
+    }
+    const trimmed = Object.entries(all)
+      .sort((a, b) => (b[1]?.closedAt || 0) - (a[1]?.closedAt || 0))
+      .slice(0, MAX_CLOSED_SESSIONS)
+    localStorage.setItem(CLOSED_SESSIONS_KEY, JSON.stringify(Object.fromEntries(trimmed)))
+  } catch (e) {}
+}
+
+export function getClosedSession(name: string, filePath?: string | null): any | null {
+  if (!isAutoRecoverEnabled()) return null
+  try {
+    const entry = readClosedSessions()[closedSessionKey(name, filePath)]
+    return entry?.projectData || null
+  } catch {
+    return null
+  }
+}
+
+function forgetClosedSession(name: string, filePath?: string | null): void {
+  try {
+    const all = readClosedSessions()
+    const key = closedSessionKey(name, filePath)
+    if (!(key in all)) return
+    delete all[key]
+    localStorage.setItem(CLOSED_SESSIONS_KEY, JSON.stringify(all))
+  } catch (e) {}
+}
+
+// Set while a project snapshot is applied (load/open/switch/close) so the
+// content watcher does not flag the freshly loaded document as edited.
+let suppressDirtyTracking = false
+
+function withoutDirtyTracking<T>(fn: () => T): T {
+  const previous = suppressDirtyTracking
+  suppressDirtyTracking = true
+  try {
+    return fn()
+  } finally {
+    suppressDirtyTracking = previous
+  }
 }
 
 export const useStore = create<AppState>((originalSet, get, api) => {
@@ -2436,8 +2544,11 @@ if (firstTrack) {
 
       let cycleLength = maxTick - minTick
       if (snapToBar) {
-        cycleLength = Math.ceil(maxTick / 768) * 768 - Math.floor(minTick / 768) * 768
-        if (cycleLength <= 0) cycleLength = 768 // Fallback to 1 bar
+        // Follow the conductor's meter so odd beat units loop on real bar lines.
+        const barStart = getBarStartTick(state.meterMap, state.timeSignature, minTick)
+        const barEnd = getNextBarTick(state.meterMap, state.timeSignature, maxTick)
+        cycleLength = barEnd - barStart
+        if (cycleLength <= 0) cycleLength = 768 // Fallback to one 4/4 bar
       }
 
       let endBoundary = 0
@@ -2741,7 +2852,7 @@ if (firstTrack) {
     setColumnWidth: (index, width) => set((state) => ({
       columnWidths: { ...state.columnWidths, [index]: width }
     })),
-    loadState: (newState) => set((state) => {
+    loadState: (newState, options) => withoutDirtyTracking(() => set((state) => {
       const newProjectId = Math.random().toString(36).substring(2, 9)
       const pName = newState.projectName !== undefined ? newState.projectName : state.projectName
       const fPath = newState.projectFilePath !== undefined ? newState.projectFilePath : state.projectFilePath
@@ -2767,12 +2878,16 @@ if (firstTrack) {
           })
         }
         currentActiveId = `tab_${Math.random().toString(36).substring(2, 9)}`
+        // Opening a project from the hub replaces the launch placeholder instead of
+        // leaving the autosaved previous session open next to it.
+        if (state.isStartScreenOpen) updatedTabs = updatedTabs.filter(t => !t.restored)
         updatedTabs = [...updatedTabs, {
           id: currentActiveId,
           name: pName || 'Untitled Project',
           filePath: fPath,
           isDirty: false,
-          projectData: newState
+          projectData: newState,
+          restored: options?.restoredTab === true
         }]
       } else {
         updatedTabs = updatedTabs.map(t => {
@@ -2837,7 +2952,7 @@ if (firstTrack) {
         history: [],
         historyIndex: -1
       }
-    }),
+    })),
     setActiveTrackId: (id) => set((state) => {
       const activeTrack = state.tracks.find(t => t.id === id)
       return {
@@ -2951,7 +3066,7 @@ if (firstTrack) {
       return { isDirty: v, openTabs: updatedTabs }
     }),
 
-    openProjectInTab: (tabData) => {
+    openProjectInTab: (tabData) => withoutDirtyTracking(() => {
       const state = useStore.getState()
       const id = tabData.id || `tab_${Math.random().toString(36).substring(2, 9)}`
 
@@ -2971,6 +3086,12 @@ if (firstTrack) {
           }
           return t
         })
+      }
+
+      // The launch-restored autosave tab is a hub placeholder, not something the user
+      // opened; picking a project in the hub must not leave the old one open beside it.
+      if (state.isStartScreenOpen) {
+        updatedTabs = updatedTabs.filter(t => !t.restored)
       }
 
       // 2. Prepare the new project data (either supplied or fresh blank)
@@ -3010,9 +3131,41 @@ if (firstTrack) {
       })
 
       return id
-    },
+    }),
 
-    switchTab: (tabId) => {
+    // Resets the active tab in place. loadState() opens a new tab when the
+    // current one has content, which is the opposite of "clear this project".
+    clearProject: (): string => withoutDirtyTracking((): string => {
+      const state = useStore.getState()
+      const blank = createBlankProjectData('Untitled Project')
+      const appliedState = applyProjectDataToEngineAndStore(blank, 'Untitled Project', null)
+      const hasActiveTab = state.activeTabId !== 'start' && state.openTabs.some(t => t.id === state.activeTabId)
+      const tabId = hasActiveTab ? state.activeTabId : `tab_${Math.random().toString(36).substring(2, 9)}`
+      const clearedTab: ProjectTab = {
+        id: tabId,
+        name: 'Untitled Project',
+        filePath: null,
+        isDirty: false,
+        projectData: blank
+      }
+
+      // The cleared content is deliberately not cached for the recent list.
+      if (state.projectName) forgetClosedSession(state.projectName, state.projectFilePath)
+
+      set({
+        ...appliedState,
+        isDirty: false,
+        openTabs: hasActiveTab
+          ? state.openTabs.map(t => t.id === tabId ? clearedTab : t)
+          : [...state.openTabs, clearedTab],
+        activeTabId: tabId,
+        isStartScreenOpen: false
+      })
+
+      return tabId
+    }),
+
+    switchTab: (tabId) => withoutDirtyTracking(() => {
       const state = useStore.getState()
       if (state.activeTabId === tabId) return
 
@@ -3047,6 +3200,11 @@ if (firstTrack) {
 
       const targetTab = updatedTabs.find(t => t.id === tabId)
       if (!targetTab) return
+      // Resuming the launch-restored session makes it a real workspace tab, so later
+      // hub actions no longer treat it as a disposable placeholder.
+      if (targetTab.restored) {
+        updatedTabs = updatedTabs.map(t => t.id === tabId ? { ...t, restored: false } : t)
+      }
 
       const projectDataToLoad = targetTab.projectData || createBlankProjectData(targetTab.name)
       const appliedState = applyProjectDataToEngineAndStore(projectDataToLoad, targetTab.name, targetTab.filePath)
@@ -3057,12 +3215,23 @@ if (firstTrack) {
         activeTabId: tabId,
         isDirty: targetTab.isDirty
       })
-    },
+    }),
 
-    closeTab: (tabId) => {
+    closeTab: (tabId) => withoutDirtyTracking(() => {
       const state = useStore.getState()
       if (state.isPlaying) {
         state.setIsPlaying(false)
+      }
+
+      // Keep the last state of a closed session so the recent list can reopen it.
+      const closingTab = state.openTabs.find(t => t.id === tabId)
+      const closingIsActive = state.activeTabId === tabId
+      const closingData = closingIsActive ? snapshotProjectData(state) : closingTab?.projectData
+      const closingName = (closingIsActive ? (state.projectName || closingTab?.name) : closingTab?.name) || 'Untitled Project'
+      const closingFilePath = closingIsActive ? state.projectFilePath : (closingTab?.filePath ?? null)
+      if (closingTab) {
+        forgetClosedSession(closingName, closingFilePath)
+        cacheClosedSession(closingName, closingFilePath, closingData)
       }
 
       const remainingTabs = state.openTabs.filter(t => t.id !== tabId)
@@ -3100,13 +3269,16 @@ if (firstTrack) {
             history: [],
             historyIndex: -1
           })
+          // A project closed on purpose must not come back on the next launch;
+          // its cached snapshot is what the recent list reopens.
+          try { localStorage.removeItem('musegrid_autosave') } catch (e) {}
           return
         }
       }
 
       // Closing inactive tab
       set({ openTabs: remainingTabs })
-    },
+    }),
 
     updateActiveTab: (updates) => set(state => ({
       openTabs: state.openTabs.map(t => t.id === state.activeTabId ? { ...t, ...updates } : t)
@@ -3859,6 +4031,9 @@ if (firstTrack) {
       velocityCurveFormula: 'v',
       limiterThreshold: -1.5,
       persistenceEnabled: true,
+      previewLookaheadMs: 20,
+      nativeNoteScheduling: true,
+      nativeScheduleLeadMs: 20,
     },
     updateStudio: (updates) => set(state => ({
       studioSettings: { ...state.studioSettings, ...updates }
@@ -4023,6 +4198,31 @@ if (firstTrack) {
   }
 })
 
+// Project content that makes the document unsaved. View-only state (zoom, tool,
+// scroll) is deliberately excluded so navigation alone never triggers the prompt.
+const DIRTY_TRACKED_KEYS = [
+  'notes', 'tracks', 'bpm', 'timeSignature', 'scaleLock', 'swing',
+  'loopEnabled', 'loopStart', 'loopEnd',
+  'automationCurves', 'automationTargets', 'automationLanes',
+  'tempoMap', 'meterMap', 'clips', 'groups', 'drumSteps',
+  'articulationPresets', 'midiRemapData',
+  'grooveTemplates', 'activeGrooveTemplateId',
+  'grooveTimingStrength', 'grooveVelocityStrength',
+  'customSynthRows', 'customDrumRows',
+] as const
+
+// Catches edits made through mutators that do not call commitHistory() (note
+// inspector, mixer) so the dirty dot and the save-on-close prompt stay truthful.
+useStore.subscribe((state, prevState) => {
+  if (suppressDirtyTracking || state.isDirty) return
+  const changed = DIRTY_TRACKED_KEYS.some(key => state[key] !== prevState[key])
+  if (!changed) return
+  useStore.setState({
+    isDirty: true,
+    openTabs: state.openTabs.map(t => t.id === state.activeTabId ? { ...t, isDirty: true } : t)
+  })
+})
+
 // Debounced autosave to localStorage (prevents main thread stutter during playback/playhead updates)
 let autosaveTimer: any = null
 useStore.subscribe((state, prevState) => {
@@ -4052,7 +4252,13 @@ useStore.subscribe((state, prevState) => {
   autosaveTimer = setTimeout(() => {
     try {
       const curState = useStore.getState()
+      // Auto-recover off means nothing is cached. A closed tab (no active
+      // project) also must not overwrite the snapshot with blank state.
+      const persistProject = isAutoRecoverEnabled() &&
+        curState.activeTabId !== 'start' &&
+        curState.openTabs.length > 0
       const saveState = {
+        isDirty: curState.isDirty,
         projectName: curState.projectName,
         projectFilePath: curState.projectFilePath,
         bpm: curState.bpm,
@@ -4145,7 +4351,9 @@ useStore.subscribe((state, prevState) => {
         scriptContent: curState.scriptContent,
         voicePresets: curState.voicePresets,
       }
-      localStorage.setItem('musegrid_autosave', JSON.stringify(saveState))
+      if (persistProject) {
+        localStorage.setItem('musegrid_autosave', JSON.stringify(saveState))
+      }
       localStorage.setItem('musegrid_custom_fx_configs', JSON.stringify(curState.customFxConfigs))
       localStorage.setItem('musegrid_voice_presets', JSON.stringify(curState.voicePresets))
     } catch (e) {
@@ -4209,11 +4417,22 @@ const saved = localStorage.getItem('musegrid_autosave')
 if (saved) {
   try {
     const parsed = JSON.parse(saved)
-    if (parsed && parsed.studioSettings && parsed.studioSettings.persistenceEnabled === false) {
+    if (!isAutoRecoverEnabled()) {
+      // Auto-recover was turned off: drop the stale cache instead of restoring it.
+      localStorage.removeItem('musegrid_autosave')
+    } else if (parsed && parsed.studioSettings && parsed.studioSettings.persistenceEnabled === false) {
       // Do not load
     } else {
       if (parsed.bpm <= 0 || isNaN(parsed.bpm)) parsed.bpm = 120; // Auto-rescue corrupted persistence
-      useStore.getState().loadState(parsed)
+      useStore.getState().loadState(parsed, { restoredTab: true })
+      // The autosave is the only copy of edits that were never written to disk;
+      // the restored tab must keep the dirty flag so closing it still prompts.
+      if (parsed.isDirty === true) {
+        useStore.setState((state) => ({
+          isDirty: true,
+          openTabs: state.openTabs.map(t => t.restored ? { ...t, isDirty: true } : t)
+        }))
+      }
     }
   } catch (e) {
     console.error('Failed to load autosave', e)

@@ -1337,3 +1337,33 @@ export function clearNoteGlides(notes: Note[]): Note[] {
   }))
 }
 
+export const noteHasGlide = (n: Note) =>
+  n.glideToNoteId !== undefined || n.glideVoice !== undefined || n.pitchSlide !== undefined
+
+/** Notes a glide unlink would rewrite: the selection plus sources linking into it. */
+function notesTouchingGlides(notes: Note[], ids: Set<string>): Note[] {
+  if (ids.size === 0) return []
+  return notes.filter(n =>
+    noteHasGlide(n) && (ids.has(n.id) || (n.glideToNoteId !== undefined && ids.has(n.glideToNoteId)))
+  )
+}
+
+export function countLinkedGlides(notes: Note[], selectedIds: Iterable<string>): number {
+  return notesTouchingGlides(notes, new Set(selectedIds)).length
+}
+
+/**
+ * Remove every glide touching a selection: the selected notes' own slides and links,
+ * plus links from unselected notes that land on one, so no connector is left dangling.
+ */
+export function unlinkGlides(notes: Note[], selectedIds: Iterable<string>): { notes: Note[]; cleared: number } {
+  const ids = new Set(selectedIds)
+  if (ids.size === 0) return { notes, cleared: 0 }
+
+  const touched = notesTouchingGlides(notes, ids)
+  if (touched.length === 0) return { notes, cleared: 0 }
+
+  const clearedById = new Map(clearNoteGlides(touched).map(n => [n.id, n]))
+  return { notes: notes.map(n => clearedById.get(n.id) ?? n), cleared: touched.length }
+}
+

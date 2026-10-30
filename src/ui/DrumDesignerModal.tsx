@@ -532,13 +532,15 @@ export const DrumDesignerModal: React.FC = () => {
       }
     }
 
-    // Fallback or Physical Synth Mode: Play through AudioEngine
+    // Fallback or Physical Synth Mode: Play through AudioEngine. The same preview lead the
+    // Synth Studio uses keeps the hit off the IPC/render queue's variable latency.
+    const leadSeconds = Math.max(0, useStore.getState().studioSettings.previewLookaheadMs ?? 20) / 1000
     audioEngine.playNote(
       targetTrack.id,
       'drum',
       pitch,
       '16n',
-      undefined,
+      Tone.now() + leadSeconds,
       vel,
       undefined,
       detune,

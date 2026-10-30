@@ -14,7 +14,7 @@ import {
   applyTimeStretch, applyVelocityRamp, applyVelocityCompress,
   applyVelocityNormalize, applyFixedVelocity, applyHumanize,
   filterOddEvenNotes, filterVoiceNotes, applyPurgeShortNotes,
-  applyRatchet, applyMicroNudge, applyGlideChain, clearNoteGlides
+  applyRatchet, applyMicroNudge, applyGlideChain, unlinkGlides
 } from '../utils/midiEditing'
 import type {
   ChopPattern, ArpPattern, VelocityCurve, HarmonizeType,
@@ -293,10 +293,21 @@ export const MidiEditSection: React.FC<MidiEditSectionProps> = ({ activeTrack })
     replaceTargetNotes(updated, `Glide chain applied across ${targetNotes.length} notes!`)
   }
 
-  const handleClearGlides = () => {
-    if (targetNotes.length === 0) return
-    const updated = clearNoteGlides(targetNotes)
-    replaceTargetNotes(updated, `Cleared glides from ${targetNotes.length} notes`)
+  // Unlink runs on the whole store so links arriving from unselected notes are cleared too;
+  // replaceTargetNotes would only rewrite the selection and leave those connectors dangling.
+  const handleUnlinkGlides = () => {
+    if (!activeTrack || targetNotes.length === 0) {
+      showToast('No notes to edit on active track! Select notes or add notes.', 'error')
+      return
+    }
+    const { notes: nextNotes, cleared } = unlinkGlides(notes, targetNotes.map(n => n.id))
+    if (cleared === 0) {
+      showToast('No linked glides in the selection', 'info')
+      return
+    }
+    commitHistory()
+    useStore.setState({ notes: nextNotes })
+    showToast(`Unlinked ${cleared} glide${cleared === 1 ? '' : 's'}`, 'success')
   }
 
   // 4. Dynamics & Velocity
@@ -1244,16 +1255,16 @@ export const MidiEditSection: React.FC<MidiEditSectionProps> = ({ activeTrack })
                   </span>
                 </button>
                 <button
-                  onClick={handleClearGlides}
+                  onClick={handleUnlinkGlides}
                   style={{
                     ...actionBtnStyle('#ff4d6d'),
                     flex: 1,
                     padding: '6px 8px',
                     fontSize: '10px'
                   }}
-                  title="Remove all pitch glide slides from selected notes"
+                  title="Remove glide links and pitch slides on the selected notes, including links arriving from unselected notes"
                 >
-                  Clear Glides
+                  Unlink Glides
                 </button>
               </div>
             </div>

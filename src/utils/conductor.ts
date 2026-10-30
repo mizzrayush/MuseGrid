@@ -7,6 +7,13 @@
 export const CONDUCTOR_PPQ = 192
 export const MIN_CONDUCTOR_BPM = 20
 export const MAX_CONDUCTOR_BPM = 300
+/** Beats per bar and beat unit accept any whole number in this range, not just powers of two. */
+export const MIN_METER_VALUE = 1
+export const MAX_METER_BEATS = 64
+export const MAX_METER_DENOMINATOR = 64
+
+/** Standard MIDI files store the beat unit as log2, so only powers of two survive a round trip. */
+const SMF_DENOMINATORS = [1, 2, 4, 8, 16, 32] as const
 
 export type TempoCurve = 'step' | 'linear' | 'exponential' | 'formula'
 
@@ -42,6 +49,12 @@ export const normalizeTempoMap = (points: TempoPoint[] | undefined | null): Temp
     .sort((a, b) => a.tick - b.tick)
 }
 
+const clampMeterValue = (value: unknown, max: number, fallback: number): number => {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) return fallback
+  return Math.max(MIN_METER_VALUE, Math.min(max, Math.round(numeric)))
+}
+
 export const normalizeMeterMap = (points: MeterPoint[] | undefined | null): MeterPoint[] => {
   if (!Array.isArray(points)) return []
   return points
@@ -49,19 +62,17 @@ export const normalizeMeterMap = (points: MeterPoint[] | undefined | null): Mete
     .map(point => ({
       ...point,
       tick: Math.max(0, Math.round(point.tick)),
-      numerator: Math.max(1, Math.min(32, Math.round(point.numerator) || 4)),
-      denominator: [1, 2, 4, 8, 16, 32].includes(point.denominator) ? point.denominator : 4,
+      numerator: clampMeterValue(point.numerator, MAX_METER_BEATS, 4),
+      denominator: clampMeterValue(point.denominator, MAX_METER_DENOMINATOR, 4),
     }))
     .sort((a, b) => a.tick - b.tick)
 }
 
 export const parseMeterSignature = (signature: string): { numerator: number; denominator: number } => {
   const match = String(signature || '4/4').match(/^\s*(\d+)\s*\/\s*(\d+)\s*$/)
-  const numerator = match ? parseInt(match[1], 10) : 4
-  const denominator = match ? parseInt(match[2], 10) : 4
   return {
-    numerator: Number.isFinite(numerator) && numerator > 0 ? numerator : 4,
-    denominator: [1, 2, 4, 8, 16, 32].includes(denominator) ? denominator : 4,
+    numerator: clampMeterValue(match?.[1], MAX_METER_BEATS, 4),
+    denominator: clampMeterValue(match?.[2], MAX_METER_DENOMINATOR, 4),
   }
 }
 
@@ -236,6 +247,33 @@ const meterBeatTicks = (meter: MeterPoint): number =>
 const meterBarTicks = (meter: MeterPoint): number =>
   meterBeatTicks(meter) * Math.max(1, meter.numerator)
 
+/** Ticks per beat for a beat unit. Fractional when the denominator is not a power of two. */
+export const meterTicksPerBeat = (denominator: number): number =>
+  (CONDUCTOR_PPQ * 4) / Math.max(1, Math.round(denominator) || 1)
+
+/**
+ * Closest standard-MIDI signature to `numerator/denominator`. SMF cannot encode an
+ * 11th-note beat, so keep the bar length as close as possible and let the caller warn.
+ */
+export const toSmfTimeSignature = (
+  numerator: number,
+  denominator: number
+): { numerator: number; denominator: number } => {
+  const barQuarters = (numerator * 4) / Math.max(1, denominator)
+  if ((SMF_DENOMINATORS as readonly number[]).includes(denominator)) {
+    return { numerator, denominator }
+  }
+  let best = { numerator, denominator: 4, error: Number.POSITIVE_INFINITY }
+  for (const candidate of SMF_DENOMINATORS) {
+    const beats = Math.max(1, Math.min(255, Math.round((barQuarters * candidate) / 4)))
+    const error = Math.abs((beats * 4) / candidate - barQuarters)
+    if (error < best.error - 1e-9) {
+      best = { numerator: beats, denominator: candidate, error }
+    }
+  }
+  return { numerator: best.numerator, denominator: best.denominator }
+}
+
 const effectiveMeterMap = (
   map: MeterPoint[] | undefined,
   defaultSignature: string
@@ -283,11 +321,14 @@ export const getMeterPositionAtTick = (
   const barTicks = meterBarTicks(meter)
   const beatTicks = meterBeatTicks(meter)
   const barsIntoMeter = Math.max(0, Math.floor((target - meter.tick) / barTicks))
-  const barStartTick = meter.tick + barsIntoMeter * barTicks
+  const barStartExact = meter.tick + barsIntoMeter * barTicks
   const beatIndex = Math.max(0, Math.min(
     meter.numerator - 1,
-    Math.floor((target - barStartTick) / beatTicks)
+    Math.floor((target - barStartExact) / beatTicks)
   ))
+  // Beat lengths are fractional for odd denominators; notes and loops live on whole
+  // ticks, so snap the reported boundaries and keep the raw lengths for callers.
+  const barStartTick = Math.round(barStartExact)
 
   return {
     meter,
@@ -295,7 +336,7 @@ export const getMeterPositionAtTick = (
     barIndex: barsBefore + barsIntoMeter,
     barStartTick,
     beatIndex,
-    beatStartTick: barStartTick + beatIndex * beatTicks,
+    beatStartTick: Math.round(barStartExact + beatIndex * beatTicks),
     beatTicks,
     barTicks,
   }
@@ -364,7 +405,7 @@ export const buildConductorBeats = (
     const barEnd = cursor + currentBarTicks
     const beatCount = meter.numerator
     for (let beat = 0; beat < beatCount; beat += 1) {
-      const tick = cursor + beat * currentBeatTicks
+      const tick = Math.round(cursor + beat * currentBeatTicks)
       if (tick >= endTick) break
       if (tick >= startTick) {
         beats.push({ tick, isDownbeat: beat === 0, barIndex, beatIndex: beat })
@@ -406,5 +447,5 @@ export const getNextBarTick = (
   const position = getMeterPositionAtTick(map, defaultSignature, tick)
   return Math.abs(tick - position.barStartTick) < 0.5
     ? position.barStartTick
-    : position.barStartTick + position.barTicks
+    : Math.round(position.barStartTick + position.barTicks)
 }

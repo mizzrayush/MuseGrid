@@ -857,6 +857,20 @@ void JuceBridge::handleAudioCommand(const juce::Array<juce::var>& args, juce::We
 
     if (type == "noteOn")
     {
+        const double startTimeMs = obj->hasProperty("startTime") ? (double) obj->getProperty("startTime") : 0.0;
+        if (startTimeMs > 0.0)
+        {
+            const juce::int64 dueTicks = hrAnchorTicks + (juce::int64) ((startTimeMs - epochAnchorMs) * hrTicksPerMs);
+            if (dueTicks > juce::Time::getHighResolutionTicks() + (juce::int64) (hrTicksPerMs * 0.5))
+            {
+                const juce::ScopedLock sl(pendingNotesLock);
+                pendingNotes.push_back({ parsed, dueTicks });
+                if (!noteScheduler.isTimerRunning())
+                    noteScheduler.startTimer(1);
+                complete(true);
+                return;
+            }
+        }
         OfflineRenderer::dispatchNoteOn(audioEngine, parsed);
     }
     else if (type == "noteOff")
@@ -867,6 +881,7 @@ void JuceBridge::handleAudioCommand(const juce::Array<juce::var>& args, juce::We
     }
     else if (type == "allNotesOff")
     {
+        cancelPendingNotes();
         const juce::String trackId = obj->hasProperty("trackId") ? obj->getProperty("trackId").toString() : juce::String();
         if (trackId.isNotEmpty())
             audioEngine.killAllNotesOnTrack(trackId);
@@ -1186,6 +1201,39 @@ void JuceBridge::handleAudioCommand(const juce::Array<juce::var>& args, juce::We
     }
 
     complete(true);
+}
+
+void JuceBridge::dispatchDueNotes()
+{
+    std::vector<juce::var> due;
+    {
+        const juce::ScopedLock sl(pendingNotesLock);
+        const auto nowTicks = juce::Time::getHighResolutionTicks();
+        for (auto it = pendingNotes.begin(); it != pendingNotes.end();)
+        {
+            if (it->dueTicks <= nowTicks)
+            {
+                due.push_back(std::move(it->command));
+                it = pendingNotes.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+        if (pendingNotes.empty())
+            noteScheduler.stopTimer();
+    }
+
+    for (auto& command : due)
+        OfflineRenderer::dispatchNoteOn(audioEngine, command);
+}
+
+void JuceBridge::cancelPendingNotes()
+{
+    const juce::ScopedLock sl(pendingNotesLock);
+    pendingNotes.clear();
+    noteScheduler.stopTimer();
 }
 
 void JuceBridge::handleVst3Scan(const juce::Array<juce::var>& /*args*/, juce::WebBrowserComponent::NativeFunctionCompletion complete)

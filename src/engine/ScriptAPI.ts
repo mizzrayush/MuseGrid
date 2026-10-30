@@ -89,14 +89,17 @@ export const ScriptAPI = {
     if (ScriptAPI.registerPrompt) {
       return await ScriptAPI.registerPrompt(message, defaultValue);
     }
-    return window.prompt(message, defaultValue);
+    // The scripting UI owns the dialog; without it we never fall back to an OS prompt.
+    console.warn('[ScriptAPI] prompt() called before the in-app dialog was registered:', message);
+    return defaultValue;
   },
 
   promptSelect: async (message: string, options: string[], defaultValue: string = ''): Promise<string | null> => {
     if (ScriptAPI.registerPrompt) {
       return await ScriptAPI.registerPrompt(message, defaultValue, options);
     }
-    return window.prompt(`${message}\nOptions: ${options.join(', ')}`, defaultValue);
+    console.warn('[ScriptAPI] promptSelect() called before the in-app dialog was registered:', message);
+    return defaultValue;
   },
 
   promptForFiles: (options: { accept?: string; multiple?: boolean } = {}): Promise<File[]> => {

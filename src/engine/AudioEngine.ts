@@ -14,7 +14,8 @@ import {
   clampConductorBpm,
   getTempoAtTick,
   tempoMapIsActive,
-  getMeterPositionAtTick,
+  buildConductorBeats,
+  conductorSecondsAtTick,
 } from '../utils/conductor'
 import { attachDrumHitModulation, resolveDrumHitModulation, type DrumHitModulation, type DrumModulationRig } from '../utils/drumModulation'
 import {
@@ -5094,21 +5095,30 @@ class AudioEngine {
       }
     }, '64n')
 
+    // Beats are scheduled at their exact conductor position instead of being matched to
+    // the 16th grid, so odd beat units (e.g. 1/11) click in time rather than being skipped.
     Tone.Transport.scheduleRepeat((time) => {
       const state = useStore.getState()
       if (!state.metronomeEnabled) return
       const s = state.metronomeSettings
 
-      // The interval is a 16th so meter changes with an 8th/16th denominator
-      // still land on their beat; non-beat ticks are skipped.
+      const windowTicks = 48 // one sixteenth, matching the repeat interval below
       const tick = Math.round(Tone.Transport.getTicksAtTime(time))
-      const position = getMeterPositionAtTick(state.meterMap, state.timeSignature, tick)
-      if (Math.abs(tick - position.beatStartTick) > 1) return
-      const isDownbeat = position.beatIndex === 0
-      const note = isDownbeat ? s.downbeatPitch : s.upbeatPitch
-      const velBase = isDownbeat ? s.downbeatVel : s.upbeatVel
-      const velocity = Math.max(0, Math.min(1, state.metronomeVolume * velBase))
-      this.metronome.triggerAttackRelease(note, '32n', time, velocity)
+      const beats = buildConductorBeats(state.meterMap, state.timeSignature, tick, tick + windowTicks)
+      if (beats.length === 0) return
+
+      const anchorSeconds = conductorSecondsAtTick(state.tempoMap, state.bpm, tick)
+      beats.forEach(beat => {
+        const offset = conductorSecondsAtTick(state.tempoMap, state.bpm, beat.tick) - anchorSeconds
+        const velBase = beat.isDownbeat ? s.downbeatVel : s.upbeatVel
+        const velocity = Math.max(0, Math.min(1, state.metronomeVolume * velBase))
+        this.metronome.triggerAttackRelease(
+          beat.isDownbeat ? s.downbeatPitch : s.upbeatPitch,
+          '32n',
+          time + Math.max(0, offset),
+          velocity
+        )
+      })
     }, '16n')
   }
 
@@ -5970,9 +5980,17 @@ class AudioEngine {
     const usesWebAudioSample = usesWebAudioSamplePlayback(track, type, samplePitch)
 
     if ((window as any).__isJuceNative__ && (window as any).juceAudioBridge && !usesWebAudioSample) {
-      (window as any).juceAudioBridge.postCommand(
-        buildNativeNoteOnCommand({ trackId, type, pitch, duration, velocity, detune, pitchEnd, noteData, track })
-      )
+      const command = buildNativeNoteOnCommand({ trackId, type, pitch, duration, velocity, detune, pitchEnd, noteData, track })
+      if (state.studioSettings.nativeNoteScheduling !== false) {
+        const leadMs = Math.max(0, state.studioSettings.nativeScheduleLeadMs ?? 20)
+        // `time` is on the audio clock; map it onto the wall clock both processes share, and
+        // give time-less triggers the configured lead so IPC variance cannot shift them.
+        const dueMs = time !== undefined
+          ? Date.now() + (time - Tone.now()) * 1000
+          : Date.now() + leadMs
+        command.startTime = Math.max(Date.now(), dueMs)
+      }
+      (window as any).juceAudioBridge.postCommand(command)
       return
     }
 

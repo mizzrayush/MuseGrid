@@ -115,9 +115,13 @@ function ToastContainer() {
   )
 }
 
+const TIME_SIGNATURE_PRESETS = ['4/4', '3/4', '2/4', '5/4', '6/4', '7/4', '6/8', '7/8', '12/8']
+
 function App() {
   const isPlaying = useStore(state => state.isPlaying)
   const bpm = useStore(state => state.bpm)
+  const timeSignature = useStore(state => state.timeSignature)
+  const setTimeSignature = useStore(state => state.setTimeSignature)
   const isInit = useRef(false)
 
   useEffect(() => {
@@ -150,6 +154,8 @@ function App() {
   const setIsScorePreviewVisible = useStore(s => s.setIsScorePreviewVisible)
   const [showNewProjectConfirm, setShowNewProjectConfirm] = useState(false)
   const [newProjectClosing, setNewProjectClosing] = useState(false)
+  const [showClearConfirm, setShowClearConfirm] = useState(false)
+  const [clearConfirmClosing, setClearConfirmClosing] = useState(false)
   const [showSaveCloseConfirm, setShowSaveCloseConfirm] = useState(false)
   const [saveCloseClosing, setSaveCloseClosing] = useState(false)
   const [isSavingAndClosing, setIsSavingAndClosing] = useState(false)
@@ -183,6 +189,7 @@ function App() {
 
   const projectName = useStore(s => s.projectName)
   const isDirty = useStore(s => s.isDirty)
+  const dirtyTabCount = openTabs.filter(t => t.id === activeTabId ? isDirty : t.isDirty).length
   const projectFilePath = useStore(s => s.projectFilePath)
   const resetZoom = useStore(s => s.resetZoom)
   const projectExportData = useStore(s => s.projectExportData)
@@ -340,8 +347,9 @@ function App() {
   const requestAppClose = () => {
     const state = useStore.getState()
     const hasNotes = state.notes.length > 0
-    const isDirty = state.isDirty
-    if (isDirty || (hasNotes && !state.projectFilePath)) {
+    // Background tabs can hold unsaved edits too; quitting must not skip them.
+    const hasDirtyTab = state.isDirty || state.openTabs.some(t => t.id !== state.activeTabId && t.isDirty)
+    if (hasDirtyTab || (hasNotes && !state.projectFilePath)) {
       setShowSaveCloseConfirm(true)
     } else {
       forceQuitApp()
@@ -637,6 +645,16 @@ function App() {
     useStore.getState().setActiveTrackId('track_synth')
   }
 
+  const confirmClearProject = () => {
+    setClearConfirmClosing(true)
+    setTimeout(() => {
+      setShowClearConfirm(false)
+      setClearConfirmClosing(false)
+      useStore.getState().clearProject()
+      useStore.getState().showToast('Project cleared', 'success')
+    }, 180)
+  }
+
   const confirmNewProject = () => {
     setNewProjectClosing(true)
     setTimeout(() => {
@@ -858,7 +876,7 @@ function App() {
 
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       const state = useStore.getState()
-      if (state.isDirty || (state.notes.length > 0 && !state.projectFilePath)) {
+      if (state.isDirty || state.openTabs.some(t => t.id !== state.activeTabId && t.isDirty) || (state.notes.length > 0 && !state.projectFilePath)) {
         e.preventDefault()
         e.returnValue = ''
         requestAppClose()
@@ -1015,8 +1033,20 @@ function App() {
             >+</button>
           </div>
 
-          {/* Time Signature */}
-          <span style={{ fontSize: '10px', color: '#687287', fontWeight: 800, background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.06)', padding: '3px 6px', borderRadius: '4px', letterSpacing: '0.04em' }}>4/4</span>
+          {/* Time Signature: shows the real signature; custom values are edited in the left pane */}
+          <select
+            value={timeSignature}
+            onChange={e => setTimeSignature(e.target.value)}
+            title="Project time signature. Any value is available under Custom… in the left pane."
+            style={{ fontSize: '10px', color: '#9aa3b2', fontWeight: 800, background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.06)', padding: '3px 4px', borderRadius: '4px', letterSpacing: '0.04em', outline: 'none', cursor: 'pointer' }}
+          >
+            {!TIME_SIGNATURE_PRESETS.includes(timeSignature) && (
+              <option value={timeSignature} style={{ background: '#12141c', color: 'white' }}>{timeSignature} (Custom)</option>
+            )}
+            {TIME_SIGNATURE_PRESETS.map(sig => (
+              <option key={sig} value={sig} style={{ background: '#12141c', color: 'white' }}>{sig}</option>
+            ))}
+          </select>
 
           <div style={{ width: '1px', height: '16px', background: 'rgba(255,255,255,0.1)', margin: '0 2px' }} />
 
@@ -1106,6 +1136,16 @@ function App() {
 
         {/* Right Workspace Controls */}
         <div style={{ display: 'flex', gap: '7px', marginLeft: 'auto', alignItems: 'center', flexShrink: 0 }}>
+          {/* Clear */}
+          <button
+            onClick={() => setShowClearConfirm(true)}
+            title="Clear Project"
+            style={{ display: 'flex', alignItems: 'center', gap: '5px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#d0d5e2', borderRadius: '6px', padding: '5px 10px', cursor: 'pointer', fontSize: '11px', fontWeight: 600, transition: 'all 0.12s' }}
+            onMouseEnter={e => { e.currentTarget.style.color = '#ff8a8a'; e.currentTarget.style.borderColor = 'rgba(255,80,80,0.35)' }}
+            onMouseLeave={e => { e.currentTarget.style.color = '#d0d5e2'; e.currentTarget.style.borderColor = 'rgba(255,255,255,0.1)' }}
+          >
+            <IconTrash size={13} /> Clear
+          </button>
           {/* Save */}
           <div ref={saveContainerRef} style={{ position: 'relative', display: 'flex' }}>
             <div style={{ display: 'flex', alignItems: 'stretch', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px' }}>
@@ -1958,6 +1998,47 @@ function App() {
         </div>
       )}
 
+      {showClearConfirm && (
+        <div className={clearConfirmClosing ? "animate-modal-bg-exit" : "animate-modal-bg"} style={{ position: 'fixed', inset: 0, background: 'rgba(8, 9, 14, 0.78)', backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)', zIndex: 100000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+          <div className={clearConfirmClosing ? "animate-modal-card-exit" : "animate-modal-card"} style={{ width: '100%', maxWidth: '400px', display: 'flex', flexDirection: 'column', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '24px', boxShadow: '0 30px 70px rgba(0,0,0,0.85)', overflow: 'hidden', background: '#12131a' }}>
+            <div style={{ padding: '24px', textAlign: 'center' }}>
+              <div style={{ width: '56px', height: '56px', borderRadius: '50%', background: 'rgba(255,80,80,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px auto', border: '1px solid rgba(255,80,80,0.3)' }}>
+                <IconTrash size={24} style={{ color: '#ff6b6b' }} />
+              </div>
+              <h3 style={{ margin: '0 0 8px 0', fontSize: '18px', color: 'white', fontWeight: 800, letterSpacing: '-0.5px' }}>Clear This Project?</h3>
+              <p style={{ margin: 0, fontSize: '13px', color: '#888', lineHeight: 1.5, fontWeight: 500 }}>
+                Would you like to clear "{projectName || 'Untitled Project'}"? Every note, track and automation setting goes back to a blank project.
+                {isDirty && <><br /><span style={{ color: '#ff922b' }}>Unsaved changes will be lost.</span></>}
+              </p>
+            </div>
+            <div style={{ padding: '16px 24px', background: 'rgba(0,0,0,0.2)', borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', gap: '12px' }}>
+              <button
+                onClick={() => {
+                  setClearConfirmClosing(true)
+                  setTimeout(() => {
+                    setShowClearConfirm(false)
+                    setClearConfirmClosing(false)
+                  }, 180)
+                }}
+                style={{ flex: 1, padding: '10px 14px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.08)', background: 'transparent', color: '#aaa', fontSize: '13px', fontWeight: 600, cursor: 'pointer', transition: 'all 0.15s' }}
+                onMouseEnter={e => e.currentTarget.style.color = '#fff'}
+                onMouseLeave={e => e.currentTarget.style.color = '#aaa'}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmClearProject}
+                style={{ flex: 1, border: 'none', background: '#c92a4e', color: 'white', borderRadius: '10px', padding: '10px 18px', fontSize: '13px', fontWeight: 700, cursor: 'pointer', transition: 'background 0.15s ease' }}
+                onMouseEnter={e => { e.currentTarget.style.background = '#d93a5e' }}
+                onMouseLeave={e => { e.currentTarget.style.background = '#c92a4e' }}
+              >
+                Yes, Clear Project
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showSaveCloseConfirm && (
         <div
           className={saveCloseClosing ? "animate-modal-bg-exit" : "animate-modal-bg"}
@@ -2006,7 +2087,11 @@ function App() {
                 Save Changes Before Closing?
               </h3>
               <p style={{ margin: 0, fontSize: '13px', color: '#999', lineHeight: 1.5, fontWeight: 500 }}>
-                You have unsaved changes in <strong style={{ color: '#fff' }}>"{projectName || 'Untitled Project'}"</strong>. Do you want to save them before quitting?
+                {dirtyTabCount > 1 ? (
+                  <>You have unsaved changes in <strong style={{ color: '#fff' }}>{dirtyTabCount} project tabs</strong>. Do you want to save all of them before quitting?</>
+                ) : (
+                  <>You have unsaved changes in <strong style={{ color: '#fff' }}>"{projectName || 'Untitled Project'}"</strong>. Do you want to save them before quitting?</>
+                )}
               </p>
             </div>
 
@@ -2076,17 +2161,26 @@ function App() {
                 onClick={async () => {
                   setIsSavingAndClosing(true)
                   try {
-                    const saved = await handleSaveProject()
-                    if (saved) {
-                      setSaveCloseClosing(true)
-                      setTimeout(() => {
-                        setShowSaveCloseConfirm(false)
-                        setSaveCloseClosing(false)
-                        forceQuitApp()
-                      }, 120)
-                    } else {
-                      setIsSavingAndClosing(false)
+                    const current = useStore.getState()
+                    const dirtyIds = current.openTabs
+                      .filter(t => t.isDirty || (t.id === current.activeTabId && current.isDirty))
+                      .map(t => t.id)
+                    // Save every edited tab, not just the visible one; a cancelled
+                    // save dialog aborts the quit so nothing is lost silently.
+                    for (const id of dirtyIds) {
+                      if (useStore.getState().activeTabId !== id) useStore.getState().switchTab(id)
+                      const saved = await handleSaveProject()
+                      if (!saved) {
+                        setIsSavingAndClosing(false)
+                        return
+                      }
                     }
+                    setSaveCloseClosing(true)
+                    setTimeout(() => {
+                      setShowSaveCloseConfirm(false)
+                      setSaveCloseClosing(false)
+                      forceQuitApp()
+                    }, 120)
                   } catch (e) {
                     setIsSavingAndClosing(false)
                   }
@@ -2114,7 +2208,7 @@ function App() {
                   e.currentTarget.style.color = '#2ecc71'
                 }}
               >
-                {isSavingAndClosing ? 'Saving...' : 'Save & Close'}
+                {isSavingAndClosing ? 'Saving...' : dirtyTabCount > 1 ? 'Save All & Close' : 'Save & Close'}
               </button>
             </div>
           </div>

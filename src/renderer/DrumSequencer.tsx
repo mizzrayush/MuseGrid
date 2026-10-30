@@ -1,9 +1,8 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, type PointerEvent as ReactPointerEvent } from 'react'
 import { useStore, DEFAULT_DRUM_ROWS } from '../engine/store'
 import { audioEngine } from '../engine/AudioEngine'
 import { IconPin, IconSliders, IconTrash } from '../ui/Icons'
 import { useContextMenuDismissal, useContextMenuPosition } from '../ui/useContextMenuDismissal'
-import { sliderProgress } from '../ui/AppSlider'
 
 // We'll use the store's snapResolution as the dynamic STEP_TICKS
 
@@ -17,6 +16,19 @@ function layeredBackground(colors: string[], fallback: string): string {
   const slice = 100 / colors.length
   return `linear-gradient(90deg, ${colors.map((color, index) => `${color} ${index * slice}% ${(index + 1) * slice}%`).join(', ')})`
 }
+
+type StepDrag = {
+  pitch: number
+  step: number
+  noteId: string | null
+  startY: number
+  startVelocity: number
+  lastVelocity: number
+  moved: boolean
+  pointerId: number
+}
+
+const clampVelocity = (value: number) => Math.max(1, Math.min(127, Math.round(value)))
 
 export default function DrumSequencer() {
   const allNotes = useStore(s => s.notes)
@@ -56,6 +68,8 @@ export default function DrumSequencer() {
   const contextMenuRef = useRef<HTMLDivElement | null>(null)
   useContextMenuDismissal(contextMenu !== null, setContextMenu, contextMenuRef)
   const contextMenuPosition = useContextMenuPosition(contextMenu !== null, contextMenu?.x ?? 0, contextMenu?.y ?? 0, contextMenuRef)
+  const stepDragRef = useRef<StepDrag | null>(null)
+  const [stepDragDisplay, setStepDragDisplay] = useState<{ pitch: number; step: number; velocity: number } | null>(null)
 
   // 16 rows are the starting template, not a limit: channels grow as far as MIDI pitches allow.
   const addChannel = () => {
@@ -110,9 +124,52 @@ export default function DrumSequencer() {
     }
   }
 
-  const changeVelocity = (pitch: number, step: number, vel: number) => {
+  const beginStepDrag = (e: ReactPointerEvent<HTMLButtonElement>, pitch: number, step: number) => {
+    if (isReadOnly || e.button !== 0) return
     const note = getEditNote(pitch, step)
-    if (note) updateNote(note.id, { velocity: Math.max(1, Math.min(127, vel)) })
+    stepDragRef.current = {
+      pitch,
+      step,
+      noteId: note?.id ?? null,
+      startY: e.clientY,
+      startVelocity: note?.velocity ?? 100,
+      lastVelocity: note?.velocity ?? 100,
+      moved: false,
+      pointerId: e.pointerId
+    }
+    e.currentTarget.setPointerCapture(e.pointerId)
+    e.preventDefault()
+  }
+
+  const moveStepDrag = (e: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = stepDragRef.current
+    if (!drag || drag.pointerId !== e.pointerId || !drag.noteId) return
+    const delta = e.clientY - drag.startY
+    if (!drag.moved && Math.abs(delta) < 3) return
+    if (!drag.moved) {
+      drag.moved = true
+      commitHistory()
+    }
+    const velocity = clampVelocity(drag.startVelocity - delta)
+    if (velocity === drag.lastVelocity) return
+    drag.lastVelocity = velocity
+    updateNote(drag.noteId, { velocity })
+    setStepDragDisplay({ pitch: drag.pitch, step: drag.step, velocity })
+  }
+
+  const endStepDrag = (e: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = stepDragRef.current
+    if (!drag || drag.pointerId !== e.pointerId) return
+    stepDragRef.current = null
+    setStepDragDisplay(null)
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
+    if (!drag.moved) toggleStep(drag.pitch, drag.step)
+  }
+
+  const cancelStepDrag = (e: ReactPointerEvent<HTMLButtonElement>) => {
+    if (stepDragRef.current?.pointerId !== e.pointerId) return
+    stepDragRef.current = null
+    setStepDragDisplay(null)
   }
 
   const clearActiveTrack = () => {
@@ -254,23 +311,32 @@ export default function DrumSequencer() {
                   const cellNotes = getCellNotes(row.pitch, step)
                   const editNote = getEditNote(row.pitch, step)
                   const isCurrent = currentStep === step
-                  const vel = editNote?.velocity ?? 100
+                  const velocity = editNote?.velocity ?? 100
                   const colors = cellNotes.map(note => tracks.find(track => track.id === note.trackId)?.color ?? row.color)
                   const active = cellNotes.length > 0
+                  const dragValue = stepDragDisplay && stepDragDisplay.pitch === row.pitch && stepDragDisplay.step === step
+                    ? stepDragDisplay.velocity
+                    : null
                   return (
-                    <div key={step} style={{ flex: 1, minWidth: '28px', display: 'flex', flexDirection: 'column', gap: '2px', background: sectionBg(step), borderRadius: '3px', padding: '2px' }}>
+                    <div key={step} style={{ flex: 1, minWidth: '28px', background: sectionBg(step), borderRadius: '3px', padding: '2px' }}>
                       <button
-                        onClick={() => toggleStep(row.pitch, step)}
+                        onPointerDown={e => beginStepDrag(e, row.pitch, step)}
+                        onPointerMove={moveStepDrag}
+                        onPointerUp={endStepDrag}
+                        onPointerCancel={cancelStepDrag}
+                        title={editNote ? 'Click to remove. Drag up/down to set velocity.' : 'Click to add a step'}
                         style={{
                           width: '100%', height: '34px', borderRadius: '4px',
                           border: `1px solid ${isCurrent ? '#4dabf7' : editNote ? editTrack?.color ?? row.color : step % 4 === 0 ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.04)'}`,
                           background: active ? layeredBackground(colors, row.color) : isCurrent ? 'rgba(77,171,247,0.12)' : step % 4 === 0 ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.01)',
-                          cursor: isReadOnly ? 'default' : 'pointer',
+                          cursor: isReadOnly ? 'default' : editNote ? 'ns-resize' : 'pointer',
                           boxShadow: editNote ? `0 0 10px ${(editTrack?.color ?? row.color)}55` : 'none',
                           opacity: active && !editNote ? 0.55 : 1,
-                          transition: 'all 0.07s',
+                          transition: 'background 0.07s, border-color 0.07s',
                           position: 'relative',
-                          overflow: 'hidden'
+                          overflow: 'hidden',
+                          touchAction: editNote ? 'none' : undefined,
+                          userSelect: 'none'
                         }}
                         onContextMenu={e => {
                           e.preventDefault()
@@ -295,7 +361,32 @@ export default function DrumSequencer() {
                         }}
                       >
                         {editNote && (
-                          <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: `${(vel / 127) * 100}%`, background: 'rgba(0,0,0,0.25)', pointerEvents: 'none' }} />
+                          <div style={{
+                            position: 'absolute',
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            height: `${(velocity / 127) * 100}%`,
+                            background: 'rgba(255,255,255,0.2)',
+                            borderTop: '1px solid rgba(255,255,255,0.72)',
+                            pointerEvents: 'none'
+                          }} />
+                        )}
+                        {dragValue !== null && (
+                          <span style={{
+                            position: 'absolute',
+                            inset: 0,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: '9px',
+                            fontWeight: 800,
+                            color: '#fff',
+                            textShadow: '0 1px 2px rgba(0,0,0,0.8)',
+                            pointerEvents: 'none'
+                          }}>
+                            {dragValue}
+                          </span>
                         )}
                         {editNote && editNote.pitchOffset !== undefined && editNote.pitchOffset !== 0 && (
                           <span style={{ position: 'absolute', top: '2px', right: '3px', fontSize: '8px', fontWeight: 800, color: '#ffcc00', pointerEvents: 'none', lineHeight: 1 }}>
@@ -303,18 +394,6 @@ export default function DrumSequencer() {
                           </span>
                         )}
                       </button>
-                      {editNote && !isReadOnly && (
-                        <input
-                          className="modern-slider compact-slider"
-                          type="range"
-                          min={1}
-                          max={127}
-                          value={vel}
-                          onChange={e => changeVelocity(row.pitch, step, +e.target.value)}
-                          onClick={e => e.stopPropagation()}
-                          style={{ '--slider-color': editTrack?.color ?? row.color, '--slider-progress': sliderProgress(vel, 1, 127), accentColor: editTrack?.color ?? row.color } as React.CSSProperties}
-                        />
-                      )}
                     </div>
                   )
                 })}
@@ -368,8 +447,9 @@ export default function DrumSequencer() {
         </div>
       )}
 
-      <div style={{ padding: '8px 20px', borderTop: '1px solid rgba(255,255,255,0.05)', fontSize: '11px', color: '#444', flexShrink: 0 }}>
-        Step {currentStep + 1} / {drumSteps} - {editTrack && <span style={{ color: editTrack.color }}>{editTrack.name}</span>}
+      <div style={{ padding: '8px 20px', borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', fontSize: '11px', color: '#444', flexShrink: 0 }}>
+        <span>Step {currentStep + 1} / {drumSteps} - {editTrack && <span style={{ color: editTrack.color }}>{editTrack.name}</span>}</span>
+        <span style={{ color: '#333' }}>Drag a lit step up or down to set velocity</span>
       </div>
     </div>
   )

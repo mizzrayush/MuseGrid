@@ -21,7 +21,7 @@ Most tools try to be the whole studio. MuseGrid deliberately stops at the note, 
 
 ### One workspace, two grids
 
-The piano roll and the drum grid can share the screen, or each can take it over. Switch between **Split**, **Synth only**, **Drum only**, and **Active pane** layouts. Drum tracks swap the piano roll for a step sequencer with per-step velocity and per-channel controls, while synth tracks keep the full piano roll.
+The piano roll and the drum grid can share the screen, or each can take it over. Switch between **Split**, **Synth only**, **Drum only**, and **Active pane** layouts. Drum tracks swap the piano roll for a step sequencer with per-step velocity and per-channel controls, while synth tracks keep the full piano roll. Each step pad shows its velocity as a fill level; drag a lit pad up or down to change it.
 
 ![Drum step sequencer with 17 channels](docs/screenshots/step-sequencer.png)
 

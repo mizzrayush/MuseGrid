@@ -380,7 +380,7 @@ function drumNeedsOutput(opts?: DrumOutputOptions): boolean {
 }
 
 class DrumMachine {
-  kick = new Tone.MembraneSynth()
+  kick = new Tone.MembraneSynth({ octaves: 7 })
   snare = new Tone.NoiseSynth({
     noise: { type: 'white' },
     envelope: { attack: 0.005, decay: 0.1, sustain: 0 }

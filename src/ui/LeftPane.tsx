@@ -3046,8 +3046,9 @@ export default function LeftPane() {
 
   const exportTrack = (trackId: string, format: 'wav' | 'mp3' | 'midi') => {
     const state = useStore.getState()
-    // Calculate absolute end across all tracks
-    const lastNoteTick = state.notes.length > 0 ? Math.max(...state.notes.map(n => n.time + n.duration)) : 768
+    const trackNotes = state.notes.filter(n => n.trackId === trackId)
+    const startTick = trackNotes.length > 0 ? Math.min(...trackNotes.map(n => n.time)) : 0
+    const endTick = trackNotes.length > 0 ? Math.max(...trackNotes.map(n => n.time + n.duration)) : 768
 
     setProjectExportData({
       type: format,

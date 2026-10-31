@@ -30,7 +30,7 @@ import {
   type GlideChainOptions
 } from '../utils/midiEditing'
 import { getEdoStepInfo } from '../utils/edoNomenclature'
-import { conductorSecondsAtTick, getBarNumberAtTick, getNextBarTick, isBarStartTick } from '../utils/conductor'
+import { conductorSecondsAtTick, getBarNumberAtTick, getNextBarTick, isBarStartTick, resolveKeyAtTick } from '../utils/conductor'
 
 const TRACK_COLORS = ['#4dabf7', '#ff9900', '#69db7c', '#da77f2', '#ff6b6b', '#00e6ff', '#ffd43b']
 const newId = () => Math.random().toString(36).substr(2, 9)
@@ -3715,14 +3715,15 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         }
 
         let pitch = getYPitch(gridY)
-        const { pitchDropSnap, scaleLock: sl } = useStore.getState()
+        const { pitchDropSnap, scaleLock: sl, keyMap } = useStore.getState()
+        const insertKey = resolveKeyAtTick(keyMap, sl, snappedTime)
         
         if (isDrum || pitchDropSnap) {
           pitch = getPitchFromIndex(Math.floor(gridY / gridSizeY))
         }
 
         if (!isDrum && !isMicroEdo && sl.enabled && pitchDropSnap) {
-          pitch = snapToScale(pitch, sl.root, sl.mode, sl.customIntervals)
+          pitch = snapToScale(pitch, insertKey.root, insertKey.mode, insertKey.customIntervals)
         }
 
         if (pitch >= lowestPitch - 0.01 && pitch <= highestPitch + 0.01) {
@@ -3731,9 +3732,9 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
 
           if (!isDrum && currentStamp) {
             if (currentStamp === 'triad') {
-              pitchesToInsert = getDiatonicChord(pitch, sl.root, sl.mode, 'Triad', sl.customIntervals)
+              pitchesToInsert = getDiatonicChord(pitch, insertKey.root, insertKey.mode, 'Triad', insertKey.customIntervals)
             } else if (currentStamp === 'seventh') {
-              pitchesToInsert = getDiatonicChord(pitch, sl.root, sl.mode, 'Seventh', sl.customIntervals)
+              pitchesToInsert = getDiatonicChord(pitch, insertKey.root, insertKey.mode, 'Seventh', insertKey.customIntervals)
             } else {
               const stampDef = CHORD_STAMPS.find(s => s.id === currentStamp)
               if (stampDef) {

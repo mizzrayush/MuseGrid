@@ -5,24 +5,29 @@ import {
   getBarStartTick,
   getMeterPositionAtTick,
   getTempoAtTick,
+  resolveKeyAtTick,
   MAX_CONDUCTOR_BPM,
   MAX_METER_BEATS,
   MAX_METER_DENOMINATOR,
   type TempoCurve,
   type TempoPoint,
 } from '../utils/conductor'
+import { NOTE_NAMES_FLAT, NOTE_NAMES_SHARP, SCALE_MODES } from '../utils/musicTheory'
 
 const HEADER_HEIGHT = 24
 const TOOLBAR_HEIGHT = 30
 const TEMPO_HEIGHT = 68
 const METER_HEIGHT = 24
-const BODY_HEIGHT = TEMPO_HEIGHT + METER_HEIGHT + 10
+const KEY_HEIGHT = 22
 const TEMPO_TOP = 8
 const TEMPO_BOTTOM = TEMPO_HEIGHT
 const METER_TOP = TEMPO_HEIGHT + 6
+const KEY_TOP = METER_TOP + METER_HEIGHT + 2
+const BODY_HEIGHT = KEY_TOP + KEY_HEIGHT + 4
 
 const ACCENT = '#4dabf7'
 const METER_ACCENT = '#ffa94d'
+const KEY_ACCENT = '#69db7c'
 const POINT_SIZE = 7
 
 interface ConductorLaneProps {
@@ -32,7 +37,7 @@ interface ConductorLaneProps {
   sidebarWidth: number
 }
 
-type Selection = { kind: 'tempo' | 'meter'; id: string } | null
+type Selection = { kind: 'tempo' | 'meter' | 'key'; id: string } | null
 
 const makeId = () => `cond_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`
 
@@ -42,6 +47,9 @@ const tempoRange = (map: TempoPoint[], baseBpm: number) => {
   const rawHi = Math.min(MAX_CONDUCTOR_BPM, Math.max(...values) + 15)
   return { lo, hi: Math.max(lo + 30, rawHi) }
 }
+
+const keyLabel = (root: number, mode: string, accidental: 'sharp' | 'flat') =>
+  `${(accidental === 'flat' ? NOTE_NAMES_FLAT : NOTE_NAMES_SHARP)[root]} ${mode}`
 
 const CURVE_OPTIONS: Array<{ value: TempoCurve; label: string }> = [
   { value: 'step', label: 'Step' },
@@ -86,6 +94,8 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
   const setShowConductor = useStore(state => state.setShowConductor)
   const tempoMap = useStore(state => state.tempoMap)
   const meterMap = useStore(state => state.meterMap)
+  const keyMap = useStore(state => state.keyMap)
+  const scaleLock = useStore(state => state.scaleLock)
   const timeSignature = useStore(state => state.timeSignature)
   const baseBpm = useStore(state => state.bpm)
 
@@ -105,6 +115,9 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
     : undefined
   const selectedMeter = selection?.kind === 'meter'
     ? meterMap.find(point => point.id === selection.id)
+    : undefined
+  const selectedKey = selection?.kind === 'key'
+    ? keyMap.find(point => point.id === selection.id)
     : undefined
 
   // Draw loop: it reads live store state so edits, playback, and panning stay in sync.
@@ -137,6 +150,8 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
       ctx.fillRect(0, 0, sidebarWidth, height)
       ctx.fillStyle = 'rgba(255,255,255,0.02)'
       ctx.fillRect(sidebarWidth, METER_TOP, width - sidebarWidth, METER_HEIGHT)
+      ctx.fillStyle = 'rgba(105,219,124,0.035)'
+      ctx.fillRect(sidebarWidth, KEY_TOP, width - sidebarWidth, KEY_HEIGHT)
 
       // Bar lines follow the meter map so the conductor and the grid agree.
       const startTick = Math.max(0, toTickX(sidebarWidth))
@@ -270,6 +285,38 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
         ctx.fillText(`${state.timeSignature} · click the strip to add a meter change`, sidebarWidth + 6, METER_TOP + METER_HEIGHT / 2)
       }
 
+      // Key signature markers. Analysis and snap read the latest marker at a tick.
+      state.keyMap.forEach(point => {
+        const x = toScreenX(point.tick)
+        if (x < sidebarWidth - 8 || x > width + 8) return
+        const selected = selection?.kind === 'key' && selection.id === point.id
+        ctx.strokeStyle = KEY_ACCENT
+        ctx.lineWidth = selected ? 1.6 : 1
+        ctx.setLineDash([2, 3])
+        ctx.beginPath()
+        ctx.moveTo(x, 0)
+        ctx.lineTo(x, KEY_TOP + KEY_HEIGHT)
+        ctx.stroke()
+        ctx.setLineDash([])
+        ctx.fillStyle = selected ? '#ffffff' : KEY_ACCENT
+        ctx.font = 'bold 9px "JetBrains Mono", monospace'
+        ctx.textAlign = 'left'
+        ctx.textBaseline = 'middle'
+        ctx.fillText(keyLabel(point.root, point.mode, point.accidental), x + 4, KEY_TOP + KEY_HEIGHT / 2)
+      })
+
+      if (state.keyMap.length === 0) {
+        ctx.fillStyle = '#6d7382'
+        ctx.font = '9px Inter, sans-serif'
+        ctx.textAlign = 'left'
+        ctx.textBaseline = 'middle'
+        ctx.fillText(
+          `${keyLabel(state.scaleLock.root, state.scaleLock.mode, state.scaleLock.accidental)} · click the strip to add a key change`,
+          sidebarWidth + 6,
+          KEY_TOP + KEY_HEIGHT / 2
+        )
+      }
+
       // Sidebar captions.
       ctx.fillStyle = '#8a8a95'
       ctx.font = 'bold 9px Inter, sans-serif'
@@ -277,6 +324,7 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
       ctx.textBaseline = 'top'
       ctx.fillText('TEMPO', 8, 8)
       ctx.fillText('METER', 8, METER_TOP + 6)
+      ctx.fillText('KEY', 8, KEY_TOP + 6)
 
       // Playhead.
       const playheadX = toScreenX(state.playheadPosition)
@@ -321,6 +369,22 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
     setSelection({ kind: 'meter', id })
   }
 
+  const addKeyAtPlayhead = () => {
+    const state = useStore.getState()
+    const tick = getBarStartTick(state.meterMap, state.timeSignature, state.playheadPosition)
+    const current = resolveKeyAtTick(state.keyMap, state.scaleLock, tick)
+    const id = makeId()
+    state.addKeyPoint({
+      id,
+      tick,
+      root: current.root,
+      mode: current.mode,
+      accidental: current.accidental,
+      customIntervals: current.customIntervals,
+    })
+    setSelection({ kind: 'key', id })
+  }
+
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (e.button !== 0) return
     const state = useStore.getState()
@@ -332,6 +396,27 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
     const { panX, zoom } = getView(width)
     const toScreenX = (tick: number) => panX + sidebarWidth + tickToX(tick) * zoom
     const toTick = (screenX: number) => Math.max(0, xToTick((screenX - sidebarWidth - panX) / zoom))
+
+    if (y >= KEY_TOP) {
+      const hit = state.keyMap.find(point => Math.abs(toScreenX(point.tick) - x) <= 6)
+      if (hit) {
+        setSelection({ kind: 'key', id: hit.id })
+        return
+      }
+      const tick = getBarStartTick(state.meterMap, state.timeSignature, toTick(x))
+      const current = resolveKeyAtTick(state.keyMap, state.scaleLock, tick)
+      const id = makeId()
+      state.addKeyPoint({
+        id,
+        tick,
+        root: current.root,
+        mode: current.mode,
+        accidental: current.accidental,
+        customIntervals: current.customIntervals,
+      })
+      setSelection({ kind: 'key', id })
+      return
+    }
 
     if (y >= METER_TOP) {
       const hit = state.meterMap.find(point => Math.abs(toScreenX(point.tick) - x) <= 6)
@@ -413,6 +498,9 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
   const meterSummary = meterMap.length > 0
     ? meterMap.map(point => `${point.numerator}/${point.denominator}`).join(' · ')
     : timeSignature
+  const keySummary = keyMap.length > 0
+    ? keyMap.map(point => keyLabel(point.root, point.mode, point.accidental)).join(' · ')
+    : keyLabel(scaleLock.root, scaleLock.mode, scaleLock.accidental)
 
   return (
     <div style={{
@@ -433,7 +521,7 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
           userSelect: 'none',
         }}
         onClick={() => setShowConductor(!showConductor)}
-        title={showConductor ? 'Collapse conductor lane' : 'Show tempo and meter lanes'}
+        title={showConductor ? 'Collapse conductor lane' : 'Show tempo, meter, and key lanes'}
       >
         <span style={{
           fontSize: '9px',
@@ -449,6 +537,9 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
         </span>
         <span style={{ fontSize: '10px', fontFamily: "'JetBrains Mono', monospace", color: METER_ACCENT }}>
           {meterSummary}
+        </span>
+        <span style={{ fontSize: '10px', fontFamily: "'JetBrains Mono', monospace", color: KEY_ACCENT }}>
+          {keySummary}
         </span>
         <span style={{ marginLeft: 'auto', fontSize: '10px', color: '#6d7382' }}>
           {showConductor ? '▾' : '▸'}
@@ -472,6 +563,9 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
             </button>
             <button style={buttonStyle()} onClick={addMeterAtPlayhead} title="Add a meter change at the playhead's bar">
               + Meter
+            </button>
+            <button style={buttonStyle()} onClick={addKeyAtPlayhead} title="Add a key change at the playhead's bar">
+              + Key
             </button>
 
             {selectedTempo && (
@@ -555,11 +649,60 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
               </div>
             )}
 
+            {selectedKey && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', borderLeft: '1px solid rgba(255,255,255,0.08)', paddingLeft: '6px' }}>
+                <select
+                  value={selectedKey.root}
+                  onChange={e => useStore.getState().updateKeyPoint(selectedKey.id, { root: Number(e.target.value) })}
+                  style={{ ...inputStyle, width: '56px' }}
+                  title="Key root"
+                >
+                  {(selectedKey.accidental === 'flat' ? NOTE_NAMES_FLAT : NOTE_NAMES_SHARP).map((name, index) => (
+                    <option key={index} value={index}>{name}</option>
+                  ))}
+                </select>
+                <select
+                  value={selectedKey.mode}
+                  onChange={e => useStore.getState().updateKeyPoint(selectedKey.id, { mode: e.target.value })}
+                  style={{ ...inputStyle, width: '118px' }}
+                  title="Scale mode for this segment"
+                >
+                  {SCALE_MODES.map(mode => (
+                    <option key={mode} value={mode}>{mode}</option>
+                  ))}
+                </select>
+                <button
+                  style={buttonStyle(selectedKey.accidental === 'sharp')}
+                  onClick={() => useStore.getState().updateKeyPoint(selectedKey.id, { accidental: 'sharp' })}
+                  title="Spell note names with sharps"
+                >
+                  ♯
+                </button>
+                <button
+                  style={buttonStyle(selectedKey.accidental === 'flat')}
+                  onClick={() => useStore.getState().updateKeyPoint(selectedKey.id, { accidental: 'flat' })}
+                  title="Spell note names with flats"
+                >
+                  ♭
+                </button>
+                <button
+                  style={buttonStyle()}
+                  onClick={() => {
+                    useStore.getState().removeKeyPoint(selectedKey.id)
+                    setSelection(null)
+                  }}
+                  title="Delete this key change"
+                >
+                  Delete
+                </button>
+              </div>
+            )}
+
             <span style={{ flex: 1 }} />
             <button
               style={confirmClear ? { ...buttonStyle(true), color: '#ff6b8b', borderColor: 'rgba(255,51,102,0.45)', background: 'rgba(255,51,102,0.16)' } : buttonStyle()}
               onClick={() => {
-                if (tempoMap.length === 0 && meterMap.length === 0) return
+                if (tempoMap.length === 0 && meterMap.length === 0 && keyMap.length === 0) return
                 if (!confirmClear) {
                   setConfirmClear(true)
                   return
@@ -585,7 +728,7 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
             onPointerUp={handlePointerUp}
             onPointerLeave={handlePointerUp}
             onContextMenu={e => e.preventDefault()}
-            title="Click to add, drag to shape. Tempo points snap to the grid when snapping is on."
+            title="Click to add, drag a tempo point to shape the curve. Key and meter points snap to bar starts."
           />
         </>
       )}

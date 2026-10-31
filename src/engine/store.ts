@@ -4,6 +4,7 @@ import { BUILT_IN_FX_LABELS, getTrackFxInstances, isBuiltInFxType } from './fxDe
 import {
   normalizeTempoMap,
   normalizeMeterMap,
+  normalizeKeyMap,
   parseMeterSignature,
   getBarStartTick,
   getNextBarTick,
@@ -12,6 +13,7 @@ import {
   conductorSecondsAtTick,
   type TempoPoint,
   type MeterPoint,
+  type KeyPoint,
 } from '../utils/conductor'
 import { compileFormula } from '../utils/formulaMath'
 import {
@@ -1463,6 +1465,7 @@ export interface AppState {
   // Conductor: project-level tempo curve and metre changes on the shared tick timeline.
   tempoMap: TempoPoint[]
   meterMap: MeterPoint[]
+  keyMap: KeyPoint[]
   showConductor: boolean
   setShowConductor: (v: boolean) => void
   setTempoMap: (points: TempoPoint[]) => void
@@ -1473,6 +1476,10 @@ export interface AppState {
   addMeterPoint: (point: MeterPoint) => void
   updateMeterPoint: (id: string, updates: Partial<MeterPoint>) => void
   removeMeterPoint: (id: string) => void
+  setKeyMap: (points: KeyPoint[]) => void
+  addKeyPoint: (point: KeyPoint) => void
+  updateKeyPoint: (id: string, updates: Partial<KeyPoint>) => void
+  removeKeyPoint: (id: string) => void
   resetConductor: () => void
 
   // Reusable per-note articulation bundles (expression, not sample keyswitches).
@@ -1648,6 +1655,7 @@ export const snapshotProjectData = (state: AppState) => ({
   automationLanes: state.automationLanes,
   tempoMap: state.tempoMap,
   meterMap: state.meterMap,
+  keyMap: state.keyMap,
   showConductor: state.showConductor,
   clips: state.clips,
   groups: state.groups,
@@ -1782,6 +1790,7 @@ export const createBlankProjectData = (projectName = 'Untitled Project') => ({
   automationLanes: {},
   tempoMap: [],
   meterMap: [],
+  keyMap: [],
   showConductor: false,
   articulationPresets: DEFAULT_ARTICULATION_PRESETS,
   history: [],
@@ -1866,6 +1875,7 @@ export const applyProjectDataToEngineAndStore = (data: any, tabName?: string, fi
     automationLanes: data.automationLanes || {},
     tempoMap: normalizeTempoMap(data.tempoMap),
     meterMap: normalizeMeterMap(data.meterMap),
+    keyMap: normalizeKeyMap(data.keyMap),
     articulationPresets: Array.isArray(data.articulationPresets) && data.articulationPresets.length > 0
       ? data.articulationPresets
       : DEFAULT_ARTICULATION_PRESETS,
@@ -2122,6 +2132,7 @@ export const useStore = create<AppState>((originalSet, get, api) => {
     automationLanes: {},
     tempoMap: [],
     meterMap: [],
+    keyMap: [],
     showConductor: false,
     projectRevision: 0,
     drumSteps: 16,
@@ -2954,6 +2965,7 @@ if (firstTrack) {
         automationLanes: newState.automationLanes ?? state.automationLanes,
         tempoMap: normalizeTempoMap(newState.tempoMap ?? state.tempoMap),
         meterMap: normalizeMeterMap(newState.meterMap ?? state.meterMap),
+        keyMap: normalizeKeyMap(newState.keyMap ?? state.keyMap),
         projectRevision: state.projectRevision + 1,
         notes: deduplicateNotes(newState.notes !== undefined ? newState.notes : state.notes),
         tracks: (newState.tracks || state.tracks).map((t: any) => ({
@@ -3678,7 +3690,20 @@ if (firstTrack) {
     removeMeterPoint: (id) => set((state) => ({
       meterMap: state.meterMap.filter(point => point.id !== id)
     })),
-    resetConductor: () => set({ tempoMap: [], meterMap: [] }),
+    setKeyMap: (points) => set({ keyMap: normalizeKeyMap(points) }),
+    addKeyPoint: (point) => set((state) => ({
+      keyMap: normalizeKeyMap([
+        ...state.keyMap.filter(existing => Math.abs(existing.tick - point.tick) > 0.5),
+        point,
+      ])
+    })),
+    updateKeyPoint: (id, updates) => set((state) => ({
+      keyMap: normalizeKeyMap(state.keyMap.map(point => point.id === id ? { ...point, ...updates } : point))
+    })),
+    removeKeyPoint: (id) => set((state) => ({
+      keyMap: state.keyMap.filter(point => point.id !== id)
+    })),
+    resetConductor: () => set({ tempoMap: [], meterMap: [], keyMap: [] }),
 
     setArticulationPresets: (presets) => set({ articulationPresets: presets }),
     addArticulationPreset: (preset) => set(state => ({
@@ -3718,6 +3743,10 @@ if (firstTrack) {
 
       let newNotes = state.notes
 
+      const clipTrack = state.tracks.find(t => t.id === clip.trackId)
+      // Drum lanes only address pads 0-15, so a pitched value would bake silent, invisible notes.
+      const safePitch = clipTrack?.instrument === 'drum' ? Math.max(0, Math.min(15, Math.round(pitch))) : pitch
+
       // If overwrite, remove any existing notes in the clip's timeframe on the same track
       if (overwrite) {
         newNotes = newNotes.filter(n => !(n.trackId === clip.trackId && n.time >= clip.startTick && n.time < clip.endTick))
@@ -3755,7 +3784,7 @@ if (firstTrack) {
               id: `gen-${Date.now()}-${i}`,
               trackId: clip.trackId,
               time: clip.startTick + Math.round(i * ticksPerStep),
-              pitch,
+              pitch: safePitch,
               velocity,
               duration
             })
@@ -3770,7 +3799,7 @@ if (firstTrack) {
               id: `gen-rand-${Date.now()}-${i}`,
               trackId: clip.trackId,
               time: clip.startTick + Math.round(i * ticksPerStep),
-              pitch,
+              pitch: safePitch,
               velocity,
               duration
             })
@@ -4297,7 +4326,7 @@ const DIRTY_TRACKED_KEYS = [
   'notes', 'tracks', 'bpm', 'timeSignature', 'scaleLock', 'swing',
   'loopEnabled', 'loopStart', 'loopEnd',
   'automationCurves', 'automationTargets', 'automationLanes',
-  'tempoMap', 'meterMap', 'clips', 'groups', 'drumSteps',
+  'tempoMap', 'meterMap', 'keyMap', 'clips', 'groups', 'drumSteps',
   'articulationPresets', 'midiRemapData',
   'grooveTemplates', 'activeGrooveTemplateId',
   'grooveTimingStrength', 'grooveVelocityStrength',
@@ -4399,6 +4428,7 @@ useStore.subscribe((state, prevState) => {
         automationLanes: curState.automationLanes,
         tempoMap: curState.tempoMap,
         meterMap: curState.meterMap,
+        keyMap: curState.keyMap,
         showConductor: curState.showConductor,
         clips: curState.clips,
         groups: curState.groups,

@@ -75,7 +75,7 @@ export const getProjectDataString = () => {
     playheadFollowMode: state.playheadFollowMode, automationCurves: state.automationCurves,
     // Without the target map a reloaded project would read a pan/volume/VST3 curve as velocity.
     automationTargets: state.automationTargets,
-    automationLanes: state.automationLanes, tempoMap: state.tempoMap, meterMap: state.meterMap, showConductor: state.showConductor,
+    automationLanes: state.automationLanes, tempoMap: state.tempoMap, meterMap: state.meterMap, keyMap: state.keyMap, showConductor: state.showConductor,
     clips: state.clips, groups: state.groups, drumSteps: state.drumSteps,
     timeSignature: state.timeSignature, metronomeSettings: state.metronomeSettings, studioSettings: state.studioSettings, micSettings: state.micSettings, customFxConfigs: state.customFxConfigs,
     pitchSnapEnabled: state.pitchSnapEnabled, pitchDropSnap: state.pitchDropSnap, pitchSnapSensitivity: state.pitchSnapSensitivity, verticalMergeThreshold: state.verticalMergeThreshold,
@@ -726,6 +726,7 @@ function App() {
         automationLanes: {},
         tempoMap: [],
         meterMap: [],
+        keyMap: [],
         showConductor: false,
         playheadFollowMode: 'playhead',
         snapResolution: 48,

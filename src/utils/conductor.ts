@@ -5,6 +5,7 @@
  */
 
 import { cachedFormula, compileFormula } from './formulaMath'
+import { resolveScaleMode } from './musicTheory'
 
 export const CONDUCTOR_PPQ = 192
 export const MIN_CONDUCTOR_BPM = 20
@@ -32,6 +33,29 @@ export interface MeterPoint {
   tick: number
   numerator: number
   denominator: number
+}
+
+/**
+ * A key signature change. Markers are explicit: there is no key detection running
+ * in the background, so analysis and snap only change where the user says they do.
+ */
+export interface KeyPoint {
+  id: string
+  tick: number
+  /** Pitch class 0–11. */
+  root: number
+  mode: string
+  accidental: 'sharp' | 'flat'
+  customIntervals?: number[]
+}
+
+export interface ResolvedKey {
+  root: number
+  mode: string
+  accidental: 'sharp' | 'flat'
+  customIntervals?: number[]
+  /** Present when an explicit conductor marker is in force at the queried tick. */
+  markerId?: string
 }
 
 export const clampConductorBpm = (value: number): number => {
@@ -69,6 +93,75 @@ export const normalizeMeterMap = (points: MeterPoint[] | undefined | null): Mete
     }))
     .sort((a, b) => a.tick - b.tick)
 }
+
+const normalizeKeyIntervals = (intervals: unknown): number[] | undefined => {
+  if (!Array.isArray(intervals)) return undefined
+  const clean = Array.from(new Set(
+    intervals
+      .map(value => Number(value))
+      .filter(value => Number.isFinite(value) && value >= 0 && value < 12)
+      .map(value => Math.round(value))
+  )).sort((a, b) => a - b)
+  return clean.length > 0 ? clean : undefined
+}
+
+export const normalizeKeyMap = (points: KeyPoint[] | undefined | null): KeyPoint[] => {
+  if (!Array.isArray(points)) return []
+  return points
+    .filter(point => point && Number.isFinite(point.tick) && Number.isFinite(point.root))
+    .map(point => ({
+      ...point,
+      tick: Math.max(0, Math.round(point.tick)),
+      root: ((Math.round(point.root) % 12) + 12) % 12,
+      mode: resolveScaleMode(point.mode) ?? 'Major',
+      accidental: point.accidental === 'flat' ? 'flat' : 'sharp',
+      customIntervals: normalizeKeyIntervals(point.customIntervals),
+    }))
+    .sort((a, b) => a.tick - b.tick)
+}
+
+/** The explicit key marker in force at `tick`, or null before the first marker. */
+export const getKeyAtTick = (map: KeyPoint[] | undefined, tick: number): KeyPoint | null => {
+  if (!map || map.length === 0) return null
+  const target = Math.max(0, tick)
+  let found: KeyPoint | null = null
+  for (const point of map) {
+    if (point.tick <= target) found = point
+    else break
+  }
+  return found
+}
+
+/**
+ * Key in force at `tick`: the latest marker at or before it, otherwise the project's
+ * own scale lock. Callers keep the project lock as the fallback so a project without
+ * markers behaves exactly as it did before key markers existed.
+ */
+export const resolveKeyAtTick = (
+  map: KeyPoint[] | undefined,
+  fallback: { root: number; mode: string; accidental?: 'sharp' | 'flat'; customIntervals?: number[] },
+  tick: number
+): ResolvedKey => {
+  const point = getKeyAtTick(map, tick)
+  if (point) {
+    return {
+      root: point.root,
+      mode: point.mode,
+      accidental: point.accidental,
+      customIntervals: point.customIntervals,
+      markerId: point.id,
+    }
+  }
+  return {
+    root: fallback.root,
+    mode: fallback.mode,
+    accidental: fallback.accidental ?? 'sharp',
+    customIntervals: fallback.customIntervals,
+  }
+}
+
+export const keyMapIsActive = (map: KeyPoint[] | undefined): boolean =>
+  !!map && map.length > 0
 
 export const parseMeterSignature = (signature: string): { numerator: number; denominator: number } => {
   const match = String(signature || '4/4').match(/^\s*(\d+)\s*\/\s*(\d+)\s*$/)

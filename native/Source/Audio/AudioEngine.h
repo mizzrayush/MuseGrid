@@ -116,6 +116,25 @@ struct TrackState
     float lastSynthPitch = 60.0f;
     bool hasLastSynthPitch = false;
 
+    // FM topology (Tone.FMSynth / .muzins). Presets that use it fill these in
+    // setTrackSynthPreset; custom patches post them through setTrackFm.
+    bool synthFmEnabled = false;
+    float synthFmHarmonicity = 1.0f;
+    float synthFmModIndex = 0.0f;
+    float synthFmModAttack = 0.01f;
+    float synthFmModDecay = 0.20f;
+    float synthFmModSustain = 0.10f;
+    float synthFmModRelease = 0.20f;
+
+    // MonoSynth filter envelope. Applied as the note's filter sweep only when the
+    // note carries no explicit per-note sweep of its own.
+    bool synthMonoEnvEnabled = false;
+    float synthMonoEnvBaseHz = 80.0f;
+    float synthMonoEnvOctaves = 3.0f;
+    float synthMonoEnvAttack = 0.01f;
+    float synthMonoEnvDecay = 0.14f;
+    float synthMonoEnvSustain = 0.20f;
+
     // FX units
     EQEffect eq;
     FilterEffect filter;
@@ -252,6 +271,10 @@ public:
     void setTrackSynthPreset(const juce::String& trackId, const juce::String& presetName);
     void setTrackFilter(const juce::String& trackId, const juce::String& filterType, float cutoffHz, float resonance);
     void setTrackSynthPartials(const juce::String& trackId, const float* data, int count);
+    void setTrackFm(const juce::String& trackId, bool enabled, float harmonicity, float modIndex,
+                    float modAttack, float modDecay, float modSustain, float modRelease);
+    void setTrackFilterEnv(const juce::String& trackId, bool enabled, float baseHz, float octaves,
+                           float attack, float decay, float sustain);
     void setTrackFxParam(const juce::String& trackId, const juce::String& fxType, const juce::String& param, float val);
     void setTrackDrumKit(const juce::String& trackId, const juce::String& kitName);
 

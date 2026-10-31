@@ -501,6 +501,8 @@ void AudioEngine::setTrackSynthPreset(const juce::String& trackId, const juce::S
         if (t->id == trackId)
         {
             t->synthPreset = presetName;
+            t->synthFmEnabled = false;
+            t->synthMonoEnvEnabled = false;
             if (presetName != "custom") t->synthPartialCount = 0;
             if (presetName == "piano") {
                 t->oscType = SynthVoice::OscType::Triangle;
@@ -512,11 +514,19 @@ void AudioEngine::setTrackSynthPreset(const juce::String& trackId, const juce::S
                 t->attack = 0.01f; t->decay = 0.32f; t->sustain = 0.22f; t->release = 0.45f;
                 t->decayCurve.setExponential(-3.5f);
                 t->releaseCurve.setExponential(-4.0f);
+                t->synthFmEnabled = true;
+                t->synthFmHarmonicity = 2.4f; t->synthFmModIndex = 5.8f;
+                t->synthFmModAttack = 0.01f; t->synthFmModDecay = 0.18f;
+                t->synthFmModSustain = 0.10f; t->synthFmModRelease = 0.20f;
             } else if (presetName == "marimba") {
                 t->oscType = SynthVoice::OscType::Sine;
                 t->attack = 0.003f; t->decay = 0.28f; t->sustain = 0.05f; t->release = 0.22f;
                 t->decayCurve.setExponential(-5.0f);
                 t->releaseCurve.setExponential(-6.0f);
+                t->synthFmEnabled = true;
+                t->synthFmHarmonicity = 3.6f; t->synthFmModIndex = 9.0f;
+                t->synthFmModAttack = 0.002f; t->synthFmModDecay = 0.18f;
+                t->synthFmModSustain = 0.0f; t->synthFmModRelease = 0.12f;
             } else if (presetName == "bright") {
                 t->oscType = SynthVoice::OscType::Saw;
                 t->attack = 0.01f; t->decay = 0.08f; t->sustain = 0.42f; t->release = 0.18f;
@@ -534,10 +544,20 @@ void AudioEngine::setTrackSynthPreset(const juce::String& trackId, const juce::S
                 t->oscType = SynthVoice::OscType::Square;
                 t->attack = 0.01f; t->decay = 0.16f; t->sustain = 0.55f; t->release = 0.18f;
                 t->decayCurve.setExponential(-4.0f);
+                t->synthMonoEnvEnabled = true;
+                t->synthMonoEnvBaseHz = 80.0f;
+                t->synthMonoEnvOctaves = 3.0f;
+                t->synthMonoEnvAttack = 0.01f;
+                t->synthMonoEnvDecay = 0.14f;
+                t->synthMonoEnvSustain = 0.20f;
             } else if (presetName == "bell") {
                 t->oscType = SynthVoice::OscType::Sine;
                 t->attack = 0.002f; t->decay = 0.70f; t->sustain = 0.05f; t->release = 1.20f;
                 t->decayCurve.setExponential(-3.2f);
+                t->synthFmEnabled = true;
+                t->synthFmHarmonicity = 1.5f; t->synthFmModIndex = 12.0f;
+                t->synthFmModAttack = 0.002f; t->synthFmModDecay = 0.45f;
+                t->synthFmModSustain = 0.0f; t->synthFmModRelease = 0.40f;
             } else if (presetName == "glass") {
                 t->oscType = SynthVoice::OscType::Triangle;
                 t->attack = 0.004f; t->decay = 0.45f; t->sustain = 0.24f; t->release = 0.55f;
@@ -568,6 +588,43 @@ void AudioEngine::setTrackFilter(const juce::String& trackId, const juce::String
         t->synthFilterFreq = juce::jlimit(20.0f, 20000.0f, cutoffHz);
         t->synthFilterQ = juce::jlimit(0.5f, 12.0f, resonance);
         t->synthPreset = "custom";
+        break;
+    }
+}
+
+void AudioEngine::setTrackFm(const juce::String& trackId, bool enabled, float harmonicity, float modIndex,
+                             float modAttack, float modDecay, float modSustain, float modRelease)
+{
+    std::lock_guard<std::recursive_mutex> lock(trackMutex);
+    for (auto& t : tracks)
+    {
+        if (t->id != trackId) continue;
+
+        t->synthFmEnabled = enabled;
+        t->synthFmHarmonicity = juce::jlimit(0.1f, 16.0f, harmonicity);
+        t->synthFmModIndex = juce::jlimit(0.0f, 100.0f, modIndex);
+        t->synthFmModAttack = juce::jmax(0.001f, modAttack);
+        t->synthFmModDecay = juce::jmax(0.001f, modDecay);
+        t->synthFmModSustain = juce::jlimit(0.0f, 1.0f, modSustain);
+        t->synthFmModRelease = juce::jmax(0.001f, modRelease);
+        break;
+    }
+}
+
+void AudioEngine::setTrackFilterEnv(const juce::String& trackId, bool enabled, float baseHz, float octaves,
+                                    float attack, float decay, float sustain)
+{
+    std::lock_guard<std::recursive_mutex> lock(trackMutex);
+    for (auto& t : tracks)
+    {
+        if (t->id != trackId) continue;
+
+        t->synthMonoEnvEnabled = enabled;
+        t->synthMonoEnvBaseHz = juce::jlimit(20.0f, 20000.0f, baseHz);
+        t->synthMonoEnvOctaves = juce::jlimit(0.0f, 8.0f, octaves);
+        t->synthMonoEnvAttack = juce::jmax(0.001f, attack);
+        t->synthMonoEnvDecay = juce::jmax(0.001f, decay);
+        t->synthMonoEnvSustain = juce::jlimit(0.0f, 1.0f, sustain);
         break;
     }
 }
@@ -1778,19 +1835,44 @@ void AudioEngine::playNote(const juce::String& trackId,
             glideTime = targetTrack->synthPortamento;
         }
 
+        // MonoSynth's filter envelope is a decaying sweep from base*2^octaves down to
+        // the sustain level. It only fills in when the note has no explicit sweep.
+        float effectiveFilterStart = filterStartHz;
+        float effectiveFilterEnd = filterEndHz;
+        float effectiveFilterTime = filterSweepTimeSeconds;
+        if (effectiveFilterStart <= 0.0f && targetTrack->synthMonoEnvEnabled)
+        {
+            const float base = juce::jmax(20.0f, targetTrack->synthMonoEnvBaseHz);
+            const float octaves = juce::jmax(0.0f, targetTrack->synthMonoEnvOctaves);
+            effectiveFilterStart = juce::jlimit(20.0f, 20000.0f, base * std::pow(2.0f, octaves));
+            effectiveFilterEnd = juce::jlimit(20.0f, 20000.0f,
+                base * std::pow(2.0f, octaves * targetTrack->synthMonoEnvSustain));
+            effectiveFilterTime = juce::jmax(0.01f, targetTrack->synthMonoEnvAttack + targetTrack->synthMonoEnvDecay);
+        }
+
+        VoiceManager::SynthFmConfig fm;
+        fm.enabled = targetTrack->synthFmEnabled;
+        fm.harmonicity = targetTrack->synthFmHarmonicity;
+        fm.modIndex = targetTrack->synthFmModIndex;
+        fm.modAttack = targetTrack->synthFmModAttack;
+        fm.modDecay = targetTrack->synthFmModDecay;
+        fm.modSustain = targetTrack->synthFmModSustain;
+        fm.modRelease = targetTrack->synthFmModRelease;
+
         voiceManager.noteOnSynth(trackId, noteId, startPitch, velocity, durationSeconds,
                                  targetTrack->synthPreset,
                                  targetTrack->oscType, targetTrack->attack, targetTrack->decay, targetTrack->sustain, targetTrack->release,
                                  glideTarget, glideTime,
                                  vibratoDepthCents, vibratoRateHz,
                                  tremoloDepth, tremoloRateHz,
-                                 filterStartHz, filterEndHz, filterSweepTimeSeconds,
+                                 effectiveFilterStart, effectiveFilterEnd, effectiveFilterTime,
                                  &targetTrack->decayCurve, &targetTrack->releaseCurve,
                                  expression,
                                  targetTrack->synthFilterType, targetTrack->synthFilterFreq, targetTrack->synthFilterQ,
                                  targetTrack->synthUnison, targetTrack->synthDetuneSpread, targetTrack->synthDetuneCents,
                                  targetTrack->synthPartialCount > 0 ? targetTrack->synthPartials.data() : nullptr,
-                                 targetTrack->synthPartialCount);
+                                 targetTrack->synthPartialCount,
+                                 fm);
 
         targetTrack->lastSynthPitch = pitchMidi;
         targetTrack->hasLastSynthPitch = true;

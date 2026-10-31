@@ -75,7 +75,7 @@ export default function HelpPane() {
     { id: 'left_pane', label: 'Tracks & Instruments', icon: <IconMusic size={14} /> },
     { id: 'grid_canvas', label: 'Grid Canvas & Piano Roll', icon: <IconMusic size={14} /> },
     { id: 'automation_lanes', label: 'Automation & Modulation Lanes', icon: <IconSliders size={14} /> },
-    { id: 'tempo_meter', label: 'Tempo & Meter Conductor', icon: <IconTimeline size={14} /> },
+    { id: 'tempo_meter', label: 'Tempo, Meter & Key', icon: <IconTimeline size={14} /> },
     { id: 'drum_sequencer', label: 'Drum Sequencer', icon: <IconDrum size={14} /> },
     { id: 'right_pane', label: 'Advanced Tools & Gen', icon: <IconSettings size={14} /> },
     { id: 'midi_editing_suite', label: 'Advanced MIDI Suite & Theory', icon: <IconMusic size={14} /> },
@@ -89,6 +89,7 @@ export default function HelpPane() {
     { id: 'synth_lab', label: 'Synth & Drum Synthesis', icon: <IconMusic size={14} /> },
     { id: 'neural_ai', label: 'Neural AI Composer', icon: <IconPlay size={14} /> },
     { id: 'generative_music', label: 'Generative Music Engine', icon: <IconSliders size={14} /> },
+    { id: 'generative_drums', label: 'Generative Drums', icon: <IconSliders size={14} /> },
     { id: 'midi_remap', label: 'MIDI Import & Remap Lab', icon: <IconAlign size={14} /> },
     { id: 'stem_splitter_onnx', label: 'AI Stem Splitter & ONNX', icon: <IconSettings size={14} /> },
     { id: 'score_sheet_preview', label: 'Score & Sheet Music Preview', icon: <IconMusic size={14} /> },
@@ -653,6 +654,9 @@ export default function HelpPane() {
 
                 <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Generative Music</h3>
                 <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>A collapsible section below the track tools that develops new material from your notes with five seed-based engines (Motif, Pulse, Choir, Arrange, Respond). Source it from the active track, selected tracks, all tracks, or a multi-track timeline region, preview the result, then apply to a new track or into the current one. See the Generative Music Engine help section for the complete workflow.</p>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Generative Drums</h3>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>The section next to it writes grooves onto the 16-pad drum grid only — eight kit-aware styles, a learned/invented blend that can replay an existing groove, harmony-driven crash and kick accents, fills, swing, an energy arc and choke-safe open hats. It refuses to write to anything but a drum channel and has no scale or chord controls. See the Generative Drums help section for the complete workflow.</p>
               </div>
             )}
 
@@ -758,9 +762,9 @@ export default function HelpPane() {
 
             {activeSection === 'tempo_meter' && (
               <div>
-                <h1 style={{ margin: '0 0 20px', color: '#fff' }}>Tempo &amp; Meter Conductor</h1>
+                <h1 style={{ margin: '0 0 20px', color: '#fff' }}>Tempo, Meter &amp; Key Conductor</h1>
                 <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>
-                  The conductor is the project's tempo and meter timeline. Click <strong>Conductor</strong> in the bottom panel below the grid to expand it. The upper strip is the tempo lane, the lower strip is the meter lane, and both share the timeline zoom with the piano roll.
+                  The conductor is the project's tempo, meter and key timeline. Click <strong>Conductor</strong> in the bottom panel below the grid to expand it. The strips are tempo at the top, meter in the middle and key at the bottom, and all share the timeline zoom with the piano roll.
                 </p>
 
                 <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Tempo Automation</h3>
@@ -788,6 +792,14 @@ export default function HelpPane() {
                   <li><strong>Precedence</strong>: The conductor meter map overrides the project signature from the tick of the first meter point onward. Before that point, the project signature applies.</li>
                 </ul>
 
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Key Changes</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Add a key change</strong>: Click the key lane, or use <strong>+ Key</strong> to place one at the playhead's bar. New markers inherit the key in force at that bar; select one to edit its root, mode, and sharp/flat spelling.</li>
+                  <li><strong>Segments</strong>: Chord Detective, procedural suggestions, diatonic harmony, chord stamping in the grid, and scale snap all read the latest marker at or before the note's tick. A note after an A minor marker is analyzed in A minor even if the project key is C major.</li>
+                  <li><strong>Fallback</strong>: Before the first marker, and when the lane is empty, the project Scale Lock remains the key. Adding markers never changes the project key itself.</li>
+                  <li><strong>Display</strong>: The conductor header shows the key sequence, and the lane label uses the marker's own accidental spelling. Custom interval scales are carried from the source key when a marker is created.</li>
+                </ul>
+
                 <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Known Format Boundaries</h3>
                 <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
                   <li><strong>Standard MIDI files</strong>: The format stores the beat unit as a power of two, so an odd unit cannot survive a round trip. MuseGrid writes the nearest standard signature that keeps the bar length — for example <strong>1/11 becomes 3/32</strong> — and the export toast says the signature was approximated.</li>
@@ -812,7 +824,7 @@ export default function HelpPane() {
                   <li><strong>Inversion Analysis</strong>: Walks the chord-tone order (root, 3rd, 5th, 7th …) so inversions are reported against the lowest sounding bass note; extensions in the bass are honestly labelled Open Voicing.</li>
                   <li><strong>Scale Degree Roman Numerals</strong>: Quality is derived from the scale itself by stacking 3rds and 5ths, so harmonic minor gets V and vii°, melodic minor and the church modes keep their real case, and Locrian reads i° instead of a guessed minor. A root a fifth above a diatonic degree that carries a major or dominant quality is labelled as a secondary dominant — a D major chord in C major reads V/V, and a chromatic root such as A major in C major reads V/ii. Borrowed colours keep their real case, so F minor in C major reads iv instead of IV. Other out-of-key notes use chromatic labels such as ♭III, ♯IV or ♭VII (Altered).</li>
                   <li><strong>Spelling rules</strong>: Chord names always use the project's global accidental preference. The analyzer cannot know whether a written pitch was meant as C♯ or D♭ in a particular harmonic context, because both are the same MIDI pitch; only the global preference decides the printed spelling. Slash and polychord names follow the same rule.</li>
-                  <li><strong>Key tracking limit</strong>: Every chord is analyzed against the project key. Modulation and mid-song key changes are not tracked, so a chord borrowed from a new key is read as a secondary dominant or a chromatic label instead.</li>
+                  <li><strong>Key tracking</strong>: Harmonies are read against the conductor key marker in force at the chord's tick. Add markers on the conductor's key lane to analyze a modulation; without markers the project key applies. Every marker is explicit — there is no background key detection.</li>
                   <li><strong>Drum Voice Distribution</strong>: On drum tracks, switches to a percussion hit breakdown (e.g. Kick: 8, Snare: 4, Closed Hat: 16).</li>
                 </ul>
 
@@ -841,6 +853,7 @@ export default function HelpPane() {
                   <li><strong>Pattern Clips (Generative)</strong>: Left Pane section. Turns a clip into a Euclidean, cellular-automata or random pattern and bakes the result into notes.</li>
                   <li><strong>Groove Pool</strong>: Left Pane section. Extracts timing and velocity feel from a performance and applies it to other notes.</li>
                   <li><strong>Generative Music</strong>: Left Pane section. Five seed-based engines — Motif, Pulse, Choir, Arrange and Respond — driven by the Active track, Selected tracks, All tracks or a multi-track timeline Region. See the Generative Music Engine help section for the full workflow.</li>
+                  <li><strong>Generative Drums</strong>: Left Pane section next to it. Drum-only groove workshop with eight kit-aware styles, a learned/invented blend, harmony accents, choke-safe hats, fills and an energy arc. See the Generative Drums help section.</li>
                 </ul>
               </div>
             )}
@@ -1117,7 +1130,8 @@ export default function HelpPane() {
                   <h4 style={{ margin: '0 0 10px', color: '#4dabf7' }}>Music Theory & Analysis API (<code>Muse.midi</code>)</h4>
                   <ul style={{ color: '#ccc', lineHeight: 1.6, fontSize: '13px', margin: 0 }}>
                     <li><code>Muse.midi.detectChord(pitches, preferFlats?)</code>: Analyzes pitch array and returns chord name, quality, inversion, and bass note. Flat spelling follows the project accidental unless you pass <code>true</code> or <code>false</code>.</li>
-                    <li><code>Muse.midi.detectScaleDegree(rootPc, scaleRoot?, scaleMode?)</code>: Returns a quality-aware Roman numeral (e.g. 'I', 'vi', 'vii°', 'III+'), a secondary-dominant label such as 'V/V' when the quality is known to be major/dominant, or a chromatic label such as '♭VII (Altered)'. The scripting helper passes the root only, so it reports the diatonic degree or an altered label rather than a secondary dominant.</li>
+                    <li><code>Muse.midi.detectScaleDegree(rootPc, scaleRoot?, scaleMode?, chordQuality?)</code>: Returns a quality-aware Roman numeral (e.g. 'I', 'vi', 'vii°', 'III+'). Pass the chord quality to get secondary-dominant labels such as 'V/V' and correct borrowed-chord case; without it the helper reports the diatonic degree or an altered label. When the key arguments are omitted it resolves the conductor key at the playhead.</li>
+                    <li><code>Muse.tuning.analyzeChord(notes?, key?)</code>: Detects the chord and its Roman numeral in one call. Pass MIDI numbers or <code>{`{ pitch, time }`}</code> objects, or omit the argument to analyze the selection. The optional key override accepts <code>{`{ root, mode, customIntervals?, tick? }`}</code>; otherwise the conductor marker at the notes' tick applies.</li>
                     <li><code>Muse.midi.getProgressions()</code>: Returns dictionary of all 6 genre chord progressions with step offsets.</li>
                     <li><code>Muse.midi.getScales()</code>: Returns array of all 32 world, microtonal, maqam, raga, and modal scale names.</li>
                   </ul>
@@ -1443,7 +1457,8 @@ MuseState.showToast('Batch Render Complete!', 'success');`}
                 <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>Loading a <strong>.muzins</strong> file folds its config into the track's portable patch fields, so the native JUCE engine and the web engine play the same settings.</p>
                 <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
                   <li><strong>Native and web</strong>: oscillator type, Fourier formula (converted to up to 64 partial amplitudes), ADSR, decay curve type, tension and formula, filter type (lowpass, highpass, bandpass, notch), cutoff, resonance, unison voice count, detune spread, global/fine detune and portamento. Unison is rendered as a real detuned oscillator stack in the native voice, and portamento glides from the previous note on that track.</li>
-                  <li><strong>Web only</strong>: FM and MonoSynth topologies (harmonicity, modulation index, modulation envelope), scripted DSP classes, and any extra Tone.js options that have no native equivalent. These still import and play through WebAudio, but the native synth falls back to its subtractive voice.</li>
+                  <li><strong>Also native</strong>: FM topology (harmonicity, modulation index and modulation envelope) and the MonoSynth filter envelope. The native voice renders the same FM carrier and modulator pair, and a Mono patch's envelope becomes the note's filter sweep when the note has no sweep of its own. The built-in Electric Piano, Marimba, Bell and Bass presets use the same paths.</li>
+                  <li><strong>Scripted DSP</strong>: A scripted <strong>.muzins</strong> patch still plays live through WebAudio only, because the script is JavaScript. The native engine plays its subtractive fallback voice and the track shows a notice in the left pane. Hybrid and offline exports render scripted tracks through WebAudio, so a bounce keeps the scripted sound.</li>
                   <li><strong>Saving from Synth Studio</strong>: the studio writes the flat patch fields and drops a stale subtractive <strong>.muzins</strong> blob, so later edits are heard natively. FM/Mono imports keep their topology blob because flat fields cannot express it.</li>
                 </ul>
 
@@ -1508,7 +1523,7 @@ MuseState.showToast('Batch Render Complete!', 'success');`}
             {activeSection === 'generative_music' && (
               <div>
                 <h1 style={{ margin: '0 0 20px', color: '#fff' }}>Generative Music Engine</h1>
-                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>The <strong>Generative Music</strong> panel (left pane, below the track tools) develops new material from what is already in your project. Every result is deterministic for a given seed, so rolling a seed you like gives the same notes again.</p>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>The <strong>Generative Music</strong> panel (left pane, below the track tools) develops new material from what is already in your project. Every result is deterministic for a given variation, so rolling back to a variation you like gives the same notes again.</p>
 
                 <h3 style={{ color: '#ff922b', marginTop: '20px' }}>Choosing the Source</h3>
                 <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
@@ -1530,7 +1545,7 @@ MuseState.showToast('Batch Render Complete!', 'success');`}
                   <li><strong>Respond</strong>: call and response — the call bars stay open and the answer appears on the next bar using a transformed cell.</li>
                 </ul>
 
-                <h3 style={{ color: '#ff922b', marginTop: '20px' }}>Placement, Shape and Seed</h3>
+                <h3 style={{ color: '#ff922b', marginTop: '20px' }}>Placement, Shape and Variation</h3>
                 <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
                   <li><strong>Destination</strong>: <em>New Track(s)</em> creates one track per part with matching instrument routing and a name you can edit, or <em>Into &lt;track&gt;</em> writes into the active track using <strong>Overdub</strong> or <strong>Replace Span</strong> (clears notes inside the generated span first).</li>
                   <li><strong>Start Position</strong>: <em>Playhead</em>, <em>Region</em> (the region's start tick; disabled without a region) or <em>End</em> (after the last note). The exact start tick is shown below the buttons.</li>
@@ -1538,7 +1553,7 @@ MuseState.showToast('Batch Render Complete!', 'success');`}
                   <li><strong>Shape</strong>: Density, Complexity, Motion, Tension, Velocity, Register (octave), Humanize (timing/velocity jitter), Swing and Afterimage (echo repeats). Velocity is written to the project as MIDI velocity (1–127) when you apply.</li>
                   <li><strong>Grid Snap / Note Sizes</strong>: both on by default and tied to the project snap resolution shown beside each toggle (e.g. 1/16). Grid Snap rounds every generated start time onto the grid; Note Sizes rounds durations to whole grid steps with a one-step minimum, so notes are grid multiples. Turn either off to keep the engine's free timing or lengths. With Grid Snap on, Swing offsets fold onto the grid, so disable it when you want swung timing.</li>
                   <li><strong>Editable values</strong>: every slider in the panel has a value box — click it, type any number and press Enter. Values are not clamped to the slider range; Escape cancels the edit.</li>
-                  <li><strong>Seed</strong>: type a number or press <strong>Roll</strong>; the same settings and seed always produce the same notes. <strong>Surprise</strong> rolls a new seed and randomises the shape at once.</li>
+                  <li><strong>Variation</strong>: type a number or press <strong>Roll</strong>; the same settings and variation always produce the same notes. <strong>Surprise</strong> rolls a new variation and randomises the shape at once.</li>
                   <li><strong>Scale Snap</strong>: on by default; choose a root and mode (project scale modes) and every generated pitch is snapped to that scale. Turn it off to allow chromatic notes.</li>
                 </ul>
 
@@ -1557,6 +1572,55 @@ MuseState.showToast('Batch Render Complete!', 'success');`}
                   <li><strong>Rhythm</strong>: three drum patterns (four-on-the-floor, syncopated push and half-time pocket) written to one bar of the current meter.</li>
                   <li><strong>Placement</strong>: everything lands at the next bar line from the playhead, using the conductor meter map, so odd meters and meter changes are respected.</li>
                 </ul>
+              </div>
+            )}
+
+            {activeSection === 'generative_drums' && (
+              <div>
+                <h1 style={{ margin: '0 0 20px', color: '#fff' }}>Generative Drums</h1>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>The <strong>Generative Drums</strong> panel (left pane, under AI &amp; Generative, next to Generative Music) writes drum grooves onto the 16-pad grid. It is drum-only by construction: it has no scale, no chord and no pitched lanes, so it can never stamp melody onto a drum channel, and it will not write anything at all unless the destination is a drum channel.</p>
+
+                <h3 style={{ color: '#ff922b', marginTop: '20px' }}>Styles</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Auto</strong>: picks from the destination kit — Classic → Boom Bap, Acoustic → Breakbeat, Tight → House, Electro / TR-808 → Trap, Tabla → Tabla. The line under the chips tells you which style Auto is currently resolving to.</li>
+                  <li><strong>Rock, Boom Bap, House, Trap, DnB, Breakbeat, Tabla</strong>: each is a real 16-step skeleton (kick, backbeat, subdivision lane, open-hat and percussion positions) rather than a random walk, so the genre reads correctly on the grid.</li>
+                  <li><strong>Tabla</strong> keeps the hand-drum promise: it runs rim/clave/conga/cowbell lanes, uses toms for fills, and never grows a hi-hat or a cymbal.</li>
+                </ul>
+
+                <h3 style={{ color: '#ff922b', marginTop: '20px' }}>Lanes Follow the Kit</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li>Every style lane (kick, snare, hats, open hat, clap, perc, tom, accent) resolves through a priority list against the pads actually present on the destination channel, so a trimmed row layout or a renamed kit still generates.</li>
+                  <li>Writing <em>Into a drum channel</em> reads that channel's own rows, so a 4-lane channel only ever gets 4 lanes of output. The footer shows the lane count and kit.</li>
+                  <li>Open hats are choke-aware: each off-beat opener is followed by a closing hat two steps later, open hats never stack closer than a beat, and the final pass drops same-pad collisions.</li>
+                </ul>
+
+                <h3 style={{ color: '#ff922b', marginTop: '20px' }}>Learned vs Invented</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Groove Source</strong>: <em>Active</em>, <em>Selected</em>, <em>All Drums</em> or <em>None</em> choose which existing drum hits the engine may learn from. Non-drum tracks in the selection are ignored.</li>
+                  <li><strong>Learned</strong> blend: 0% invents every hit, 100% replays the source hits, and values in between keep the learned groove and let invented layers fill around it.</li>
+                  <li><strong>Follow Harmony</strong>: reads the project's pitched notes, detects the bar each lowest note changes pitch class, crashes the accent lane on those bars and answers the bassline's low onset with a kick. The source card reports how many pitched notes it is reading, and warns when there are none.</li>
+                </ul>
+
+                <h3 style={{ color: '#ff922b', marginTop: '20px' }}>Feel, Placement and Variation</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Density</strong> gates how many lane steps survive, <strong>Syncopate</strong> adds off-grid kicks/snares/claps, <strong>Ghosts</strong> writes quiet snares between the backbeat, <strong>Fills</strong> drives the descending tom fill on the last bar (and every fourth bar of an 8-bar-or-longer phrase), <strong>Energy Arc</strong> shapes a velocity arch across bars with a lighter intro and outro, <strong>Swing</strong> pushes every off-step late, and <strong>Humanize</strong> jitters both time and velocity.</li>
+                  <li><strong>Bars</strong>: 1–32. Bar windows come from the conductor meter map, so 7/8, 5/4 and mid-project meter changes generate against the real bar length instead of assuming four quarter notes.</li>
+                  <li><strong>Start Position</strong>: <em>Playhead</em>, <em>Region</em> (arm it, then drag in the timeline — the region also becomes the learn span) or <em>End</em>. The exact start tick is printed under the buttons.</li>
+                  <li><strong>Grid Snap</strong> lands hits and lengths on the project snap resolution shown beside the toggle (e.g. 1/16). Turn it off to keep swung, humanized micro-timing.</li>
+                  <li><strong>Variation</strong>: the number the groove is hashed from. Type one, or press <strong>Roll</strong> for a new take with the same settings. <strong>Surprise</strong> rolls the variation and randomises the feel in one click.</li>
+                  <li>Every slider has a typable value box — type any number, press Enter to commit, Escape to cancel.</li>
+                </ul>
+
+                <h3 style={{ color: '#ff922b', marginTop: '20px' }}>Preview and Apply</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li>The preview is a per-pad lane view: one row per pad that actually received hits, labelled with the channel's own row names, with bar numbers along the top and hit opacity following velocity.</li>
+                  <li><strong>New Drum Track</strong> creates a drum channel with the kit you chose and selects it; <strong>Into &lt;channel&gt;</strong> writes <em>Overdub</em> or <em>Replace Span</em> (clears hits inside the generated span first).</li>
+                  <li>Applying commits one undo step, converts velocities to MIDI 1–127, and the toast reports the hit count, bars, resolved style, how many harmony accent bars were used and whether a fill landed.</li>
+                  <li>Selecting a synth channel shows an explicit "drums only write to a drum channel" notice instead of quietly writing pitches onto it.</li>
+                </ul>
+
+                <h3 style={{ color: '#ff922b', marginTop: '20px' }}>Relationship to the Pulse Engine</h3>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}><strong>Generative Music → Pulse</strong> stays Euclidean and melody-driven: it derives ratios from your source and can learn a groove map. <strong>Generative Drums</strong> is the dedicated groove workshop — genre skeletons, kit-aware lanes, choke-safe hats, fills, an energy arc and harmony accents. Both are deterministic and both respect the conductor.</p>
               </div>
             )}
 

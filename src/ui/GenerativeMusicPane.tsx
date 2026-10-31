@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useStore } from '../engine/store'
 import { audioEngine } from '../engine/AudioEngine'
-import { AppSlider } from './AppSlider'
+import { ACCENT, SliderRow, ToggleRow, chipStyle, sectionTitle } from './paneControls'
 import { NOTE_NAMES_SHARP, SCALE_MODES, resolveScaleMode } from '../utils/musicTheory'
 import { DEFAULT_SYNTH_PRESET, DEFAULT_DRUM_KIT } from '../utils/instruments'
 import {
@@ -13,7 +13,6 @@ import {
   type SourceSnapshot,
 } from '../utils/generativeMusic'
 
-const ACCENT = '#ff922b'
 const ENGINE_INFO: Array<{ id: GenerativeEngineId; label: string; hint: string }> = [
   { id: 'motif', label: 'Motif', hint: 'Develops a motif from the source: inversion, retrograde, transposition and afterimage echoes.' },
   { id: 'pulse', label: 'Pulse', hint: 'Euclidean drum and percussion patterns, or a learned map of the source drum groove.' },
@@ -24,102 +23,6 @@ const ENGINE_INFO: Array<{ id: GenerativeEngineId; label: string; hint: string }
 
 const TRACK_COLORS = ['#ff922b', '#4dabf7', '#69db7c', '#da77f2', '#ff6b6b']
 const newId = () => Math.random().toString(36).substr(2, 9)
-
-const sectionTitle = (text: string) => (
-  <div style={{ fontSize: '9px', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#888', marginBottom: '6px' }}>{text}</div>
-)
-
-const chipStyle = (active: boolean, color = '#fff') => ({
-  flex: 1,
-  padding: '4px 6px',
-  borderRadius: '4px',
-  border: '1px solid transparent',
-  background: active ? 'rgba(255,255,255,0.1)' : 'transparent',
-  color: active ? color : '#666',
-  fontSize: '9px',
-  fontWeight: 700,
-  cursor: 'pointer',
-  transition: 'all 0.15s ease',
-  whiteSpace: 'nowrap' as const,
-})
-
-const formatSliderValue = (value: number, suffix?: string) => {
-  if (suffix === '%') return String(Math.round(value * 100))
-  if (suffix === 'bars') return String(Math.round(value))
-  return String(Math.round(value * 100) / 100)
-}
-
-const SliderRow = ({
-  label,
-  value,
-  min,
-  max,
-  step = 0.01,
-  suffix,
-  color = ACCENT,
-  onChange,
-}: {
-  label: string
-  value: number
-  min: number
-  max: number
-  step?: number
-  suffix?: string
-  color?: string
-  onChange: (value: number) => void
-}) => {
-  const [text, setText] = useState(() => formatSliderValue(value, suffix))
-  const [prevValue, setPrevValue] = useState(value)
-  const [focused, setFocused] = useState(false)
-
-  if (value !== prevValue) {
-    setPrevValue(value)
-    if (!focused) setText(formatSliderValue(value, suffix))
-  }
-
-  const commit = () => {
-    const parsed = parseFloat(text)
-    if (Number.isFinite(parsed)) onChange(suffix === '%' ? parsed / 100 : parsed)
-    else setText(formatSliderValue(value, suffix))
-  }
-
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-      <span style={{ width: '74px', fontSize: '10px', color: '#999', fontWeight: 600, flexShrink: 0 }}>{label}</span>
-      <AppSlider value={value} min={min} max={max} step={step} color={color} onChange={onChange} />
-      <input
-        type="text"
-        inputMode="decimal"
-        value={text}
-        onFocus={() => setFocused(true)}
-        onBlur={() => { setFocused(false); commit() }}
-        onChange={e => setText(e.target.value)}
-        onKeyDown={e => {
-          e.stopPropagation()
-          if (e.key === 'Enter') e.currentTarget.blur()
-          if (e.key === 'Escape') {
-            setText(formatSliderValue(value, suffix))
-            e.currentTarget.blur()
-          }
-        }}
-        style={{
-          width: '40px',
-          flexShrink: 0,
-          textAlign: 'right',
-          fontSize: '9.5px',
-          color,
-          fontFamily: 'monospace',
-          background: 'rgba(0,0,0,0.35)',
-          border: `1px solid ${focused ? color : 'rgba(255,255,255,0.08)'}`,
-          borderRadius: '4px',
-          padding: '2px 4px',
-          outline: 'none',
-        }}
-      />
-      {suffix === '%' && <span style={{ width: '8px', fontSize: '9.5px', color, fontFamily: 'monospace', flexShrink: 0 }}>%</span>}
-    </div>
-  )
-}
 
 function MiniRoll({ part, startTick, endTick }: { part: GeneratedPart; startTick: number; endTick: number }) {
   const span = Math.max(1, endTick - startTick)
@@ -494,36 +397,26 @@ export default function GenerativeMusicPane() {
         <SliderRow label="Afterimage" value={settings.echo} min={0} max={1} suffix="%" color="#00e6ff" onChange={v => update({ echo: v })} />
 
         <div style={{ marginTop: '8px', paddingTop: '7px', borderTop: '1px solid rgba(255,255,255,0.06)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span style={{ fontSize: '10px', color: '#999', fontWeight: 600 }}>
-              Grid Snap <span style={{ color: '#666', fontWeight: 500 }}>· starts on {gridLabel}</span>
-            </span>
-            <button
-              onClick={() => update({ snapTime: !settings.snapTime })}
-              title="Round generated note start times to the project grid"
-              style={{ ...chipStyle(settings.snapTime, '#69db7c'), flex: '0 0 auto', padding: '3px 10px', border: `1px solid ${settings.snapTime ? 'rgba(105,219,124,0.35)' : 'rgba(255,255,255,0.08)'}` }}
-            >
-              {settings.snapTime ? 'On' : 'Off'}
-            </button>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span style={{ fontSize: '10px', color: '#999', fontWeight: 600 }}>
-              Note Sizes <span style={{ color: '#666', fontWeight: 500 }}>· multiples of {gridLabel}</span>
-            </span>
-            <button
-              onClick={() => update({ snapDuration: !settings.snapDuration })}
-              title="Round generated note durations to whole grid steps"
-              style={{ ...chipStyle(settings.snapDuration, '#69db7c'), flex: '0 0 auto', padding: '3px 10px', border: `1px solid ${settings.snapDuration ? 'rgba(105,219,124,0.35)' : 'rgba(255,255,255,0.08)'}` }}
-            >
-              {settings.snapDuration ? 'On' : 'Off'}
-            </button>
-          </div>
+          <ToggleRow
+            label="Grid Snap"
+            hint={`starts on ${gridLabel}`}
+            active={settings.snapTime}
+            onClick={() => update({ snapTime: !settings.snapTime })}
+            title="Round generated note start times to the project grid"
+          />
+          <ToggleRow
+            label="Note Sizes"
+            hint={`multiples of ${gridLabel}`}
+            active={settings.snapDuration}
+            onClick={() => update({ snapDuration: !settings.snapDuration })}
+            title="Round generated note durations to whole grid steps"
+          />
         </div>
       </div>
 
-      {/* Seed and scale */}
+      {/* Variation and scale */}
       <div style={{ background: 'rgba(0,0,0,0.15)', borderRadius: '8px', padding: '8px', border: '1px solid rgba(255,255,255,0.03)' }}>
-        {sectionTitle('Seed')}
+        {sectionTitle('Variation')}
         <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
           <input
             type="number"
@@ -534,31 +427,34 @@ export default function GenerativeMusicPane() {
           <button onClick={rollSeed} style={{ ...chipStyle(true, ACCENT), flex: '0 0 auto', padding: '4px 10px', background: 'rgba(255,146,43,0.16)', border: '1px solid rgba(255,146,43,0.3)' }}>Roll</button>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '8px' }}>
-          <span style={{ fontSize: '10px', color: '#999', fontWeight: 600 }}>Scale Snap</span>
-          <button
-            onClick={() => update({ scaleSnap: !settings.scaleSnap })}
-            style={{ ...chipStyle(settings.scaleSnap, '#69db7c'), flex: '0 0 auto', padding: '3px 10px', border: `1px solid ${settings.scaleSnap ? 'rgba(105,219,124,0.35)' : 'rgba(255,255,255,0.08)'}` }}
-          >
-            {settings.scaleSnap ? 'On' : 'Off'}
-          </button>
-        </div>
-        {settings.scaleSnap && (
-          <div style={{ display: 'flex', gap: '4px', marginTop: '5px' }}>
-            <select
-              value={settings.scaleRoot}
-              onChange={e => update({ scaleRoot: parseInt(e.target.value, 10) })}
-              style={{ flex: '0 0 64px', background: 'rgba(0,0,0,0.35)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '5px', padding: '4px', color: '#ddd', fontSize: '10px', outline: 'none' }}
-            >
-              {NOTE_NAMES_SHARP.map((name, index) => <option key={name} value={index}>{name}</option>)}
-            </select>
-            <select
-              value={settings.scaleMode}
-              onChange={e => update({ scaleMode: e.target.value })}
-              style={{ flex: 1, background: 'rgba(0,0,0,0.35)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '5px', padding: '4px', color: '#ddd', fontSize: '10px', outline: 'none' }}
-            >
-              {SCALE_MODES.map(mode => <option key={mode} value={mode}>{mode}</option>)}
-            </select>
+        {!source.isDrum && (
+          <>
+            <div style={{ marginTop: '8px' }}>
+              <ToggleRow label="Scale Snap" active={settings.scaleSnap} onClick={() => update({ scaleSnap: !settings.scaleSnap })} title="Keep generated pitches inside the chosen scale" />
+            </div>
+            {settings.scaleSnap && (
+              <div style={{ display: 'flex', gap: '4px', marginTop: '5px' }}>
+                <select
+                  value={settings.scaleRoot}
+                  onChange={e => update({ scaleRoot: parseInt(e.target.value, 10) })}
+                  style={{ flex: '0 0 64px', background: 'rgba(0,0,0,0.35)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '5px', padding: '4px', color: '#ddd', fontSize: '10px', outline: 'none' }}
+                >
+                  {NOTE_NAMES_SHARP.map((name, index) => <option key={name} value={index}>{name}</option>)}
+                </select>
+                <select
+                  value={settings.scaleMode}
+                  onChange={e => update({ scaleMode: e.target.value })}
+                  style={{ flex: 1, background: 'rgba(0,0,0,0.35)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '5px', padding: '4px', color: '#ddd', fontSize: '10px', outline: 'none' }}
+                >
+                  {SCALE_MODES.map(mode => <option key={mode} value={mode}>{mode}</option>)}
+                </select>
+              </div>
+            )}
+          </>
+        )}
+        {source.isDrum && (
+          <div style={{ marginTop: '7px', fontSize: '9px', color: '#666', lineHeight: 1.4 }}>
+            Drum source: scale snapping is hidden because pads have no pitch.
           </div>
         )}
       </div>

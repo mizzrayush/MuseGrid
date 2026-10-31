@@ -27,6 +27,7 @@ import {
   detectChord, detectScaleDegree, GENRE_PROGRESSIONS, SCALE_MODES,
   type DetectedChord, type GenreProgression
 } from '../utils/musicTheory';
+import { resolveKeyAtTick } from '../utils/conductor';
 
 function newId() {
   return Math.random().toString(36).substr(2, 9);
@@ -866,8 +867,9 @@ export const ScriptAPI = {
     },
     detectChord: (pitches?: number[], preferFlats?: boolean): DetectedChord | null => {
       const p = pitches || ScriptAPI.editor.getTargetNotes().map(n => n.pitch);
-      const flats = preferFlats ?? (useStore.getState().scaleLock.accidental === 'flat');
-      return detectChord(p, flats);
+      const state = useStore.getState();
+      const key = resolveKeyAtTick(state.keyMap, state.scaleLock, state.playheadPosition);
+      return detectChord(p, preferFlats ?? (key.accidental === 'flat'));
     }
   },
 
@@ -958,24 +960,61 @@ export const ScriptAPI = {
     },
     getAvailableScales: (): string[] => SCALE_MODES,
     getGenreProgressions: (): GenreProgression[] => GENRE_PROGRESSIONS,
-    detectChord: (pitches: number[], preferFlats?: boolean): DetectedChord | null =>
-      detectChord(pitches, preferFlats ?? (useStore.getState().scaleLock.accidental === 'flat')),
-    detectScaleDegree: (rootPc: number, scaleRoot?: number, scaleMode?: string): string | null => {
+    detectChord: (pitches: number[], preferFlats?: boolean): DetectedChord | null => {
       const state = useStore.getState();
-      const r = scaleRoot !== undefined ? scaleRoot : state.scaleLock.root;
-      const m = scaleMode !== undefined ? scaleMode : state.scaleLock.mode;
-      return detectScaleDegree(rootPc, r, m, state.scaleLock.customIntervals);
+      const key = resolveKeyAtTick(state.keyMap, state.scaleLock, state.playheadPosition);
+      return detectChord(pitches, preferFlats ?? (key.accidental === 'flat'));
+    },
+    detectScaleDegree: (rootPc: number, scaleRoot?: number, scaleMode?: string, chordQuality?: string): string | null => {
+      const state = useStore.getState();
+      const key = resolveKeyAtTick(state.keyMap, state.scaleLock, state.playheadPosition);
+      const r = scaleRoot !== undefined ? scaleRoot : key.root;
+      const m = scaleMode !== undefined ? scaleMode : key.mode;
+      return detectScaleDegree(rootPc, r, m, key.customIntervals, chordQuality);
+    },
+    /**
+     * Chord + roman degree in one call. `notes` accepts MIDI numbers or note-like objects
+     * ({ pitch, time }); omit it to analyze the editor selection. `key` overrides the
+     * conductor key marker at the notes' tick when supplied.
+     */
+    analyzeChord: (
+      notes?: Array<number | { pitch: number; time?: number }>,
+      key?: { root?: number; mode?: string; customIntervals?: number[]; tick?: number }
+    ) => {
+      const state = useStore.getState();
+      const source = notes && notes.length > 0
+        ? notes
+        : (ScriptAPI.editor.getTargetNotes() as Array<number | { pitch: number; time?: number }>);
+      const pitches = source.map(entry => typeof entry === 'number' ? entry : entry.pitch);
+      if (pitches.length === 0) return null;
+      const first = source[0];
+      const tick = key?.tick ?? (typeof first === 'number' ? state.playheadPosition : first.time ?? state.playheadPosition);
+      const marker = resolveKeyAtTick(state.keyMap, state.scaleLock, tick);
+      const root = key?.root ?? marker.root;
+      const mode = key?.mode ?? marker.mode;
+      const customIntervals = key?.customIntervals ?? marker.customIntervals;
+      const chord = detectChord(pitches, marker.accidental === 'flat');
+      if (!chord) return null;
+      return {
+        chord,
+        degree: detectScaleDegree(chord.rootPitch, root, mode, customIntervals, chord.quality),
+        key: { root, mode, accidental: marker.accidental, customIntervals, tick }
+      };
     }
   },
 
   midi: {
-    detectChord: (pitches: number[], preferFlats?: boolean): DetectedChord | null =>
-      detectChord(pitches, preferFlats ?? (useStore.getState().scaleLock.accidental === 'flat')),
-    detectScaleDegree: (rootPc: number, scaleRoot?: number, scaleMode?: string): string | null => {
+    detectChord: (pitches: number[], preferFlats?: boolean): DetectedChord | null => {
       const state = useStore.getState();
-      const r = scaleRoot !== undefined ? scaleRoot : state.scaleLock.root;
-      const m = scaleMode !== undefined ? scaleMode : state.scaleLock.mode;
-      return detectScaleDegree(rootPc, r, m, state.scaleLock.customIntervals);
+      const key = resolveKeyAtTick(state.keyMap, state.scaleLock, state.playheadPosition);
+      return detectChord(pitches, preferFlats ?? (key.accidental === 'flat'));
+    },
+    detectScaleDegree: (rootPc: number, scaleRoot?: number, scaleMode?: string, chordQuality?: string): string | null => {
+      const state = useStore.getState();
+      const key = resolveKeyAtTick(state.keyMap, state.scaleLock, state.playheadPosition);
+      const r = scaleRoot !== undefined ? scaleRoot : key.root;
+      const m = scaleMode !== undefined ? scaleMode : key.mode;
+      return detectScaleDegree(rootPc, r, m, key.customIntervals, chordQuality);
     },
     getProgressions: (): GenreProgression[] => GENRE_PROGRESSIONS,
     getScales: (): string[] => SCALE_MODES,
@@ -1530,6 +1569,10 @@ export const ScriptAPI = {
         automationCurves: state.automationCurves,
         automationTargets: state.automationTargets,
         automationLanes: state.automationLanes,
+        tempoMap: state.tempoMap,
+        meterMap: state.meterMap,
+        keyMap: state.keyMap,
+        showConductor: state.showConductor,
         clips: state.clips,
         groups: state.groups,
         drumSteps: state.drumSteps,

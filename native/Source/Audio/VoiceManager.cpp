@@ -65,7 +65,8 @@ void VoiceManager::noteOnSynth(const juce::String& trackId,
                                float unisonSpreadCents,
                                float detuneCents,
                                const float* partials,
-                               int partialCount)
+                               int partialCount,
+                               const SynthFmConfig& fm)
 {
     // Find free voice or round-robin steal
     int index = -1;
@@ -108,6 +109,10 @@ void VoiceManager::noteOnSynth(const juce::String& trackId,
     tv.voice.setUnison(unison, unisonSpreadCents);
     tv.voice.setDetuneCents(detuneCents);
     tv.voice.setPartials(partials, partialCount);
+    // Applied after setPreset so a custom FM patch always wins, and a patch without
+    // FM clears the topology left over from a voice's previous note.
+    tv.voice.setFmParams(fm.enabled, fm.harmonicity, fm.modIndex,
+                         fm.modAttack, fm.modDecay, fm.modSustain, fm.modRelease);
 
     tv.voice.triggerNoteOn(noteId, pitchMidi, velocity, durationSeconds,
                            targetPitchMidi, slideTimeSeconds,

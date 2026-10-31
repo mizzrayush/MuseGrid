@@ -1090,6 +1090,37 @@ void JuceBridge::handleAudioCommand(const juce::Array<juce::var>& args, juce::We
         audioEngine.setTrackSynthPartials(trackId, partials.empty() ? nullptr : partials.data(),
                                           (int)partials.size());
     }
+    else if (type == "setTrackFm")
+    {
+        const juce::String trackId = obj->getProperty("trackId").toString();
+        const bool enabled = (bool)obj->getProperty("enabled")
+            || obj->getProperty("enabled").toString().toLowerCase() == "true";
+        auto num = [&obj](const char* key, float fallback) -> float
+        {
+            if (!obj->hasProperty(key)) return fallback;
+            const double d = (double)obj->getProperty(key);
+            return std::isfinite(d) ? (float)d : fallback;
+        };
+        audioEngine.setTrackFm(trackId, enabled,
+            num("harmonicity", 1.0f), num("modulationIndex", 0.0f),
+            num("modAttack", 0.01f), num("modDecay", 0.20f),
+            num("modSustain", 0.10f), num("modRelease", 0.20f));
+    }
+    else if (type == "setTrackFilterEnv")
+    {
+        const juce::String trackId = obj->getProperty("trackId").toString();
+        const bool enabled = (bool)obj->getProperty("enabled")
+            || obj->getProperty("enabled").toString().toLowerCase() == "true";
+        auto num = [&obj](const char* key, float fallback) -> float
+        {
+            if (!obj->hasProperty(key)) return fallback;
+            const double d = (double)obj->getProperty(key);
+            return std::isfinite(d) ? (float)d : fallback;
+        };
+        audioEngine.setTrackFilterEnv(trackId, enabled,
+            num("baseFrequency", 80.0f), num("octaves", 3.0f),
+            num("attack", 0.01f), num("decay", 0.14f), num("sustain", 0.20f));
+    }
     else if (type == "setPadCurve")
     {
         const juce::String trackId = obj->getProperty("trackId").toString();

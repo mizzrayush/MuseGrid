@@ -3,7 +3,8 @@ import { useStore, deduplicateNotes, isPluginDrum, isPluginSynth, getPluginInstr
 import { SYNTH_PRESETS, DRUM_KITS, type SynthPreset, type DrumKit } from '../utils/instruments'
 import { audioEngine } from '../engine/AudioEngine'
 import { NOTE_FX_DEFAULTS, noteFxChainId } from '../utils/noteFxChain'
-import { NOTE_NAMES_SHARP, snapToScale, detectChord, detectScaleDegree } from '../utils/musicTheory'
+import { NOTE_NAMES_SHARP, NOTE_NAMES_FLAT, snapToScale, detectChord, detectScaleDegree, resolveScaleMode } from '../utils/musicTheory'
+import { resolveKeyAtTick } from '../utils/conductor'
 import { ARTICULATION_FIELDS, captureArticulation, hasCustomArticulation, type ArticulationPreset } from '../utils/articulations'
 import { applyRatchet, applyMicroNudge, unlinkGlides, countLinkedGlides } from '../utils/midiEditing'
 import { IconX, IconVolume, IconTimeline, IconMusic, IconDrum, IconSpeaker, IconTrash, IconPlus, IconOpen } from './Icons'
@@ -600,6 +601,7 @@ export const RightPane: React.FC = () => {
   const customFxConfigs = useStore(state => state.customFxConfigs || [])
   const activeTrackId = useStore(state => state.activeTrackId)
   const scaleLock = useStore(state => state.scaleLock)
+  const keyMap = useStore(state => state.keyMap)
   const scaleLockEnabled = scaleLock.enabled
   const scaleLockRoot = scaleLock.root
   const scaleLockMode = scaleLock.mode
@@ -643,19 +645,21 @@ export const RightPane: React.FC = () => {
   const activeTrack = useMemo(() => tracks.find(t => t.id === activeTrackId), [tracks, activeTrackId])
   const isDrum = activeTrack?.instrument === 'drum'
 
-  // Chord Detective analysis
+  // Chord Detective analysis, read against the key marker in force at the chord.
   const detectedChordInfo = useMemo(() => {
     if (isDrum || selectedNotes.length === 0) return null
+    const key = resolveKeyAtTick(keyMap, scaleLock, selectedNotes[0].time)
     const pitches = selectedNotes.map(n => n.pitch)
-    const chord = detectChord(pitches, scaleLock.accidental === 'flat')
+    const chord = detectChord(pitches, key.accidental === 'flat')
     if (!chord) return null
 
-    const degree = detectScaleDegree(chord.rootPitch, scaleLock.root, scaleLock.mode, scaleLock.customIntervals, chord.quality)
+    const degree = detectScaleDegree(chord.rootPitch, key.root, key.mode, key.customIntervals, chord.quality)
     return {
       ...chord,
-      degree
+      degree,
+      key,
     }
-  }, [selectedNotes, isDrum, scaleLock])
+  }, [selectedNotes, isDrum, scaleLock, keyMap])
 
   // Drum Piece Distribution analysis
   const drumDistribution = useMemo(() => {
@@ -882,7 +886,8 @@ export const RightPane: React.FC = () => {
     if (trackType === 'synth') {
       let finalPitch = Math.max(12, Math.min(120, pitch))
       if (scaleLockEnabled && scaleLockRoot !== undefined && scaleLockMode) {
-        finalPitch = snapToScale(finalPitch, scaleLockRoot, scaleLockMode, scaleLock.customIntervals)
+        const key = resolveKeyAtTick(keyMap, scaleLock, firstNote?.time ?? 0)
+        finalPitch = snapToScale(finalPitch, key.root, key.mode, key.customIntervals)
       }
       updateNotes(selectedNoteIds, { pitch: finalPitch })
     } else {
@@ -988,7 +993,8 @@ export const RightPane: React.FC = () => {
       if (trackType === 'synth') {
         newPitch = Math.max(12, Math.min(120, newPitch))
         if (scaleLockEnabled && scaleLockRoot !== undefined && scaleLockMode) {
-          newPitch = snapToScale(newPitch, scaleLockRoot, scaleLockMode, scaleLock.customIntervals)
+          const key = resolveKeyAtTick(keyMap, scaleLock, n.time)
+          newPitch = snapToScale(newPitch, key.root, key.mode, key.customIntervals)
         }
       } else {
         newPitch = Math.max(0, Math.min(15, newPitch))
@@ -1236,8 +1242,7 @@ export const RightPane: React.FC = () => {
                 </span>
                 {detectedChordInfo.degree && (
                   <span style={{ fontSize: '9px', fontWeight: 800, color: '#4dabf7', background: 'rgba(77, 171, 247, 0.15)', padding: '1px 5px', borderRadius: '3px', border: '1px solid rgba(77, 171, 247, 0.3)' }}>
-                    {detectedChordInfo.degree} in {NOTE_NAMES_SHARP[scaleLock.root]} {scaleLock.mode}
-                  </span>
+                    {detectedChordInfo.degree} in {detectedChordInfo.key.accidental === 'flat' ? NOTE_NAMES_FLAT[detectedChordInfo.key.root] : NOTE_NAMES_SHARP[detectedChordInfo.key.root]} {resolveScaleMode(detectedChordInfo.key.mode) ?? detectedChordInfo.key.mode}                  </span>
                 )}
               </div>
               <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px' }}>

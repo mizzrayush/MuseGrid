@@ -9,7 +9,7 @@ import { getTrackFxInstances } from '../engine/fxDefaults'
 import { useContextMenuDismissal, useContextMenuPosition } from './useContextMenuDismissal'
 import { AppSlider, sliderProgress } from './AppSlider'
 import { NOTE_NAMES_SHARP, NOTE_NAMES_FLAT, CHORD_VOICINGS, snapTick, snapToScale, getDiatonicChord, SCALE_MODES, GENRE_PROGRESSIONS, type GenreProgression, CHORD_STAMPS } from '../utils/musicTheory'
-import { MAX_METER_BEATS, MAX_METER_DENOMINATOR, parseMeterSignature } from '../utils/conductor'
+import { MAX_METER_BEATS, MAX_METER_DENOMINATOR, parseMeterSignature, resolveKeyAtTick } from '../utils/conductor'
 import { generateCurveLut } from '../utils/envelopeCurves'
 import { trackFieldsFromMuzins } from '../utils/muzins'
 import { analyzeMelody, generateSynthCandidates, type MelodyProfile, type SoundCandidate } from '../utils/soundDesigner'
@@ -27,6 +27,7 @@ import { generateAiMelody, generateAiDrums, generateBeatMorph, generateAutoHarmo
 import { detectFundamentalPitch, hzToMidi } from '../utils/micRecorder'
 import StemSplitterPane from './StemSplitterPane'
 import GenerativeMusicPane from './GenerativeMusicPane'
+import GenerativeDrumsPane from './GenerativeDrumsPane'
 import { MidiEditSection } from './MidiEditSection'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET, DRUM_KITS, SYNTH_PRESETS, type DrumKit, type SynthPreset } from '../utils/instruments'
 import {
@@ -1948,6 +1949,7 @@ export default function LeftPane() {
   const removeExportRegion = useStore(s => s.removeExportRegion)
   const updateExportRegionGap = useStore(s => s.updateExportRegionGap)
   const scaleLock = useStore(s => s.scaleLock)
+  const keyMap = useStore(s => s.keyMap)
   const setScaleLock = useStore(s => s.setScaleLock)
   const scaleFoldEnabled = useStore(s => s.scaleFoldEnabled)
   const setScaleFoldEnabled = useStore(s => s.setScaleFoldEnabled)
@@ -2643,16 +2645,18 @@ export default function LeftPane() {
       const region = generationRegion
       sourceNotes = region ? notes.filter(n => ids.includes(n.trackId) && n.time >= region.start && n.time < region.end) : []
     }
+    const baseScale = activeTrack?.scaleOverride || scaleLock
+    const keyTick = generationSourceMode === 'region' && generationRegion ? generationRegion.start : playheadBar
     return createProceduralSuggestions(suggestionKind, {
       notes: sourceNotes,
       tracks,
       activeTrackId: generationSourceMode === 'active' ? activeTrackId : null,
-      scaleLock: activeTrack?.scaleOverride || scaleLock,
+      scaleLock: { ...baseScale, ...resolveKeyAtTick(keyMap, baseScale, keyTick) },
       playheadPosition: playheadBar,
       meterMap,
       timeSignature,
     })
-  }, [suggestionKind, notes, tracks, activeTrackId, selectedTrackIds, generationRegionTrackIds, generationRegion, scaleLock, activeTrack?.scaleOverride, playheadBar, generationSourceMode, meterMap, timeSignature])
+  }, [suggestionKind, notes, tracks, activeTrackId, selectedTrackIds, generationRegionTrackIds, generationRegion, scaleLock, keyMap, activeTrack?.scaleOverride, playheadBar, generationSourceMode, meterMap, timeSignature])
 
   useEffect(() => {
     const handleMouseMove = (event: MouseEvent) => {
@@ -3376,14 +3380,15 @@ export default function LeftPane() {
 
     const newNotes: Note[] = []
     timeMap.forEach((n: Note) => {
+      const key = resolveKeyAtTick(keyMap, activeTrack?.scaleOverride || scaleLock, n.time)
       if (type === 'chord') {
         const chordType = chordFamily === 'Sevenths' ? 'Seventh' : 'Triad'
-        const chordPitches = getDiatonicChord(n.pitch, scaleLock.root, scaleLock.mode, chordType, scaleLock.customIntervals)
+        const chordPitches = getDiatonicChord(n.pitch, key.root, key.mode, chordType, key.customIntervals)
         chordPitches.forEach(p => {
           newNotes.push({ id: newId(), trackId: targetTrackId, time: n.time, duration: n.duration, pitch: p, velocity: 80 })
         })
       } else {
-        const chordPitches = getDiatonicChord(n.pitch, scaleLock.root, scaleLock.mode, 'Triad', scaleLock.customIntervals)
+        const chordPitches = getDiatonicChord(n.pitch, key.root, key.mode, 'Triad', key.customIntervals)
         const rootPitch = chordPitches[0]
         const bassPitch = Math.max(12, rootPitch - 12)
         newNotes.push({ id: newId(), trackId: targetTrackId, time: n.time, duration: n.duration, pitch: bassPitch, velocity: 100 })
@@ -3715,6 +3720,9 @@ export default function LeftPane() {
           const needsWebAudio = (t: Track) => (
             (t as any).synthPreset === 'vocal' ||
             (t.instrument === 'synth' && (t as any).synthPreset === 'vocal') ||
+            // Scripted DSP classes only exist in the WebAudio engine, so hybrid exports
+            // render them there instead of losing the sound to the native fallback voice.
+            (t.instrument === 'synth' && (t as any).synthPreset === 'scripted' && !!(t as any).scriptedDspId) ||
             (t.instrument === 'synth' && (t.synthMode === 'sampler' || !!t.synthSampler?.audioBase64)) ||
             (t.instrument === 'drum' && !!(t.drumPadSamples && Object.keys(t.drumPadSamples).length > 0))
           )
@@ -7673,7 +7681,7 @@ export default function LeftPane() {
           title="AI & Generative"
           icon={<IconWand size={15} />}
           accentColor="#da77f2"
-          badge="4 Modules"
+          badge="5 Modules"
           defaultOpen={false}
         >
         <Section title="Suggestions" defaultOpen={false}>
@@ -7703,6 +7711,10 @@ export default function LeftPane() {
 
         <Section title="Generative Music" defaultOpen={false}>
           <GenerativeMusicPane />
+        </Section>
+
+        <Section title="Generative Drums" defaultOpen={false}>
+          <GenerativeDrumsPane />
         </Section>
 
         <Section title="Audio Stem Splitter" defaultOpen={false}>
@@ -10510,6 +10522,12 @@ export default function LeftPane() {
         </Section>
 
         <Section title="Scale Lock & Chord Stamper" defaultOpen={false}>
+          {activeTrack?.instrument === 'drum' ? (
+            <div style={{ padding: '7px 8px', borderRadius: '6px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', fontSize: '10px', color: '#aaa', lineHeight: 1.45 }}>
+              Scale lock, fold and chord stamping work on pitched notes, so they stay off a drum channel. Select a synth track to use them — the project scale still drives suggestions and analysis.
+            </div>
+          ) : (
+          <>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
             <span style={{ fontSize: '12px', color: '#aaa' }}>Scale Lock</span>
             <ToggleSwitch checked={scaleLock.enabled} onChange={checked => setScaleLock({ ...scaleLock, enabled: checked })} color="#00e6ff" />
@@ -10638,6 +10656,8 @@ export default function LeftPane() {
               })}
             </div>
           </div>
+          </>
+          )}
         </Section>
 
         {activeTrack?.instrument === 'synth' && (
@@ -10866,6 +10886,9 @@ export default function LeftPane() {
           <div style={{ borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '8px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
             <span style={{ fontSize: '10px', color: '#ff9900', fontWeight: 'bold' }}>Generator Settings</span>
             <SliderRow label="Pitch" value={genPitch} min={0} max={127} color="#ff9900" onChange={setGenPitch} />
+            <div style={{ fontSize: '9px', color: '#666', lineHeight: 1.4 }}>
+              Clips on a drum channel clamp this to their pads (0-15), so a pitched value still bakes onto the nearest lane.
+            </div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <span style={{ fontSize: '11px', color: '#aaa' }}>Overwrite Manual Notes</span>
               <ToggleSwitch checked={genOverwrite} onChange={setGenOverwrite} color="#ff9900" />
@@ -12361,6 +12384,9 @@ for (let channel = 0; channel < input.length; channel++) {
                                   ) : (
                                     <option value="custom" style={{ background: '#12141c', color: '#00e6ff', fontWeight: 700 }}>Custom Synth (Studio)</option>
                                   )}
+                                  {track.synthPreset === 'scripted' && (
+                                    <option value="scripted" style={{ background: '#12141c', color: '#ffd43b', fontWeight: 700 }}>Scripted DSP: {track.scriptedDspId || 'Custom script'}</option>
+                                  )}
                                   <option value="custom-sampler" style={{ background: '#12141c', color: '#00e6ff', fontWeight: 700 }}>Custom Sampler (Studio)</option>
                                   <option value="import-muzins" style={{ background: '#12141c', color: '#e0e0e0' }}>Load from Device (.muzins)...</option>
                                 </optgroup>
@@ -12369,6 +12395,11 @@ for (let channel = 0; channel < input.length; channel++) {
                                   <option value="vocal" style={{ background: '#12141c', color: '#69db7c' }}>[Vocal Synth] Formant Singing Synthesizer</option>
                                 </optgroup>
                               </StopPropSelect>
+                              {track.synthPreset === 'scripted' && Boolean((window as any).__isJuceNative__) && (
+                                <div style={{ marginTop: '6px', padding: '5px 7px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '4px', fontSize: '10px', color: '#aaa', lineHeight: 1.4 }}>
+                                  Scripted DSP plays on the web engine. Native playback uses a plain synth; exports and bounces keep the scripted sound.
+                                </div>
+                              )}
                               {track.vst3InstrumentId && (
                                 <button
                                   onClick={(e) => {

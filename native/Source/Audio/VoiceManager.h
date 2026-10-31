@@ -14,6 +14,17 @@ public:
     void prepare(double sampleRate);
     void reset();
 
+    struct SynthFmConfig
+    {
+        bool enabled = false;
+        float harmonicity = 1.0f;
+        float modIndex = 0.0f;
+        float modAttack = 0.01f;
+        float modDecay = 0.20f;
+        float modSustain = 0.10f;
+        float modRelease = 0.20f;
+    };
+
     void noteOnSynth(const juce::String& trackId,
                      int noteId,
                      float pitchMidi,
@@ -41,7 +52,8 @@ public:
                      float unisonSpreadCents = 0.0f,
                      float detuneCents = 0.0f,
                      const float* partials = nullptr,
-                     int partialCount = 0);
+                     int partialCount = 0,
+                     const SynthFmConfig& fm = {});
 
     void noteOnPhysical(const juce::String& trackId,
                         int noteId,

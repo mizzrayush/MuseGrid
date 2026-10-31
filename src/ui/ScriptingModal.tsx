@@ -277,7 +277,8 @@ interface TuningAPI {
   getAvailableScales(): string[];
   getGenreProgressions(): any[];
   detectChord(pitches: number[], preferFlats?: boolean): any;
-  detectScaleDegree(rootPc: number, scaleRoot?: number, scaleMode?: string): string | null;
+  detectScaleDegree(rootPc: number, scaleRoot?: number, scaleMode?: string, chordQuality?: string): string | null;
+  analyzeChord(notes?: Array<number | { pitch: number; time?: number }>, key?: { root?: number; mode?: string; customIntervals?: number[]; tick?: number }): any;
 }
 
 interface ProjectAPI {
@@ -1088,6 +1089,18 @@ const SCRIPT_API_DOCS: ApiDocEntry[] = [
     signature: 'Muse.tuning.setScalaScale(trackId, scaleName, cents[])',
     summary: 'Load custom Scala (.scl) microtonal interval tuning on track.',
     snippet: 'Muse.tuning.setScalaScale(trackId, "Werckmeister III", [0, 90, 192, 294, 390, 498, 588, 696, 792, 888, 996, 1092, 1200]);',
+  },
+  {
+    category: 'tuning',
+    signature: 'Muse.tuning.detectScaleDegree(rootPc, scaleRoot?, scaleMode?, chordQuality?)',
+    summary: 'Roman numeral for a pitch class. Pass the chord quality so secondary dominants and borrowed chords (V/V, iv) label correctly instead of falling back to a plain degree.',
+    snippet: 'Muse.tuning.detectScaleDegree(2, 0, "Major", "dominant"); // V/V',
+  },
+  {
+    category: 'tuning',
+    signature: 'Muse.tuning.analyzeChord(notes?, key?)',
+    summary: 'Chord name plus its roman numeral in the conductor key at the notes tick. Omit notes to analyze the selection; override the key with { root, mode, tick }.',
+    snippet: 'const a = Muse.tuning.analyzeChord();\nconsole.log(a?.chord.fullName, a?.degree);',
   },
 
   // 8. Project & File I/O (Muse.project)

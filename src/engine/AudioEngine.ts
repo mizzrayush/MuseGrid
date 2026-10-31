@@ -4233,6 +4233,36 @@ class AudioEngine {
           partials: track.synthPartials
         });
       }
+      // FM and MonoSynth topologies live in customMuxins; forward them so the native
+      // synth matches the web engine instead of falling back to subtractive.
+      if (track.instrument === 'synth' && track.synthPreset === 'custom') {
+        const muxins = track.customMuxins
+        const config = muxins?.config || {}
+        const fmEnabled = muxins?.engineType === 'FMSynth'
+        const modEnv = config.modulationEnvelope || {}
+        ;(window as any).juceAudioBridge.postCommand({
+          type: 'setTrackFm',
+          trackId: track.id,
+          enabled: fmEnabled ? 1 : 0,
+          harmonicity: config.harmonicity ?? 2.4,
+          modulationIndex: config.modulationIndex ?? 5.8,
+          modAttack: modEnv.attack ?? 0.01,
+          modDecay: modEnv.decay ?? 0.18,
+          modSustain: modEnv.sustain ?? 0.1,
+          modRelease: modEnv.release ?? 0.2
+        })
+        const filterEnv = config.filterEnvelope
+        ;(window as any).juceAudioBridge.postCommand({
+          type: 'setTrackFilterEnv',
+          trackId: track.id,
+          enabled: muxins?.engineType === 'MonoSynth' && filterEnv ? 1 : 0,
+          baseFrequency: filterEnv?.baseFrequency ?? 80,
+          octaves: filterEnv?.octaves ?? 3,
+          attack: filterEnv?.attack ?? 0.01,
+          decay: filterEnv?.decay ?? 0.14,
+          sustain: filterEnv?.sustain ?? 0.2
+        })
+      }
       if (track.drumKit) {
         (window as any).juceAudioBridge.postCommand({
           type: 'setTrackKit',

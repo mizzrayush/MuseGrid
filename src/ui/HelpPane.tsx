@@ -762,8 +762,10 @@ export default function HelpPane() {
                 <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Tempo Automation</h3>
                 <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
                   <li><strong>Add a point</strong>: Click anywhere in the tempo lane at the height that matches the BPM you want. Clicking the playhead position is also available from the lane toolbar.</li>
+                  <li><strong>Fractional tempo</strong>: Both the top-bar BPM box and a tempo point's BPM field accept decimals (for example <code>127.5</code> or <code>90.25</code>); the value is stored and played exactly, and the top-bar box shows two decimals such as <code>120.00</code>.</li>
                   <li><strong>Shape a curve</strong>: Drag a point to move it in time and pitch (BPM). Select it to edit its BPM, change its curve, or delete it.</li>
                   <li><strong>Curve types</strong>: <em>Step</em> holds the value until the next point, <em>Linear</em> ramps evenly, <em>Exponential</em> accelerates smoothly, and <em>Formula</em> evaluates a math expression for fully custom tempo trajectories.</li>
+                  <li><strong>Formula variables</strong>: <code>t</code> is the segment progress from 0 to 1, <code>b</code> the beats elapsed, <code>m</code> the bars elapsed (counted with the project's meter map, so a 7/8 bar is one bar), <code>ticks</code> the absolute tick, and <code>v</code> the linear BPM between the two points. The result is clamped to 20–999 BPM.</li>
                   <li><strong>Tempo applies everywhere</strong>: live playback, the metronome, grid seconds display, stem bounces, WAV/MP3 export, and native rendering all read the tempo map. A tempo point at tick 0 replaces the project BPM.</li>
                 </ul>
 
@@ -925,14 +927,19 @@ export default function HelpPane() {
                   <li>Type a mathematical formula into the box.</li>
                   <li>Ensure the <strong>Procedural FX Engine</strong> is enabled globally (in the Studio Settings at the bottom left of the screen).</li>
                 </ol>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>
+                  Every rack effect accepts modulators, including <strong>custom JS DSP script FX</strong> (each parameter is clamped to its own min/max) and <strong>DPreverb</strong>
+                  (<code>wet</code>, <code>tail</code>, <code>decay</code> and <code>tone</code> are read once per note when the pre-wash fires). Built-in and script FX are also modulated during export,
+                  so the bounce matches what you hear; VST3 parameters are driven through the lane instead.
+                </p>
 
                 <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Writing Formulas</h3>
                 <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>Your formula must return a number. You can use these variables:</p>
                 <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
-                  <li><code>t</code>: The current time in seconds.</li>
-                  <li><code>b</code>: The current beat number (e.g., 1, 2, 3, 4).</li>
-                  <li><code>m</code>: The current measure/bar number.</li>
-                  <li><code>ticks</code>: The raw internal tick counter.</li>
+                  <li><code>t</code>: Time in seconds, measured along the conductor tempo map when one exists.</li>
+                  <li><code>b</code>: Beats elapsed since the start (fractional, not a count of the current beat).</li>
+                  <li><code>m</code>: Bars elapsed, counted with the project's meter map — a 7/8 bar is one bar, not 1.75 four-beat bars.</li>
+                  <li><code>ticks</code>: The raw internal tick counter (192 ticks per quarter note).</li>
                   <li><code>sampleRate</code>: The audio sample rate (e.g., 44100). Essential for time/frequency math!</li>
                   <li><code>currentTime</code>: The exact audio context time in seconds.</li>
                   <li><code>v</code>: In a <strong>Live Equation Lane</strong>, the lane's own drawn value at that moment, so an equation can shape what you drew instead of replacing it.</li>
@@ -945,7 +952,8 @@ export default function HelpPane() {
                   the lane is read live during playback and again, sample-accurately, during export, so preview and bounce always match.
                 </p>
                 <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
-                  <li>The lane always works in <strong>0–127 lane space</strong>; the target decides what that number means.</li>
+                  <li>The lane always works in <strong>0–127 lane space</strong>; the target decides what that number means. Pan maps 0 → hard left, 64 → centre, 127 → hard right, so the full range is reachable.</li>
+                  <li>In a lane equation, <code>t</code> is real seconds along the conductor tempo map, <code>b</code> beats, <code>m</code> bars as counted by the meter map, and <code>ticks</code> the absolute tick.</li>
                   <li><strong>Override / Add / Multiply</strong> combine the equation with the drawn points, exactly like the FX modulators.</li>
                   <li>Targets: Velocity, Volume, Pan, any <strong>VST3 parameter</strong>, and the per-note expression parameters
                     <em> Filter cutoff, Vibrato depth, Vibrato rate, Tremolo depth, Tremolo rate, Detune, Glide amount</em>.</li>

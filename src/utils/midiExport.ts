@@ -32,14 +32,14 @@ export function createMidiData(notes: Note[], bpm: number, tracks?: Track[], opt
     // Sample non-step ramps on beat boundaries so DAWs see a close approximation of
     // the curve, then land exact values on every tempo point.
     const events = new Map<number, number>()
-    const baseAtStart = getTempoAtTick(tempoMap, bpm, regionStart)
+    const baseAtStart = getTempoAtTick(tempoMap, bpm, regionStart, meterMap, options?.timeSignature)
     events.set(0, baseAtStart)
     tempoMap.forEach((point, index) => {
       if (point.tick < regionStart) return
       const next = tempoMap[index + 1]
       if (next && point.curve !== 'step') {
         for (let tick = point.tick + 96; tick < next.tick; tick += 96) {
-          events.set(Math.round((tick - regionStart) * scale), getTempoAtTick(tempoMap, bpm, tick))
+          events.set(Math.round((tick - regionStart) * scale), getTempoAtTick(tempoMap, bpm, tick, meterMap, options?.timeSignature))
         }
       }
       events.set(Math.round((point.tick - regionStart) * scale), point.bpm)

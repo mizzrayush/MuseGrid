@@ -117,6 +117,9 @@ function ToastContainer() {
 
 const TIME_SIGNATURE_PRESETS = ['4/4', '3/4', '2/4', '5/4', '6/4', '7/4', '6/8', '7/8', '12/8']
 
+/** BPM is stored as a float; the pod shows two decimals so fractional tempo is visible. */
+const formatBpm = (value: number) => (Number.isFinite(value) ? value.toFixed(2) : '120.00')
+
 function App() {
   const isPlaying = useStore(state => state.isPlaying)
   const bpm = useStore(state => state.bpm)
@@ -220,12 +223,12 @@ function App() {
   const isSynthZoomFocused = useRef(false)
   const isDrumZoomFocused = useRef(false)
 
-  const [localBpm, setLocalBpm] = useState(String(bpm))
+  const [localBpm, setLocalBpm] = useState(formatBpm(bpm))
   const isBpmFocused = useRef(false)
 
   useEffect(() => {
     if (!isBpmFocused.current) {
-      setLocalBpm(String(bpm))
+      setLocalBpm(formatBpm(bpm))
     }
   }, [bpm])
 
@@ -986,8 +989,8 @@ function App() {
             <button
               onClick={() => {
                 const cur = Number(localBpm) || 120
-                const next = Math.max(20, Math.round(cur - 1))
-                setLocalBpm(String(next))
+                const next = Math.max(20, Math.round((cur - 1) * 100) / 100)
+                setLocalBpm(formatBpm(next))
                 audioEngine.setBpm(next)
               }}
               title="Decrease Tempo by 1 BPM"
@@ -997,14 +1000,16 @@ function App() {
               type="number"
               step="any"
               value={localBpm}
-              onFocus={() => { isBpmFocused.current = true }}
+              onFocus={(e) => { isBpmFocused.current = true; e.currentTarget.select() }}
               onBlur={() => {
                 isBpmFocused.current = false
                 const parsed = Number(localBpm)
                 if (!isNaN(parsed) && parsed > 0) {
-                  audioEngine.setBpm(parsed)
+                  const rounded = Number(parsed.toFixed(2))
+                  audioEngine.setBpm(rounded)
+                  setLocalBpm(formatBpm(rounded))
                 } else {
-                  setLocalBpm(String(useStore.getState().bpm))
+                  setLocalBpm(formatBpm(useStore.getState().bpm))
                 }
               }}
               onChange={(e) => {
@@ -1019,13 +1024,13 @@ function App() {
                   e.currentTarget.blur()
                 }
               }}
-              style={{ width: '40px', background: 'transparent', border: 'none', color: '#fff', fontWeight: 800, fontSize: '12px', textAlign: 'center', fontFamily: "'JetBrains Mono', monospace", outline: 'none', padding: 0 }}
+              style={{ width: '56px', background: 'transparent', border: 'none', color: '#fff', fontWeight: 800, fontSize: '12px', textAlign: 'center', fontFamily: "'JetBrains Mono', monospace", outline: 'none', padding: 0 }}
             />
             <button
               onClick={() => {
                 const cur = Number(localBpm) || 120
-                const next = Math.min(999, Math.round(cur + 1))
-                setLocalBpm(String(next))
+                const next = Math.min(999, Math.round((cur + 1) * 100) / 100)
+                setLocalBpm(formatBpm(next))
                 audioEngine.setBpm(next)
               }}
               title="Increase Tempo by 1 BPM"

@@ -1,6 +1,6 @@
 import * as Tone from 'tone'
 import type { AppState, CustomFxConfig, Note, Track, TrackGroup, AutomationTarget } from '../engine/store'
-import { getLaneValueAtTick, applyExpressionLaneToNote, laneFallbackValue, laneIsActive, laneValueToPan } from './automation'
+import { getLaneValueAtTick, applyExpressionLaneToNote, laneFallbackValue, laneIsActive, laneValueToPan, modulateFxParam } from './automation'
 import { parseAutomationTarget } from '../engine/store'
 import { getEffectiveTrackLevel } from './groupAudio'
 import { buildGlideIntoMap, resolveGlidePlayback } from './midiEditing'
@@ -11,7 +11,7 @@ import { CustomScriptProcessorNode, DPreverbNode, audioEngine, VocalModelVoice, 
 import { getActiveDPreverbInstances, getTrackFxInstances, getTrackFxSetting as readTrackFxSetting, type BuiltInFxType } from '../engine/fxDefaults'
 import { createTrackChannel } from './toneChannel'
 import { drumSampleShouldLoop, getSamplerPlayPlan, resolveSamplerLoopMode, resolveSamplerRegion } from './audioPlayback'
-import { buildConductorBeats, conductorDurationSeconds, conductorSecondsAtTick, getTempoAtTick } from './conductor'
+import { buildConductorBeats, conductorBarsAtTick, conductorDurationSeconds, conductorSecondsAtTick, getTempoAtTick } from './conductor'
 
 const PPQ = 192
 
@@ -839,11 +839,12 @@ function renderTrackNotesWithTransform(
       const playedTick = noteTime / relativeTempo
       const playedRegionStart = startOffset / relativeTempo
       const start = Math.max(0,
-        conductorSecondsAtTick(state.tempoMap, state.bpm, playedTick) -
-        conductorSecondsAtTick(state.tempoMap, state.bpm, playedRegionStart))
+        conductorSecondsAtTick(state.tempoMap, state.bpm, playedTick, state.meterMap, state.timeSignature) -
+        conductorSecondsAtTick(state.tempoMap, state.bpm, playedRegionStart, state.meterMap, state.timeSignature))
       const duration = Math.max(0.01,
-        conductorDurationSeconds(state.tempoMap, state.bpm, playedTick, playedTick + noteLength) / relativeTempo)
-      const noteTicksPerSecond = ((getTempoAtTick(state.tempoMap, state.bpm, playedTick) * relativeTempo) / 60) * PPQ
+        conductorDurationSeconds(state.tempoMap, state.bpm, playedTick, playedTick + noteLength, state.meterMap, state.timeSignature) / relativeTempo)
+      const noteTicksPerSecond = ((getTempoAtTick(state.tempoMap, state.bpm, playedTick, state.meterMap, state.timeSignature) * relativeTempo) / 60) * PPQ
+      const laneTime = { tempoMap: state.tempoMap, meterMap: state.meterMap, timeSignature: state.timeSignature }
 
       // The automation lane drives velocity, per-note volume, per-note pan or expression parameters.
       let velocity = note.velocity / 127
@@ -865,13 +866,14 @@ function renderTrackNotesWithTransform(
             tick: note.time + note.duration / 2,
             fallback: laneFallbackValue(targetStr, note),
             bpm: state.bpm,
+            time: laneTime,
           })
           if (targetStr === 'volume') autoGain = Math.max(0, Math.min(1, laneVal / 127))
           else if (targetStr === 'pan') notePan = laneValueToPan(laneVal)
           else if (targetStr === 'velocity') velocity = laneVal / 127
           else if (parseAutomationTarget(targetStr)?.kind === 'expr' && laneIsActive(pts, state.automationLanes?.[track.id])) {
             playNoteData = applyExpressionLaneToNote(playNoteData, targetStr, laneVal, {
-              lane: state.automationLanes?.[track.id], points: pts, bpm: state.bpm,
+              lane: state.automationLanes?.[track.id], points: pts, bpm: state.bpm, time: laneTime,
             })
           }
         }
@@ -883,10 +885,11 @@ function renderTrackNotesWithTransform(
           tick: note.time + note.duration / 2,
           fallback: laneFallbackValue(automationTarget, note),
           bpm: state.bpm,
+          time: laneTime,
         })
         if (parseAutomationTarget(automationTarget)?.kind === 'expr' && laneIsActive(state.automationCurves[track.id], state.automationLanes?.[track.id])) {
           playNoteData = applyExpressionLaneToNote(playNoteData, automationTarget, laneValue, {
-            lane: state.automationLanes?.[track.id], points: state.automationCurves[track.id], bpm: state.bpm,
+            lane: state.automationLanes?.[track.id], points: state.automationCurves[track.id], bpm: state.bpm, time: laneTime,
           })
         }
         if (automationTarget === 'volume') autoGain = Math.max(0, Math.min(1, laneValue / 127))
@@ -1211,11 +1214,12 @@ function renderTrackNotesWithTransform(
     const playedTick = note.time / relativeTempo
     const playedRegionStart = startOffset / relativeTempo
     const start = Math.max(0,
-      conductorSecondsAtTick(state.tempoMap, state.bpm, playedTick) -
-      conductorSecondsAtTick(state.tempoMap, state.bpm, playedRegionStart))
+      conductorSecondsAtTick(state.tempoMap, state.bpm, playedTick, state.meterMap, state.timeSignature) -
+      conductorSecondsAtTick(state.tempoMap, state.bpm, playedRegionStart, state.meterMap, state.timeSignature))
     const duration = Math.max(0.01,
-      conductorDurationSeconds(state.tempoMap, state.bpm, playedTick, playedTick + note.duration) / relativeTempo)
-    const noteTicksPerSecond = ((getTempoAtTick(state.tempoMap, state.bpm, playedTick) * relativeTempo) / 60) * PPQ
+      conductorDurationSeconds(state.tempoMap, state.bpm, playedTick, playedTick + note.duration, state.meterMap, state.timeSignature) / relativeTempo)
+    const noteTicksPerSecond = ((getTempoAtTick(state.tempoMap, state.bpm, playedTick, state.meterMap, state.timeSignature) * relativeTempo) / 60) * PPQ
+    const laneTime = { tempoMap: state.tempoMap, meterMap: state.meterMap, timeSignature: state.timeSignature }
     let laneNote = note
     let velocity = note.velocity / 127
     let autoGain = 1
@@ -1236,13 +1240,14 @@ function renderTrackNotesWithTransform(
           tick: note.time + note.duration / 2,
           fallback: laneFallbackValue(targetStr, note),
           bpm: state.bpm,
+          time: laneTime,
         })
         if (targetStr === 'volume') autoGain = Math.max(0, Math.min(1, laneVal / 127))
         else if (targetStr === 'pan') notePan = laneValueToPan(laneVal)
         else if (targetStr === 'velocity') velocity = laneVal / 127
         else if (parseAutomationTarget(targetStr)?.kind === 'expr' && laneIsActive(pts, state.automationLanes?.[track.id])) {
           laneNote = applyExpressionLaneToNote(laneNote, targetStr, laneVal, {
-            lane: state.automationLanes?.[track.id], points: pts, bpm: state.bpm,
+            lane: state.automationLanes?.[track.id], points: pts, bpm: state.bpm, time: laneTime,
           })
         }
       }
@@ -1254,11 +1259,12 @@ function renderTrackNotesWithTransform(
         tick: note.time + note.duration / 2,
         fallback: laneFallbackValue(automationTarget, note),
         bpm: state.bpm,
+        time: laneTime,
       })
       laneNote = parseAutomationTarget(automationTarget)?.kind === 'expr'
         && laneIsActive(state.automationCurves[track.id], state.automationLanes?.[track.id])
         ? applyExpressionLaneToNote(note, automationTarget, laneValue, {
-          lane: state.automationLanes?.[track.id], points: state.automationCurves[track.id], bpm: state.bpm,
+          lane: state.automationLanes?.[track.id], points: state.automationCurves[track.id], bpm: state.bpm, time: laneTime,
         })
         : note
       if (automationTarget === 'volume') autoGain = Math.max(0, Math.min(1, laneValue / 127))
@@ -1323,10 +1329,10 @@ function renderMetronome(state: AppState, startTick: number, endTick: number): v
   // Clicks stay on the project beat grid, matching live playback, so a loop export that starts
   // mid-bar still accents the real downbeats instead of restarting the count at the loop start.
   const beats = buildConductorBeats(state.meterMap, state.timeSignature, startTick, endTick)
-  const rangeStartSeconds = conductorSecondsAtTick(state.tempoMap, state.bpm, startTick)
+  const rangeStartSeconds = conductorSecondsAtTick(state.tempoMap, state.bpm, startTick, state.meterMap, state.timeSignature)
 
   beats.forEach(beat => {
-    const time = conductorSecondsAtTick(state.tempoMap, state.bpm, beat.tick) - rangeStartSeconds
+    const time = conductorSecondsAtTick(state.tempoMap, state.bpm, beat.tick, state.meterMap, state.timeSignature) - rangeStartSeconds
     if (time < 0) return
     const note = beat.isDownbeat ? settings.downbeatPitch : settings.upbeatPitch
     const velBase = beat.isDownbeat ? settings.downbeatVel : settings.upbeatVel
@@ -1371,22 +1377,35 @@ function scheduleTrackDPreverb(
     const playedNoteTick = note.time / relativeTempo
     const playedStartOffset = startOffset / relativeTempo
     const noteStartSeconds = Math.max(0,
-      conductorSecondsAtTick(state.tempoMap, state.bpm, playedNoteTick) -
-      conductorSecondsAtTick(state.tempoMap, state.bpm, playedStartOffset))
-    const localTicksPerSecond = ((getTempoAtTick(state.tempoMap, state.bpm, playedNoteTick) * relativeTempo) / 60) * PPQ
+      conductorSecondsAtTick(state.tempoMap, state.bpm, playedNoteTick, state.meterMap, state.timeSignature) -
+      conductorSecondsAtTick(state.tempoMap, state.bpm, playedStartOffset, state.meterMap, state.timeSignature))
+    const localTicksPerSecond = ((getTempoAtTick(state.tempoMap, state.bpm, playedNoteTick, state.meterMap, state.timeSignature) * relativeTempo) / 60) * PPQ
 
-    dpreverbs.forEach(({ settings, node }) => {
-      const idealPreStartTick = note.time - (settings.tail * localTicksPerSecond)
+    dpreverbs.forEach(({ inst, settings, node }) => {
+      // Modulators are read at the note's own position, matching live playback.
+      const mods = track.fxModulators?.[inst.id]
+      const modContext = {
+        t: conductorSecondsAtTick(state.tempoMap, state.bpm, playedNoteTick, state.meterMap, state.timeSignature),
+        b: playedNoteTick / PPQ,
+        m: conductorBarsAtTick(state.meterMap, state.timeSignature, playedNoteTick),
+        ticks: playedNoteTick,
+      }
+      const wet = modulateFxParam(settings.wet, mods?.wet, modContext, 0, 1)
+      const tail = modulateFxParam(settings.tail, mods?.tail, modContext, 0, 120)
+      const decay = modulateFxParam(settings.decay, mods?.decay, modContext, 0.05, 1)
+      const tone = modulateFxParam(settings.tone, mods?.tone, modContext, 0, 1)
+      if (wet <= 0 || tail <= 0) return
+      const idealPreStartTick = note.time - (tail * localTicksPerSecond)
       const preStartTick = Math.max(startOffset, idealPreStartTick)
       if (endTick !== undefined && preStartTick >= endTick) return
 
       const preStartSeconds = Math.max(0,
-        conductorSecondsAtTick(state.tempoMap, state.bpm, preStartTick / relativeTempo) -
-        conductorSecondsAtTick(state.tempoMap, state.bpm, playedStartOffset))
+        conductorSecondsAtTick(state.tempoMap, state.bpm, preStartTick / relativeTempo, state.meterMap, state.timeSignature) -
+        conductorSecondsAtTick(state.tempoMap, state.bpm, playedStartOffset, state.meterMap, state.timeSignature))
       const effectiveDuration = noteStartSeconds - preStartSeconds
       if (effectiveDuration <= 0.015) return
 
-      node.trigger(effectiveDuration, preStartSeconds, settings.wet, settings.decay, settings.tone)
+      node.trigger(effectiveDuration, preStartSeconds, wet, decay, tone)
     })
   })
 }
@@ -1659,7 +1678,7 @@ export async function renderProjectAudio(state: AppState, options: RenderOptions
       } catch (err) {
         // Handle empty region gracefully by exporting silence
         const durationSeconds = Math.max(0.1,
-          conductorDurationSeconds(state.tempoMap, state.bpm, region.startTick, region.endTick))
+          conductorDurationSeconds(state.tempoMap, state.bpm, region.startTick, region.endTick, state.meterMap, state.timeSignature))
         const ctx = Tone.context;
         const sampleRate = ctx.sampleRate;
         const silentBuf = ctx.createBuffer(2, Math.round(durationSeconds * sampleRate), sampleRate);
@@ -1678,7 +1697,7 @@ export async function renderProjectAudio(state: AppState, options: RenderOptions
     return stitched;
   }
 
-  const { notes, tracks, bpm } = state
+  const { notes, tracks } = state
   const groups = state.groups ?? []
   let renderableTracks = tracks.filter(track => shouldRenderTrack(track, tracks, groups))
 
@@ -1711,21 +1730,20 @@ export async function renderProjectAudio(state: AppState, options: RenderOptions
     const relative = trackBpm / state.bpm
     const playedStart = startTick / relative
     const playedEnd = (note.time + note.duration) / relative
-    const noteEnd = conductorSecondsAtTick(state.tempoMap, state.bpm, playedEnd) -
-      conductorSecondsAtTick(state.tempoMap, state.bpm, playedStart)
+    const noteEnd = conductorSecondsAtTick(state.tempoMap, state.bpm, playedEnd, state.meterMap, state.timeSignature) -
+      conductorSecondsAtTick(state.tempoMap, state.bpm, playedStart, state.meterMap, state.timeSignature)
     if (noteEnd > maxSeconds) maxSeconds = noteEnd
   })
 
   // Also consider the absolute duration of the selected tick range under the conductor map
-  const globalTPS = (bpm / 60) * PPQ
-  const rangeDuration = conductorDurationSeconds(state.tempoMap, state.bpm, startTick, endTick)
+  const rangeDuration = conductorDurationSeconds(state.tempoMap, state.bpm, startTick, endTick, state.meterMap, state.timeSignature)
   if (rangeDuration > maxSeconds) {
     // If the requested range is longer than the notes (e.g. exporting a silent tail)
     maxSeconds = rangeDuration
   }
 
   const endBufferSeconds = conductorDurationSeconds(
-    state.tempoMap, state.bpm, endTick, endTick + state.studioSettings.loopEndBuffer
+    state.tempoMap, state.bpm, endTick, endTick + state.studioSettings.loopEndBuffer, state.meterMap, state.timeSignature
   )
   const fadeDuration = state.studioSettings.renderFadeDuration
   const renderDuration = Math.max(maxSeconds + endBufferSeconds + (options.autoFade ? fadeDuration : 0.5), 1)
@@ -1945,8 +1963,11 @@ export async function renderProjectAudio(state: AppState, options: RenderOptions
     if (options.includeProceduralFx && state.studioSettings.proceduralFxEnabled) {
       const rateStr = state.studioSettings.proceduralFxRate || '32n'
       const rateTicks = rateStr === '16n' ? 48 : rateStr === '32n' ? 24 : rateStr === '64n' ? 12 : rateStr === '128n' ? 6 : 24
-      const stepDuration = rateTicks / globalTPS
-      const totalSteps = Math.ceil(renderDuration / stepDuration)
+      const startSeconds = conductorSecondsAtTick(state.tempoMap, state.bpm, startTick, state.meterMap, state.timeSignature)
+      // Steps run along the tick grid so a tempo map or a region start keeps the automation
+      // aligned with the notes instead of drifting against base-BPM seconds.
+      const lastModTick = endTick + state.studioSettings.loopEndBuffer
+      const totalSteps = Math.max(1, Math.ceil(Math.max(0, lastModTick - startTick) / Math.max(1, rateTicks)))
 
       renderableTracks.forEach(track => {
         if (!track.fxModulators || Object.keys(track.fxModulators).length === 0) return
@@ -1959,8 +1980,36 @@ export async function renderProjectAudio(state: AppState, options: RenderOptions
           const inst = getTrackFxInstances(track.fxInstances).find(i => i.id === instanceId)
           if (!node || !inst) return
 
-          // Custom and scheduled preverb nodes do not expose continuous Tone params here.
-          if (node instanceof CustomScriptProcessorNode || node instanceof DPreverbNode) return
+          if (node instanceof CustomScriptProcessorNode) {
+            // The script node has no schedulable AudioParams, so the same curves are handed to
+            // it as a time table that its worklet interpolates during the render.
+            const config = state.customFxConfigs.find(c => c.id === inst.type)
+            if (!config || config.mode === 'offline') return
+            const table: Record<string, Array<[number, number]>> = {}
+            config.params.forEach(param => {
+              const mod = mods[param.name]
+              if (!mod) return
+              const baseVal = getTrackFxSetting(track, instanceId, inst.type, param.name, param.defaultVal)
+              const series: Array<[number, number]> = []
+              for (let step = 0; step < totalSteps; step++) {
+                const ticks = startTick + step * rateTicks
+                const absolute = conductorSecondsAtTick(state.tempoMap, state.bpm, ticks, state.meterMap, state.timeSignature)
+                const value = modulateFxParam(baseVal, mod, {
+                  t: absolute,
+                  b: ticks / PPQ,
+                  m: conductorBarsAtTick(state.meterMap, state.timeSignature, ticks),
+                  ticks,
+                }, param.min, param.max)
+                series.push([Math.max(0, absolute - startSeconds), value])
+              }
+              if (series.length > 0) table[param.name] = series
+            })
+            if (Object.keys(table).length > 0) node.setModulation(table)
+            return
+          }
+
+          // A scheduled preverb fires per note and reads its modulators there.
+          if (node instanceof DPreverbNode) return
 
           const scheduleParam = (paramName: string, fallback: number, paramObj: any) => {
             if (!paramObj || typeof paramObj.setValueAtTime !== 'function') return
@@ -1978,14 +2027,15 @@ export async function renderProjectAudio(state: AppState, options: RenderOptions
             const baseVal = getTrackFxSetting(track, instanceId, inst.type, paramName, fallback)
 
             for (let step = 0; step < totalSteps; step++) {
-              const t = step * stepDuration
-              const ticks = t * globalTPS
+              const ticks = startTick + step * rateTicks
+              // Absolute transport seconds, so a formula's t matches what playback hears.
+              const absoluteSeconds = conductorSecondsAtTick(state.tempoMap, state.bpm, ticks, state.meterMap, state.timeSignature)
               const b = ticks / PPQ
-              const m = b / 4
+              const m = conductorBarsAtTick(state.meterMap, state.timeSignature, ticks)
 
               let result: number
               try {
-                result = fn(t, b, m, ticks)
+                result = fn(absoluteSeconds, b, m, ticks)
               } catch (e) {
                 continue
               }
@@ -2002,10 +2052,10 @@ export async function renderProjectAudio(state: AppState, options: RenderOptions
               if (paramName === 'depth') finalVal = Math.max(0, Math.min(1, finalVal))
 
               if (typeof finalVal !== 'number' || !isFinite(finalVal) || isNaN(finalVal)) continue
-              const safeT = typeof t === 'number' && isFinite(t) ? t : 0
+              const scheduleTime = Math.max(0, absoluteSeconds - startSeconds)
 
               try {
-                paramObj.setValueAtTime(finalVal, safeT)
+                paramObj.setValueAtTime(finalVal, scheduleTime)
               } catch (err) {
                 // Ignore schedule errors
               }

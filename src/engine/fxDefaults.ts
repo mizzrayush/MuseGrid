@@ -117,11 +117,22 @@ export function getDPreverbSettings(track: TrackFxHost, inst: FxLike): DPreverbS
   }
 }
 
-export function getActiveDPreverbInstances(track: TrackFxHost & { fxInstances?: FxLike[] }): Array<{ inst: FxLike; settings: DPreverbSettings }> {
+/** Every DPreverb instance, including the ones a modulator switches on per note. */
+export function getDPreverbInstances(track: TrackFxHost & { fxInstances?: FxLike[] }): Array<{ inst: FxLike; settings: DPreverbSettings }> {
   return getTrackFxInstances(track.fxInstances)
     .filter(inst => inst.type === 'dpreverb')
     .map(inst => ({ inst, settings: getDPreverbSettings(track, inst) }))
-    .filter(({ settings }) => settings.wet > 0 && settings.tail > 0)
+}
+
+/** A wet or tail modulator can turn a statically silent DPreverb into an audible one per note. */
+export function dpreverbIsModulated(track: TrackFxHost, instId: string): boolean {
+  const mods = track.fxModulators?.[instId]
+  return Boolean(mods && (mods.wet || mods.tail))
+}
+
+export function getActiveDPreverbInstances(track: TrackFxHost & { fxInstances?: FxLike[] }): Array<{ inst: FxLike; settings: DPreverbSettings }> {
+  return getDPreverbInstances(track)
+    .filter(({ inst, settings }) => (settings.wet > 0 && settings.tail > 0) || dpreverbIsModulated(track, inst.id))
 }
 
 export function getMaxDPreverbTailSeconds(tracks: Array<TrackFxHost & { fxInstances?: FxLike[] }>): number {

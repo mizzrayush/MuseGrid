@@ -3,9 +3,9 @@ import { audioEngine } from './AudioEngine'
 import { useStore } from './store'
 import type { Track, Note, AutomationPoint, AutomationTarget, AutomationLane } from './store'
 import { parseAutomationTarget } from './store'
-import { getLaneValueAtTick, applyExpressionLaneToNote, laneFallbackValue, laneIsActive, laneValueToPan } from '../utils/automation'
+import { getLaneValueAtTick, applyExpressionLaneToNote, laneFallbackValue, laneIsActive, laneValueToPan, modulateFxParam } from '../utils/automation'
 import { buildGlideIntoMap, resolveGlidePlayback, type GlideIntoSpec } from '../utils/midiEditing'
-import { conductorDurationSeconds, conductorSecondsAtTick, getTempoAtTick, type TempoPoint } from '../utils/conductor'
+import { conductorBarsAtTick, conductorDurationSeconds, conductorSecondsAtTick, getTempoAtTick, type MeterPoint, type TempoPoint } from '../utils/conductor'
 import { getActiveDPreverbInstances } from './fxDefaults'
 
 export const TICKS_PER_BEAT = 192
@@ -39,7 +39,9 @@ export function mapNoteToScheduledEvent(
   automationTarget: AutomationTarget = 'velocity',
   automationLane?: AutomationLane,
   allTrackCurves?: Record<string, AutomationPoint[]>,
-  tempoMap?: TempoPoint[]
+  tempoMap?: TempoPoint[],
+  meterMap?: MeterPoint[],
+  timeSignature?: string
 ): ScheduledNoteMapping {
   const trackBpm = track?.targetTempo ?? globalBpm
   const multiplier = trackBpm / globalBpm
@@ -62,7 +64,7 @@ export function mapNoteToScheduledEvent(
   // Under a conductor tempo map the tick length varies, so length is the integral
   // of the map over the note's span. Per-note/track BPM still scales it relatively.
   const tempoDuration = tempoMap && tempoMap.length > 0
-    ? conductorDurationSeconds(tempoMap, globalBpm, positionTicks, positionTicks + playback.durationTicks)
+    ? conductorDurationSeconds(tempoMap, globalBpm, positionTicks, positionTicks + playback.durationTicks, meterMap, timeSignature)
     : playback.durationTicks / noteTPS
   const durationSeconds = Math.max(0.005, tempoDuration * (tempoMap && tempoMap.length > 0 ? globalBpm / Math.max(1, noteBpm) : 1))
 
@@ -74,6 +76,7 @@ export function mapNoteToScheduledEvent(
 
   let velocity = n.velocity / 127
   let note = playback.note
+  const laneTime = { tempoMap, meterMap, timeSignature }
 
   // Concurrent Multi-Parameter Curve Evaluation
   const trackId = track?.id || n.trackId
@@ -91,6 +94,7 @@ export function mapNoteToScheduledEvent(
         tick: n.time + n.duration / 2,
         fallback: laneFallbackValue(targetStr, n),
         bpm: globalBpm,
+        time: laneTime,
       })
       if (targetStr === 'volume') {
         note = { ...note, automationGain: Math.max(0, Math.min(1, laneValue / 127)) }
@@ -100,7 +104,7 @@ export function mapNoteToScheduledEvent(
         velocity = laneValue / 127
       } else if (parseAutomationTarget(targetStr)?.kind === 'expr' && laneIsActive(pts, automationLane)) {
         note = applyExpressionLaneToNote(note, targetStr, laneValue, {
-          lane: automationLane, points: pts, bpm: globalBpm,
+          lane: automationLane, points: pts, bpm: globalBpm, time: laneTime,
         })
       }
     }
@@ -113,6 +117,7 @@ export function mapNoteToScheduledEvent(
       tick: n.time + n.duration / 2,
       fallback: laneFallbackValue(automationTarget, n),
       bpm: globalBpm,
+      time: laneTime,
     })
     if (automationTarget === 'volume') {
       note = { ...note, automationGain: Math.max(0, Math.min(1, laneValue / 127)) }
@@ -122,7 +127,7 @@ export function mapNoteToScheduledEvent(
       velocity = laneValue / 127
     } else if (parseAutomationTarget(automationTarget)?.kind === 'expr' && laneIsActive(automationPoints, automationLane)) {
       note = applyExpressionLaneToNote(note, automationTarget, laneValue, {
-        lane: automationLane, points: automationPoints, bpm: globalBpm,
+        lane: automationLane, points: automationPoints, bpm: globalBpm, time: laneTime,
       })
     }
   }
@@ -130,7 +135,7 @@ export function mapNoteToScheduledEvent(
   return {
     time: `${Math.round(positionTicks)}i`,
     timeSeconds: tempoMap && tempoMap.length > 0
-      ? conductorSecondsAtTick(tempoMap, globalBpm, positionTicks)
+      ? conductorSecondsAtTick(tempoMap, globalBpm, positionTicks, meterMap, timeSignature)
       : positionTicks / globalTPS,
     positionTicks,
     pitch: finalPitch,
@@ -186,7 +191,10 @@ class Scheduler {
         a.transpose !== b.transpose ||
         a.drumMapShift !== b.drumMapShift ||
         a.edoDivision !== b.edoDivision ||
-        a.fxInstances !== b.fxInstances
+        a.fxInstances !== b.fxInstances ||
+        // DPreverb tails and their modulators are baked into the scheduled events.
+        a.fxSettings !== b.fxSettings ||
+        a.fxModulators !== b.fxModulators
       ) {
         return true
       }
@@ -208,7 +216,9 @@ class Scheduler {
         state.automationTargets !== prevState.automationTargets ||
         state.automationLanes !== prevState.automationLanes ||
         state.bpm !== prevState.bpm ||
-        state.tempoMap !== prevState.tempoMap
+        state.tempoMap !== prevState.tempoMap ||
+        state.meterMap !== prevState.meterMap ||
+        state.timeSignature !== prevState.timeSignature
       ) {
         this.rebuildSchedule(state.notes, state.tracks)
       }
@@ -231,6 +241,8 @@ class Scheduler {
 
     const globalBpm = useStore.getState().bpm
     const tempoMap = useStore.getState().tempoMap
+    const meterMap = useStore.getState().meterMap
+    const timeSignature = useStore.getState().timeSignature
     const audibleNotes = notes.filter(n => !n.muted)
     const glideIntoMap = buildGlideIntoMap(audibleNotes)
     const automationTargets = useStore.getState().automationTargets
@@ -246,7 +258,7 @@ class Scheduler {
       const automationPoints = allCurves[trackId]
       const events: ScheduledTrackEvent[] = trackNotes.map(n => ({
         kind: 'note',
-        ...mapNoteToScheduledEvent(n, track, globalBpm, automationPoints, glideIntoMap.get(n.id), automationTargets[trackId] ?? 'velocity', automationLanes[trackId], allCurves, tempoMap)
+        ...mapNoteToScheduledEvent(n, track, globalBpm, automationPoints, glideIntoMap.get(n.id), automationTargets[trackId] ?? 'velocity', automationLanes[trackId], allCurves, tempoMap, meterMap, timeSignature)
       }))
 
       if (track) {
@@ -255,15 +267,31 @@ class Scheduler {
           trackNotes.forEach(n => {
             const noteStartTicks = n.time / multiplier
             const localBpm = tempoMap && tempoMap.length > 0
-              ? getTempoAtTick(tempoMap, globalBpm, noteStartTicks)
+              ? getTempoAtTick(tempoMap, globalBpm, noteStartTicks, meterMap, timeSignature)
               : globalBpm
             const localTPS = (localBpm / 60) * TICKS_PER_BEAT
             dpreverbs.forEach(({ inst, settings }) => {
-              const idealPreStartTicks = noteStartTicks - (settings.tail * localTPS)
+              // The pre-wash happens once per note, so its modulators are read at the note's
+              // own position: the same t/b/m/ticks an FX modulator sees while the transport runs.
+              const mods = track.fxModulators?.[inst.id]
+              const modContext = {
+                t: tempoMap && tempoMap.length > 0
+                  ? conductorSecondsAtTick(tempoMap, globalBpm, noteStartTicks, meterMap, timeSignature)
+                  : noteStartTicks / globalTPS,
+                b: noteStartTicks / TICKS_PER_BEAT,
+                m: conductorBarsAtTick(meterMap, timeSignature, noteStartTicks),
+                ticks: noteStartTicks,
+              }
+              const wet = modulateFxParam(settings.wet, mods?.wet, modContext, 0, 1)
+              const tail = modulateFxParam(settings.tail, mods?.tail, modContext, 0, 120)
+              const decay = modulateFxParam(settings.decay, mods?.decay, modContext, 0.05, 1)
+              const tone = modulateFxParam(settings.tone, mods?.tone, modContext, 0, 1)
+              if (wet <= 0 || tail <= 0) return
+              const idealPreStartTicks = noteStartTicks - (tail * localTPS)
               const preStartTicks = Math.max(0, idealPreStartTicks)
               const effectiveDuration = tempoMap && tempoMap.length > 0
-                ? conductorSecondsAtTick(tempoMap, globalBpm, noteStartTicks) -
-                  conductorSecondsAtTick(tempoMap, globalBpm, preStartTicks)
+                ? conductorSecondsAtTick(tempoMap, globalBpm, noteStartTicks, meterMap, timeSignature) -
+                  conductorSecondsAtTick(tempoMap, globalBpm, preStartTicks, meterMap, timeSignature)
                 : (noteStartTicks - preStartTicks) / globalTPS
               if (effectiveDuration <= 0.015) return
 
@@ -272,9 +300,9 @@ class Scheduler {
                 time: `${Math.round(preStartTicks)}i`,
                 fxInstanceId: inst.id,
                 duration: effectiveDuration,
-                wet: settings.wet,
-                decay: settings.decay,
-                tone: settings.tone
+                wet,
+                decay,
+                tone
               })
             })
           })

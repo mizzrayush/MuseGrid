@@ -2,7 +2,7 @@ import * as Tone from 'tone'
 import { useStore } from './store'
 import type { Track, MetronomeSettings, VoicePreset, DrumPadSample, SynthSamplerConfig, InstrumentOverride } from './store'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET, type DrumKit, type SynthPreset } from '../utils/instruments'
-import { getLaneValueAtTick } from '../utils/automation'
+import { getLaneValueAtTick, modulateFxParam } from '../utils/automation'
 import { calculateFourierPartials } from '../utils/mathWaveform'
 import { getTrackFxInstances, getTrackFxSetting as readTrackFxSetting } from './fxDefaults'
 import { getEffectiveTrackLevel } from '../utils/groupAudio'
@@ -15,6 +15,7 @@ import {
   getTempoAtTick,
   tempoMapIsActive,
   buildConductorBeats,
+  conductorBarsAtTick,
   conductorSecondsAtTick,
 } from '../utils/conductor'
 import { attachDrumHitModulation, resolveDrumHitModulation, type DrumHitModulation, type DrumModulationRig } from '../utils/drumModulation'
@@ -51,6 +52,7 @@ export class CustomScriptProcessorNode extends Tone.ToneAudioNode {
   private _workletNode: AudioWorkletNode | null = null
   private _error: string | null = null
   private _params: Record<string, number> = {}
+  private _modulation: Record<string, Array<[number, number]>> = {}
   private _hostContext: Record<string, unknown> = {}
   private _lastCode: string | null = null
   private _lastLoggedError: string | null = null
@@ -67,6 +69,18 @@ export class CustomScriptProcessorNode extends Tone.ToneAudioNode {
     this._params = { ...v }
     if (this._workletNode) {
       this._workletNode.port.postMessage({ type: 'params', params: this._params })
+    }
+  }
+
+  /**
+   * Parameter automation indexed by context time (param -> [seconds, value][]). Live playback
+   * pushes `setParams` from the transport clock instead; an offline render has no clock to
+   * post from, so the worklet interpolates this table block by block.
+   */
+  setModulation(v: Record<string, Array<[number, number]>>) {
+    this._modulation = v
+    if (this._workletNode) {
+      this._workletNode.port.postMessage({ type: 'modulation', modulation: this._modulation })
     }
   }
 
@@ -96,14 +110,37 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
     this.params = {};
     this.host = {};
     this.state = {};
+    this.modulation = {};
+    this.modIndex = {};
     this.port.onmessage = (e) => {
       if (e.data.type === 'params') {
         this.params = e.data.params;
+      }
+      if (e.data.type === 'modulation') {
+        this.modulation = e.data.modulation || {};
+        this.modIndex = {};
       }
       if (e.data.type === 'host') {
         this.host = e.data.host || {};
       }
     };
+  }
+
+  applyModulation(now) {
+    const mod = this.modulation;
+    if (!mod) return;
+    for (const name in mod) {
+      const table = mod[name];
+      if (!table || table.length === 0) continue;
+      let i = this.modIndex[name] || 0;
+      while (i + 1 < table.length && table[i + 1][0] <= now) i++;
+      this.modIndex[name] = i;
+      const a = table[i];
+      const b = table[i + 1] || a;
+      const span = b[0] - a[0];
+      const frac = span > 0 ? Math.min(1, Math.max(0, (now - a[0]) / span)) : 0;
+      this.params[name] = a[1] + (b[1] - a[1]) * frac;
+    }
   }
 
   dspFn(input, output, params, state, sampleRate, currentTime, context) {
@@ -123,6 +160,7 @@ class DynamicDSPProcessor extends AudioWorkletProcessor {
     if (!outL || !outR) return true;
 
     try {
+      this.applyModulation(currentTime);
       this.dspFn([inL, inR], [outL, outR], this.params, this.state, sampleRate, currentTime, {
         ...this.host,
         sampleRate,
@@ -168,6 +206,7 @@ registerProcessor('${processorName}', DynamicDSPProcessor);
 
         // Push initial parameters
         workletNode.port.postMessage({ type: 'params', params: this._params })
+        workletNode.port.postMessage({ type: 'modulation', modulation: this._modulation })
         workletNode.port.postMessage({ type: 'host', host: this._hostContext })
 
         // 7. Wire into the native gain nodes
@@ -3385,7 +3424,7 @@ class AudioEngine {
     const state = useStore.getState()
     if (!tempoMapIsActive(state.tempoMap, state.bpm)) return
     const tick = state.isPlaying ? Tone.Transport.ticks : state.playheadPosition
-    const bpm = getTempoAtTick(state.tempoMap, state.bpm, tick)
+    const bpm = getTempoAtTick(state.tempoMap, state.bpm, tick, state.meterMap, state.timeSignature)
     if (!force && Math.abs(bpm - this.conductorLastAppliedBpm) < 0.02) return
     this.conductorLastAppliedBpm = bpm
     if (Math.abs(Tone.Transport.bpm.value - bpm) > 0.01) {
@@ -3693,7 +3732,8 @@ class AudioEngine {
     const t = Tone.Transport.seconds
     const ticks = Tone.Transport.ticks
     const b = ticks / Tone.Transport.PPQ
-    const m = b / 4 // Basic assumption of 4/4 time
+    // Bars follow the project's meters, so a 7/8 or 5/4 bar counts as one bar.
+    const m = conductorBarsAtTick(state.meterMap, state.timeSignature, ticks)
 
     state.tracks.forEach(track => {
       if (!track.fxModulators || Object.keys(track.fxModulators).length === 0) return
@@ -3706,8 +3746,25 @@ class AudioEngine {
         const inst = getTrackFxInstances(track.fxInstances).find(i => i.id === instanceId)
         if (!node || !inst) return
 
-        if (node instanceof CustomScriptProcessorNode || node instanceof DPreverbNode) {
-          // We could pass t to custom nodes if they accepted params over time, but skipping for now
+        if (node instanceof CustomScriptProcessorNode) {
+          // A script node takes its whole parameter record at once, so the modulators are
+          // folded into a copy of the static settings and pushed as one update.
+          const config = state.customFxConfigs.find(c => c.id === inst.type)
+          if (!config || config.mode === 'offline') return
+          const next: Record<string, number> = { ...(track.fxSettings?.[instanceId] ?? {}) }
+          let modulated = false
+          config.params.forEach(param => {
+            const current = typeof next[param.name] === 'number' ? next[param.name] : param.defaultVal
+            const modulation = mods[param.name]
+            if (modulation) modulated = true
+            next[param.name] = modulateFxParam(current, modulation, { t, b, m, ticks }, param.min, param.max)
+          })
+          if (modulated) node.setParams(next)
+          return
+        }
+
+        if (node instanceof DPreverbNode) {
+          // DPreverb fires once per note and reads its modulators at that moment.
           return
         }
 
@@ -5107,9 +5164,9 @@ class AudioEngine {
       const beats = buildConductorBeats(state.meterMap, state.timeSignature, tick, tick + windowTicks)
       if (beats.length === 0) return
 
-      const anchorSeconds = conductorSecondsAtTick(state.tempoMap, state.bpm, tick)
+      const anchorSeconds = conductorSecondsAtTick(state.tempoMap, state.bpm, tick, state.meterMap, state.timeSignature)
       beats.forEach(beat => {
-        const offset = conductorSecondsAtTick(state.tempoMap, state.bpm, beat.tick) - anchorSeconds
+        const offset = conductorSecondsAtTick(state.tempoMap, state.bpm, beat.tick, state.meterMap, state.timeSignature) - anchorSeconds
         const velBase = beat.isDownbeat ? s.downbeatVel : s.upbeatVel
         const velocity = Math.max(0, Math.min(1, state.metronomeVolume * velBase))
         this.metronome.triggerAttackRelease(
@@ -5264,6 +5321,7 @@ class AudioEngine {
           tick: currentTicks,
           fallback: note.velocity,
           bpm: state.bpm,
+          time: { tempoMap: state.tempoMap, meterMap: state.meterMap, timeSignature: state.timeSignature },
         })
         const velocity = automationTarget === 'velocity' ? laneValue / 127 : note.velocity / 127
 
@@ -5805,9 +5863,13 @@ class AudioEngine {
     if (!(window as any).__isJuceNative__ || !(window as any).juceAudioBridge) return
     const state = useStore.getState()
     const ticks = Tone.Transport.ticks
-    const secondsPerTick = 60 / (state.bpm * 192)
     const elapsedTicks = Math.max(0, ticks - this.vst3AutomationLastTicks)
-    const rampSeconds = Math.max(0.02, Math.min(0.2, elapsedTicks * secondsPerTick))
+    // Under a conductor map the tick length changes, so the ramp follows real seconds too.
+    const elapsedSeconds = state.tempoMap && state.tempoMap.length > 0
+      ? conductorSecondsAtTick(state.tempoMap, state.bpm, ticks, state.meterMap, state.timeSignature) -
+        conductorSecondsAtTick(state.tempoMap, state.bpm, this.vst3AutomationLastTicks, state.meterMap, state.timeSignature)
+      : elapsedTicks * (60 / (state.bpm * 192))
+    const rampSeconds = Math.max(0.02, Math.min(0.2, elapsedSeconds))
     this.vst3AutomationLastTicks = ticks
 
     for (const track of state.tracks) {
@@ -5821,6 +5883,7 @@ class AudioEngine {
       if ((!points || points.length === 0) && lane?.source !== 'formula') continue
       const value = Math.max(0, Math.min(1, getLaneValueAtTick({
         points, lane, target, tick: ticks, fallback: 64, bpm: state.bpm,
+        time: { tempoMap: state.tempoMap, meterMap: state.meterMap, timeSignature: state.timeSignature },
       }) / 127))
       this.setTrackVst3Parameter(track.id, index, value, rampSeconds)
     }

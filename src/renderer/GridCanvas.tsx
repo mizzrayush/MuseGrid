@@ -1301,7 +1301,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
 
         if (isMajor) {
           const bar = getBarNumberAtTick(storeState.meterMap, storeState.timeSignature, col.x)
-          const seconds = conductorSecondsAtTick(storeState.tempoMap, storeState.bpm, col.x).toFixed(2)
+          const seconds = conductorSecondsAtTick(storeState.tempoMap, storeState.bpm, col.x, storeState.meterMap, storeState.timeSignature).toFixed(2)
 
           ctx.textAlign = 'left'
           ctx.textBaseline = 'top'
@@ -2533,6 +2533,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
             tick,
             fallback: 100,
             bpm: storeState.bpm,
+            time: { tempoMap: storeState.tempoMap, meterMap: storeState.meterMap, timeSignature: storeState.timeSignature },
           })
           const y = canvasHeight - (velocity / 127) * canvasHeight
           const x = tickToX(tick)

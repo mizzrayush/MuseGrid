@@ -6,7 +6,7 @@
 
 export const CONDUCTOR_PPQ = 192
 export const MIN_CONDUCTOR_BPM = 20
-export const MAX_CONDUCTOR_BPM = 300
+export const MAX_CONDUCTOR_BPM = 999
 /** Beats per bar and beat unit accept any whole number in this range, not just powers of two. */
 export const MIN_METER_VALUE = 1
 export const MAX_METER_BEATS = 64
@@ -80,11 +80,14 @@ const evaluateTempoFormula = (
   point: TempoPoint,
   next: TempoPoint,
   t: number,
-  tick: number
+  tick: number,
+  meterMap?: MeterPoint[],
+  timeSignature?: string
 ): number => {
   const linear = point.bpm + (next.bpm - point.bpm) * t
   const beats = tick / CONDUCTOR_PPQ
-  const bars = beats / 4
+  // Bars follow the conductor's meters, so 7/8 and 5/4 lines up with the bar ruler.
+  const bars = conductorBarsAtTick(meterMap, timeSignature, tick)
   try {
     const fn = new Function('t', 'b', 'm', 'ticks', 'v', `return (${point.formula || 'v'});`) as
       (t: number, b: number, m: number, ticks: number, v: number) => number
@@ -98,7 +101,9 @@ const segmentBpm = (
   point: TempoPoint,
   next: TempoPoint,
   t: number,
-  tick: number
+  tick: number,
+  meterMap?: MeterPoint[],
+  timeSignature?: string
 ): number => {
   switch (point.curve) {
     case 'step':
@@ -108,7 +113,7 @@ const segmentBpm = (
       return point.bpm * Math.pow(next.bpm / point.bpm, t)
     }
     case 'formula':
-      return evaluateTempoFormula(point, next, t, tick)
+      return evaluateTempoFormula(point, next, t, tick, meterMap, timeSignature)
     case 'linear':
     default:
       return point.bpm + (next.bpm - point.bpm) * t
@@ -119,7 +124,9 @@ const segmentBpm = (
 export const getTempoAtTick = (
   map: TempoPoint[] | undefined,
   _baseBpm: number,
-  tick: number
+  tick: number,
+  meterMap?: MeterPoint[],
+  timeSignature?: string
 ): number => {
   if (!map || map.length === 0) return clampConductorBpm(_baseBpm)
   if (tick <= map[0].tick) return clampConductorBpm(map[0].bpm)
@@ -131,7 +138,7 @@ export const getTempoAtTick = (
     if (tick < next.tick) {
       const span = next.tick - point.tick
       const t = span > 0 ? (tick - point.tick) / span : 1
-      return clampConductorBpm(segmentBpm(point, next, t, tick))
+      return clampConductorBpm(segmentBpm(point, next, t, tick, meterMap, timeSignature))
     }
   }
   return clampConductorBpm(map[map.length - 1].bpm)
@@ -147,50 +154,65 @@ export const tempoMapIsActive = (
 }
 
 /**
- * Seconds per tick for a segment. Linear and exponential curves interpolate BPM
- * over time, so the tick duration is the integral of 60 / (bpm * PPQ).
+ * Seconds to traverse `tickSpan` ticks of a segment. The integral of 60 / (bpm * PPQ)
+ * runs over the segment's own position, so a partial span (a note inside the ramp)
+ * gets the ramp's rate at that point instead of the whole segment's average.
  */
 const segmentSeconds = (
   point: TempoPoint,
   next: TempoPoint | null,
-  tickSpan: number
+  tickSpan: number,
+  meterMap?: MeterPoint[],
+  timeSignature?: string
 ): number => {
   if (tickSpan <= 0) return 0
-  const bpm = point.bpm
+  const startBpm = clampConductorBpm(point.bpm)
 
   if (!next || point.curve === 'step') {
-    return (tickSpan * 60) / (CONDUCTOR_PPQ * bpm)
+    return (tickSpan * 60) / (CONDUCTOR_PPQ * startBpm)
   }
 
+  const endBpm = clampConductorBpm(next.bpm)
+  const segmentTicks = Math.max(1, next.tick - point.tick)
+  const fraction = Math.min(1, tickSpan / segmentTicks)
+  const secondsPerTick = 60 / CONDUCTOR_PPQ
+
   if (point.curve === 'linear') {
-    const average = (point.bpm + next.bpm) / 2
-    return (tickSpan * 60) / (CONDUCTOR_PPQ * Math.max(MIN_CONDUCTOR_BPM, average))
+    if (Math.abs(endBpm - startBpm) < 1e-9) {
+      return (tickSpan * secondsPerTick) / startBpm
+    }
+    const reachedBpm = startBpm + (endBpm - startBpm) * fraction
+    return (secondsPerTick * segmentTicks / (endBpm - startBpm)) * Math.log(reachedBpm / startBpm)
   }
 
   if (point.curve === 'exponential') {
-    if (Math.abs(next.bpm - point.bpm) < 0.0001) {
-      return (tickSpan * 60) / (CONDUCTOR_PPQ * bpm)
+    if (Math.abs(endBpm - startBpm) < 1e-9) {
+      return (tickSpan * secondsPerTick) / startBpm
     }
-    return (tickSpan * 60 * Math.log(next.bpm / point.bpm)) /
-      (CONDUCTOR_PPQ * (next.bpm - point.bpm))
+    const ratio = endBpm / startBpm
+    return (secondsPerTick * segmentTicks / Math.log(ratio)) *
+      (1 - Math.pow(ratio, -fraction)) / startBpm
   }
 
-  // Formula curves have no closed form: integrate seconds-per-tick numerically.
+  // Formula curves have no closed form: integrate seconds-per-tick numerically
+  // with t measured across the whole segment, exactly as getTempoAtTick reads it.
   const steps = 128
   let inverseBpmSum = 0
   for (let index = 0; index < steps; index += 1) {
-    const t = (index + 0.5) / steps
-    const segmentTick = point.tick + tickSpan * t
-    inverseBpmSum += 1 / segmentBpm(point, next, t, segmentTick)
+    const t = ((index + 0.5) / steps) * fraction
+    const segmentTick = point.tick + segmentTicks * t
+    inverseBpmSum += 1 / segmentBpm(point, next, t, segmentTick, meterMap, timeSignature)
   }
-  return (tickSpan * 60 / CONDUCTOR_PPQ) * (inverseBpmSum / steps)
+  return tickSpan * secondsPerTick * (inverseBpmSum / steps)
 }
 
 /** Seconds from tick zero to `tick` under the tempo map. */
 export const conductorSecondsAtTick = (
   map: TempoPoint[] | undefined,
   baseBpm: number,
-  tick: number
+  tick: number,
+  meterMap?: MeterPoint[],
+  timeSignature?: string
 ): number => {
   const target = Math.max(0, tick)
   if (!map || map.length === 0) {
@@ -216,7 +238,7 @@ export const conductorSecondsAtTick = (
     const segmentEnd = next ? next.tick : Number.POSITIVE_INFINITY
     const span = Math.min(segmentEnd, target) - cursor
     if (span > 0) {
-      seconds += segmentSeconds(point, next, span)
+      seconds += segmentSeconds(point, next, span, meterMap, timeSignature)
       cursor += span
     }
     if (cursor >= target) return seconds
@@ -234,11 +256,13 @@ export const conductorDurationSeconds = (
   map: TempoPoint[] | undefined,
   baseBpm: number,
   startTick: number,
-  endTick: number
+  endTick: number,
+  meterMap?: MeterPoint[],
+  timeSignature?: string
 ): number => {
   if (endTick <= startTick) return 0
-  return conductorSecondsAtTick(map, baseBpm, endTick) -
-    conductorSecondsAtTick(map, baseBpm, startTick)
+  return conductorSecondsAtTick(map, baseBpm, endTick, meterMap, timeSignature) -
+    conductorSecondsAtTick(map, baseBpm, startTick, meterMap, timeSignature)
 }
 
 const meterBeatTicks = (meter: MeterPoint): number =>
@@ -340,6 +364,21 @@ export const getMeterPositionAtTick = (
     beatTicks,
     barTicks,
   }
+}
+
+/**
+ * Continuous bar position at a tick (bar index + fraction through the bar), following meter
+ * changes. Formula variables use this so `m` lines up with the conductor's bar ruler under
+ * 7/8, 5/4 and anything else that is not four beats.
+ */
+export const conductorBarsAtTick = (
+  map: MeterPoint[] | undefined,
+  defaultSignature: string | undefined,
+  tick: number
+): number => {
+  const position = getMeterPositionAtTick(map, defaultSignature || '4/4', tick)
+  return position.barIndex +
+    (Math.max(0, tick) - position.barStartTick) / Math.max(1, position.barTicks)
 }
 
 export const isBarStartTick = (

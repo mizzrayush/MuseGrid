@@ -6,6 +6,12 @@ import type {
   Note,
 } from '../engine/store'
 import { parseAutomationTarget, expressionLaneLabel } from '../engine/store'
+import {
+  conductorBarsAtTick,
+  conductorSecondsAtTick,
+  type MeterPoint,
+  type TempoPoint,
+} from './conductor'
 
 const MIN_VELOCITY = 1
 const MAX_VELOCITY = 127
@@ -168,8 +174,73 @@ export function exprParamToLaneValue(target: ExpressionLaneTarget, paramValue: n
   return LANE_MAX * (paramValue - range.min) / (range.max - range.min)
 }
 
+/** Musical time context so formulas follow the conductor instead of assuming 4/4 at one tempo. */
+export interface LaneTimeContext {
+  tempoMap?: TempoPoint[]
+  meterMap?: MeterPoint[]
+  timeSignature?: string
+}
+
 type LaneEquation = (t: number, b: number, m: number, ticks: number, v: number) => number
 const laneEquationCache = new Map<string, LaneEquation | null>()
+
+export type ModulationEquation = (t: number, b: number, m: number, ticks: number) => number
+const modulationCache = new Map<string, ModulationEquation | null>()
+
+/** Compiles an FX-modulator equation (no `v`): t seconds, b beats, m bars, ticks. */
+export function compileModulationEquation(equation: string): ModulationEquation | null {
+  const key = (equation || '').trim()
+  if (!key) return null
+  if (modulationCache.has(key)) return modulationCache.get(key) ?? null
+  let fn: ModulationEquation | null = null
+  try {
+    fn = new Function('t', 'b', 'm', 'ticks', `return ${key}`) as ModulationEquation
+  } catch {
+    fn = null
+  }
+  modulationCache.set(key, fn)
+  return fn
+}
+
+/** Override / add / multiply, matching the lane and FX modulator combine modes. */
+export function applyModulationMode(base: number, raw: number, mode: string | undefined): number {
+  if (mode === 'add') return base + raw
+  if (mode === 'multiply') return base * raw
+  return raw
+}
+
+/** Musical position an FX modulator is evaluated at: seconds, beats, meter-aware bars, ticks. */
+export interface ModulatorContext {
+  t: number
+  b: number
+  m: number
+  ticks: number
+}
+
+/**
+ * One modulated effect parameter. Keeps the static value when there is no (working) formula,
+ * so a broken equation leaves the rack exactly as the user set it.
+ */
+export function modulateFxParam(
+  base: number,
+  modulation: { formula: string; mode: string } | undefined,
+  context: ModulatorContext,
+  min: number,
+  max: number
+): number {
+  const clampToRange = (value: number) => Math.max(min, Math.min(max, value))
+  if (!modulation) return clampToRange(base)
+  const fn = compileModulationEquation(modulation.formula)
+  if (!fn) return clampToRange(base)
+  let raw: number
+  try {
+    raw = fn(context.t, context.b, context.m, context.ticks)
+  } catch {
+    return clampToRange(base)
+  }
+  if (!Number.isFinite(raw)) return clampToRange(base)
+  return clampToRange(applyModulationMode(base, raw, modulation.mode))
+}
 
 /**
  * Compiled with the same variables as an FX modulator, plus `v` (the lane's base value at that
@@ -208,6 +279,8 @@ export interface LaneSampleOptions {
   /** What the lane holds where nothing drives it: the note's own value for that target. */
   fallback: number
   bpm: number
+  /** Tempo/meter context; omit only where the caller has no project state. */
+  time?: LaneTimeContext
 }
 
 /**
@@ -215,7 +288,7 @@ export interface LaneSampleOptions {
  * historical spline behaviour exactly; a formula lane adds equation-shaped values on top.
  */
 export function getLaneValueAtTick(options: LaneSampleOptions): number {
-  const { points, lane, tick, fallback, bpm } = options
+  const { points, lane, tick, fallback, bpm, time } = options
   const drawn = getAutomationValueAtTick(points, tick, fallback)
   if (!lane || lane.source !== 'formula') return drawn
 
@@ -227,13 +300,17 @@ export function getLaneValueAtTick(options: LaneSampleOptions): number {
   if (!fn) return drawn
 
   const safeBpm = Number.isFinite(bpm) && bpm > 0 ? bpm : 120
-  const ticksPerSecond = (safeBpm / 60) * LANE_TICKS_PER_BEAT
-  const seconds = tick / ticksPerSecond
+  // Under a tempo map, t is real seconds along the conductor; otherwise the base BPM is exact.
+  const seconds = time?.tempoMap && time.tempoMap.length > 0
+    ? conductorSecondsAtTick(time.tempoMap, safeBpm, tick, time.meterMap, time.timeSignature)
+    : tick / ((safeBpm / 60) * LANE_TICKS_PER_BEAT)
   const beats = tick / LANE_TICKS_PER_BEAT
+  // m follows the conductor's meters, measured as whole bars plus the fraction through the bar.
+  const bars = conductorBarsAtTick(time?.meterMap, time?.timeSignature, tick)
 
   let raw: number
   try {
-    raw = fn(seconds, beats, beats / 4, tick, base)
+    raw = fn(seconds, beats, bars, tick, base)
   } catch {
     return drawn
   }
@@ -281,6 +358,7 @@ export function buildLaneCurve(
   lane: AutomationLane | undefined,
   points: AutomationPoint[] | undefined,
   bpm: number,
+  time?: LaneTimeContext,
 ): number[] {
   const parsed = parseAutomationTarget(target)
   const kind = parsed?.kind === 'expr' ? parsed.id : null
@@ -288,7 +366,7 @@ export function buildLaneCurve(
   const raw: number[] = []
   for (let i = 0; i < LANE_CURVE_POINTS; i++) {
     const tick = note.time + (note.duration * i) / (LANE_CURVE_POINTS - 1)
-    raw.push(getLaneValueAtTick({ points, lane, target, tick, fallback, bpm }))
+    raw.push(getLaneValueAtTick({ points, lane, target, tick, fallback, bpm, time }))
   }
   let min = Infinity
   let max = -Infinity
@@ -308,17 +386,18 @@ export function laneNoteExtent(
   lane: AutomationLane | undefined,
   points: AutomationPoint[] | undefined,
   bpm: number,
+  time?: LaneTimeContext,
 ): { start: number; end: number; curve: number[] } | null {
   const parsed = parseAutomationTarget(target)
   if (parsed?.kind !== 'expr') return null
   const fallback = exprLaneNeutralValue(parsed.id, note)
   const sample = (tick: number) => laneValueToExprParam(parsed.id, getLaneValueAtTick({
-    points, lane, target, tick, fallback, bpm,
+    points, lane, target, tick, fallback, bpm, time,
   }))
   return {
     start: sample(note.time),
     end: sample(note.time + note.duration),
-    curve: buildLaneCurve(note, target, lane, points, bpm),
+    curve: buildLaneCurve(note, target, lane, points, bpm, time),
   }
 }
 
@@ -331,6 +410,7 @@ export interface ExpressionLaneShapeContext {
   lane?: AutomationLane
   points?: AutomationPoint[]
   bpm: number
+  time?: LaneTimeContext
 }
 
 export function applyExpressionLaneToNote(
@@ -354,7 +434,7 @@ export function applyExpressionLaneToNote(
   // per-sample between filterStart and filterEnd along filterCurve, so the lane's own in-note
   // extent goes straight into those slots instead of one value per note.
   if (parsed.id === 'filterCutoff' && shape) {
-    const extent = laneNoteExtent(note, target as AutomationTarget, shape.lane, shape.points, shape.bpm)
+    const extent = laneNoteExtent(note, target as AutomationTarget, shape.lane, shape.points, shape.bpm, shape.time)
     if (extent) {
       updated.filterStart = extent.start
       updated.filterEnd = extent.end

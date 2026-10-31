@@ -146,7 +146,9 @@ export function buildNativeBouncePayload(state: AppState, request: NativeBounceR
       state.automationTargets[note.trackId] ?? 'velocity',
       state.automationLanes?.[note.trackId],
       state.automationCurves,
-      state.tempoMap
+      state.tempoMap,
+      state.meterMap,
+      state.timeSignature
     )
     const command = buildNativeNoteOnCommand({
       trackId: note.trackId,
@@ -186,6 +188,7 @@ export function buildNativeBouncePayload(state: AppState, request: NativeBounceR
       const clamped = Math.min(tick, request.endTick)
       const value = Math.max(0, Math.min(1, getLaneValueAtTick({
         points, lane, target, tick: clamped, fallback: 64, bpm: state.bpm,
+        time: { tempoMap: state.tempoMap, meterMap: state.meterMap, timeSignature: state.timeSignature },
       }) / 127))
       events.push({
         type: 'vst3Param',

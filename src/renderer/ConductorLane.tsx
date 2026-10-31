@@ -5,6 +5,7 @@ import {
   getBarStartTick,
   getMeterPositionAtTick,
   getTempoAtTick,
+  MAX_CONDUCTOR_BPM,
   MAX_METER_BEATS,
   MAX_METER_DENOMINATOR,
   type TempoCurve,
@@ -38,7 +39,7 @@ const makeId = () => `cond_${Date.now().toString(36)}_${Math.random().toString(3
 const tempoRange = (map: TempoPoint[], baseBpm: number) => {
   const values = [baseBpm, ...map.map(point => point.bpm)]
   const lo = Math.max(20, Math.min(...values) - 15)
-  const rawHi = Math.min(300, Math.max(...values) + 15)
+  const rawHi = Math.min(MAX_CONDUCTOR_BPM, Math.max(...values) + 15)
   return { lo, hi: Math.max(lo + 30, rawHi) }
 }
 
@@ -197,7 +198,7 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
       let started = false
       for (let x = sidebarWidth; x <= width; x += 2) {
         const tick = toTickX(x)
-        const bpm = getTempoAtTick(state.tempoMap, state.bpm, tick)
+        const bpm = getTempoAtTick(state.tempoMap, state.bpm, tick, state.meterMap, state.timeSignature)
         const y = bpmToY(bpm)
         if (!started) {
           ctx.moveTo(x, y)
@@ -300,7 +301,7 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
     state.addTempoPoint({
       id,
       tick,
-      bpm: Math.round(getTempoAtTick(state.tempoMap, state.bpm, tick) * 10) / 10,
+      bpm: Math.round(getTempoAtTick(state.tempoMap, state.bpm, tick, state.meterMap, state.timeSignature) * 100) / 100,
       curve: 'linear',
     })
     setSelection({ kind: 'tempo', id })
@@ -478,8 +479,8 @@ export default function ConductorLane({ getView, tickToX, xToTick, sidebarWidth 
                 <input
                   type="number"
                   min={20}
-                  max={300}
-                  step={1}
+                  max={MAX_CONDUCTOR_BPM}
+                  step={0.01}
                   value={selectedTempo.bpm}
                   onChange={e => useStore.getState().updateTempoPoint(selectedTempo.id, { bpm: Number(e.target.value) })}
                   style={inputStyle}

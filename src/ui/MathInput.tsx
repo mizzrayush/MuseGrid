@@ -1,4 +1,5 @@
 import React from 'react';
+import { compileFormula } from '../utils/formulaMath';
 
 interface MathInputProps {
   value: string;
@@ -11,14 +12,23 @@ interface MathInputProps {
 
 export const MathInput: React.FC<MathInputProps> = ({ value, onChange, placeholder, className = '', multiline = false, style }) => {
   const isValid = React.useMemo(() => {
-    try {
-      // Test the formula using new Function
-      // We pass common variables it might expect: t, b, m, ticks, f, v
-      new Function('t', 'b', 'm', 'ticks', 'f', 'v', `return ${value}`);
-      return true;
-    } catch {
-      return false;
-    }
+    // Empty fields are allowed (they mean "no formula"); only typed text is checked.
+    if (!value.trim()) return true
+    // Compile with the real formula scope, then evaluate two representative contexts: a
+    // 0..127 lane and a normalised 0..1 curve. This catches undefined helpers, which
+    // syntax-only checks miss.
+    const fn = compileFormula(value, ['t', 'b', 'm', 'ticks', 'f', 'v'])
+    if (!fn) return false
+    return [
+      [0.1, 0.1, 0.025, 19, 60, 64],
+      [0.5, 0.25, 0.1, 48, 440, 0.5],
+    ].some(args => {
+      try {
+        return Number.isFinite(fn(...args))
+      } catch {
+        return false
+      }
+    })
   }, [value]);
 
   const baseStyle: React.CSSProperties = {

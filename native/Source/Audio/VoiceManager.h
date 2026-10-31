@@ -33,7 +33,15 @@ public:
                      float filterSweepTimeSeconds = 0.0f,
                      const EnvelopeCurve* customDecayCurve = nullptr,
                      const EnvelopeCurve* customReleaseCurve = nullptr,
-                     const musegrid::NoteExpression& expression = {});
+                     const musegrid::NoteExpression& expression = {},
+                     int filterType = 0,
+                     float filterCutoffHz = 20000.0f,
+                     float filterResonance = 0.7f,
+                     int unison = 1,
+                     float unisonSpreadCents = 0.0f,
+                     float detuneCents = 0.0f,
+                     const float* partials = nullptr,
+                     int partialCount = 0);
 
     void noteOnPhysical(const juce::String& trackId,
                         int noteId,

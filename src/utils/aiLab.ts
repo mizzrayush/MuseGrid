@@ -16,6 +16,26 @@ let grooveVae: MusicVAE | null = null
 let pianoGenieModel: PianoGenie | null = null
 let transcriptionModel: OnsetsAndFrames | null = null
 
+/** Same variation key and salt always yield the same density/velocity draws. */
+function createVariationRng(variation: number, salt: number): () => number {
+  let state = (Math.imul(Math.trunc(variation * 1000) ^ Math.imul(salt, 0x9e3779b9), 2654435761) >>> 0) || 1
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0
+    let t = state
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+/** Stable per-note draw: the same note always gets the same jitter decision for a variation. */
+function variationHash(variation: number, salt: number, a: number, b: number): number {
+  let h = (Math.trunc(variation * 1000) ^ Math.imul(salt, 0x9e3779b9) ^ Math.imul(a | 0, 0x85ebca6b) ^ Math.imul(b | 0, 0xc2b2ae35)) >>> 0
+  h = Math.imul(h ^ (h >>> 16), 0x7feb352d)
+  h = Math.imul(h ^ (h >>> 15), 0x846ca68b)
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296
+}
+
 // Caching is handled locally via bundled files
 
 export const BASIC_RNN_SPEC = {
@@ -166,9 +186,11 @@ export async function generateAiMelody(
   scale?: ScaleLock,
   playheadPosition?: number,
   customSeedPitch?: number | 'auto',
-  semitoneShift: number = 0
+  semitoneShift: number = 0,
+  variation: number = 1
 ): Promise<Omit<Note, 'id' | 'trackId'>[]> {
   const currentScale = scale || useStore.getState().scaleLock
+  const rng = createVariationRng(variation, 1)
 
   try {
     const model = await getMelodyRnn()
@@ -214,7 +236,7 @@ export async function generateAiMelody(
 
     if (result && result.notes && result.notes.length > 0) {
       return result.notes
-        .filter(() => Math.random() < density)
+        .filter((n) => variationHash(variation, 11, n.quantizedStartStep || 0, n.pitch || 0) < density)
         .map((n) => {
           let pitch = (n.pitch || 60) + (octaveShift * 12) + semitoneShift
           if (currentScale.enabled) {
@@ -225,7 +247,7 @@ export async function generateAiMelody(
             time: Math.max(0, startTime + ((n.quantizedStartStep || 0) * 48)),
             duration: Math.max(24, ((n.quantizedEndStep || 0) - (n.quantizedStartStep || 0)) * 48),
             pitch: Math.max(12, Math.min(108, pitch)),
-            velocity: Math.floor(Math.min(127, Math.max(40, 80 + Math.random() * 30)))
+            velocity: Math.floor(Math.min(127, Math.max(40, 80 + variationHash(variation, 12, n.quantizedStartStep || 0, n.pitch || 0) * 30)))
           }
         })
     }
@@ -240,22 +262,22 @@ export async function generateAiMelody(
   const intervals = [0, 2, 4, 7, 9, 12, 14, 16] // pentatonic/modal anchors
 
   for (let s = 0; s < steps; s++) {
-    if (Math.random() > density) continue
-    const iv = intervals[Math.floor(Math.random() * intervals.length)]
+    if (rng() > density) continue
+    const iv = intervals[Math.floor(rng() * intervals.length)]
     let pitch = 60 + (currentScale.root || 0) + iv + (octaveShift * 12) + semitoneShift
     // Add contour based on temperature
-    if (Math.random() < temperature * 0.45) {
-      pitch += Math.random() > 0.5 ? 2 : -2
+    if (rng() < temperature * 0.45) {
+      pitch += rng() > 0.5 ? 2 : -2
     }
     if (currentScale.enabled) {
       pitch = snapToScale(pitch, currentScale.root, currentScale.mode, currentScale.customIntervals)
     }
-    const noteDuration = Math.random() > 0.65 ? 96 : 48
+    const noteDuration = rng() > 0.65 ? 96 : 48
     fallbackNotes.push({
       time: startTick + (s * stepTicks),
       duration: noteDuration,
       pitch: Math.max(12, Math.min(108, pitch)),
-      velocity: Math.floor(75 + Math.random() * 35)
+      velocity: Math.floor(75 + rng() * 35)
     })
   }
   return fallbackNotes
@@ -268,8 +290,10 @@ export async function generateAiDrums(
   density: number = 1.0,
   drumMap?: Record<number, number>,
   playheadPosition?: number,
-  customSeedPitch?: number | 'auto'
+  customSeedPitch?: number | 'auto',
+  variation: number = 1
 ): Promise<Omit<Note, 'id' | 'trackId'>[]> {
+  const rng = createVariationRng(variation, 2)
   try {
     const model = await getDrumsRnn()
 
@@ -306,7 +330,7 @@ export async function generateAiDrums(
 
     if (result && result.notes && result.notes.length > 0) {
       return result.notes
-        .filter(() => Math.random() < density)
+        .filter((n) => variationHash(variation, 21, n.quantizedStartStep || 0, n.pitch || 0) < density)
         .map((n) => {
           let pitch: number
           const midi = n.pitch || 36
@@ -324,7 +348,7 @@ export async function generateAiDrums(
             time: Math.max(0, startTime + ((n.quantizedStartStep || 0) * 48)),
             duration: 48,
             pitch,
-            velocity: Math.floor(Math.min(127, Math.max(50, 90 + Math.random() * 30)))
+            velocity: Math.floor(Math.min(127, Math.max(50, 90 + variationHash(variation, 22, n.quantizedStartStep || 0, midi) * 30)))
           }
         })
     }
@@ -339,7 +363,7 @@ export async function generateAiDrums(
   for (let s = 0; s < steps; s++) {
     const stepInBar = s % 16
     // Kick: steps 0, 8 (plus occasional syncopation on 6, 10)
-    if (stepInBar === 0 || stepInBar === 8 || (Math.random() < temperature * 0.25 && (stepInBar === 6 || stepInBar === 10))) {
+    if (stepInBar === 0 || stepInBar === 8 || (rng() < temperature * 0.25 && (stepInBar === 6 || stepInBar === 10))) {
       fallbackDrums.push({ time: startTick + s * stepTicks, duration: 48, pitch: 0, velocity: 110 })
     }
     // Snare / Clap: steps 4, 12
@@ -347,11 +371,11 @@ export async function generateAiDrums(
       fallbackDrums.push({ time: startTick + s * stepTicks, duration: 48, pitch: 1, velocity: 105 })
     }
     // Hi-Hat: 8th notes and extra 16ths based on density
-    if (stepInBar % 2 === 0 || Math.random() < density * 0.7) {
+    if (stepInBar % 2 === 0 || rng() < density * 0.7) {
       fallbackDrums.push({ time: startTick + s * stepTicks, duration: 48, pitch: 2, velocity: 85 + (stepInBar % 4 === 0 ? 15 : 0) })
     }
     // Open hat or percussion on step 14
-    if (stepInBar === 14 && Math.random() < density * 0.6) {
+    if (stepInBar === 14 && rng() < density * 0.6) {
       fallbackDrums.push({ time: startTick + s * stepTicks, duration: 48, pitch: 3, velocity: 90 })
     }
   }
@@ -412,8 +436,10 @@ export async function generateAutoHarmony(
   seedNotes: Note[],
   temperature: number = 0.99,
   scaleConfig?: ScaleLock,
-  totalSteps: number = 32
+  totalSteps: number = 32,
+  variation: number = 1
 ): Promise<{ voice1: Note[], voice2: Note[], voice3: Note[] }> {
+  const rng = createVariationRng(variation, 3)
   const startTime = seedNotes.length > 0 ? Math.min(...seedNotes.map(n => n.time)) : 0
 
   try {
@@ -450,7 +476,7 @@ export async function generateAutoHarmony(
               time: startTime + ((n.quantizedStartStep || 0) * 48),
               duration: ((n.quantizedEndStep || 0) - (n.quantizedStartStep || 0)) * 48,
               pitch: Math.max(0, Math.min(95, n.pitch || 60)),
-              velocity: 80 + Math.random() * 20
+              velocity: 80 + variationHash(variation, 31, n.quantizedStartStep || 0, n.pitch || 0) * 20
             } as Note))
         )
 
@@ -484,7 +510,7 @@ export async function generateAutoHarmony(
   while (s < steps) {
     const isCadence = s >= steps - 8
     const isBarStart = s % 16 === 0
-    const stepDuration = isCadence ? 4 : (Math.random() < 0.35 ? 1 : (Math.random() < 0.7 ? 2 : 4))
+    const stepDuration = isCadence ? 4 : (rng() < 0.35 ? 1 : (rng() < 0.7 ? 2 : 4))
     const actualDuration = Math.min(stepDuration, steps - s)
 
     // Voice 1 (Subject / Upper voice): Stepwise melodic motions & ornamental figures
@@ -497,8 +523,8 @@ export async function generateAutoHarmony(
         currentPitchV1 = tonic + 9
       }
     } else {
-      const delta = (Math.random() - 0.48) * (temperature * 6)
-      const stepInterval = Math.round(delta) === 0 ? (Math.random() > 0.5 ? 2 : -2) : Math.round(delta)
+      const delta = (rng() - 0.48) * (temperature * 6)
+      const stepInterval = Math.round(delta) === 0 ? (rng() > 0.5 ? 2 : -2) : Math.round(delta)
       currentPitchV1 += stepInterval
       if (currentPitchV1 < 60) currentPitchV1 += 12
       if (currentPitchV1 > 84) currentPitchV1 -= 12
@@ -525,13 +551,13 @@ export async function generateAutoHarmony(
         currentPitchV2 = tonic - 5 // Dominant
       }
     } else {
-      const contraryChoice = Math.random() > 0.3
+      const contraryChoice = rng() > 0.3
       if (contraryChoice) {
         const consonantIntervals = [12, 16, 15, 9, 8, 7]
-        const chosenInterval = consonantIntervals[Math.floor(Math.random() * consonantIntervals.length)]
+        const chosenInterval = consonantIntervals[Math.floor(rng() * consonantIntervals.length)]
         currentPitchV2 = snappedV1 - chosenInterval
       } else {
-        currentPitchV2 += Math.random() > 0.5 ? -2 : 2
+        currentPitchV2 += rng() > 0.5 ? -2 : 2
       }
       if (currentPitchV2 < 36) currentPitchV2 += 12
       if (currentPitchV2 > 60) currentPitchV2 -= 12
@@ -562,8 +588,10 @@ export async function generateAutoHarmony(
 export async function generateHumanGroove(
   seedNotes: Note[],
   temperature: number = 0.5,
-  bpm: number = 120
+  bpm: number = 120,
+  variation: number = 1
 ): Promise<Note[]> {
+  const rng = createVariationRng(variation, 4)
   const model = await getGrooveVae()
 
   if (seedNotes.length === 0) return []
@@ -623,7 +651,7 @@ export async function generateHumanGroove(
       time: startTime + Math.round(timeTicks),
       duration: Math.round(durationTicks),
       pitch,
-      velocity: Math.max(1, Math.min(127, n.velocity || (80 + Math.random() * 30)))
+      velocity: Math.max(1, Math.min(127, n.velocity || (80 + variationHash(variation, 41, Math.round(timeTicks), pitch) * 30)))
     } as Note
   })
 }

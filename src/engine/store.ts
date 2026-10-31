@@ -7,9 +7,13 @@ import {
   parseMeterSignature,
   getBarStartTick,
   getNextBarTick,
+  getMeterPositionAtTick,
+  conductorBarsAtTick,
+  conductorSecondsAtTick,
   type TempoPoint,
   type MeterPoint,
 } from '../utils/conductor'
+import { compileFormula } from '../utils/formulaMath'
 import {
   ARTICULATION_FIELDS,
   DEFAULT_ARTICULATION_PRESETS,
@@ -187,6 +191,17 @@ export function parseAutomationTarget(target: AutomationTarget | undefined):
     return EXPRESSION_LANE_TARGETS.includes(id) ? { kind: 'expr', id } : null
   }
   return null
+}
+
+/** A timeline range can target one track (legacy) or several (multi-track regions). */
+function rangeTrackMatch(noteTrackId: string, trackId?: string, trackIds?: string[]): boolean {
+  if (trackIds && trackIds.length > 0) return trackIds.includes(noteTrackId)
+  return !trackId || noteTrackId === trackId
+}
+
+function rangeAutomationMatch(key: string, trackId?: string, trackIds?: string[]): boolean {
+  const keyTrackId = key.includes('::') ? key.split('::')[0] : key
+  return rangeTrackMatch(keyTrackId, trackId, trackIds)
 }
 
 export function deduplicateNotes(notesList: Note[]): Note[] {
@@ -865,8 +880,14 @@ export interface Track {
   synthOscillator?: 'sine' | 'square' | 'sawtooth' | 'triangle' | 'custom'
   synthFormula?: string
   synthPartialsCount?: number
+  // Amplitudes for the custom oscillator, computed from synthFormula on the JS side so
+  // the native additive renderer matches the web one.
+  synthPartials?: number[]
+  synthFilterType?: 'lowpass' | 'highpass' | 'bandpass' | 'notch'
   synthFilterFreq?: number
   synthFilterQ?: number
+  synthUnison?: number
+  synthDetuneSpread?: number
   synthDetune?: number
   synthPortamento?: number
   synthDecayCurveType?: 'exponential' | 'linear' | 'logarithmic' | 'scurve' | 'custom'
@@ -1091,6 +1112,8 @@ export interface ProjectExportData {
   bounceMode?: 'offline' | 'realtime' | 'hybrid' | 'juce' | 'tone';
   realtimeTailSeconds?: number;
   exportScalaWithMidi?: boolean;
+  /** Optional scope caption shown in the export dialog header (e.g. a timeline region). */
+  displayLabel?: string;
 }
 
 export interface ExportRegion {
@@ -1104,6 +1127,8 @@ export interface TimelineSelection {
   startTick: number;
   endTick: number;
   trackId?: string;
+  /** Tracks the region covers. Falls back to trackId for legacy single-track regions. */
+  trackIds?: string[];
 }
 
 export interface MidiRemapData {
@@ -1263,11 +1288,14 @@ export interface AppState {
 
   timelineSelection: TimelineSelection | null
   setTimelineSelection: (selection: TimelineSelection | null) => void
-  duplicateTimelineRange: (startTick: number, endTick: number, trackId?: string) => void
-  muteTimelineRange: (startTick: number, endTick: number, trackId?: string) => void
-  deleteTimelineRange: (startTick: number, endTick: number, trackId?: string) => void
-  splitTimelineRange: (startTick: number, endTick: number, trackId?: string) => void
-  quantizeTimelineRange: (startTick: number, endTick: number, trackId?: string) => void
+  /** When armed, the next timeline drag creates a region without Ctrl/Shift. */
+  regionPickMode: boolean
+  setRegionPickMode: (active: boolean) => void
+  duplicateTimelineRange: (startTick: number, endTick: number, trackId?: string, trackIds?: string[]) => void
+  muteTimelineRange: (startTick: number, endTick: number, trackId?: string, trackIds?: string[]) => void
+  deleteTimelineRange: (startTick: number, endTick: number, trackId?: string, trackIds?: string[]) => void
+  splitTimelineRange: (startTick: number, endTick: number, trackId?: string, trackIds?: string[]) => void
+  quantizeTimelineRange: (startTick: number, endTick: number, trackId?: string, trackIds?: string[]) => void
 
   gridSplitOrder: 'synth-first' | 'drum-first'
   gridPaneMode: 'split' | 'synth-only' | 'drum-only' | 'active'
@@ -1739,7 +1767,7 @@ export const createBlankProjectData = (projectName = 'Untitled Project') => ({
   scaleLock: {
     enabled: false,
     root: 0,
-    mode: 'major',
+    mode: 'Major',
     accidental: 'sharp' as const
   },
   gridSplitOrder: 'synth-first' as const,
@@ -1829,7 +1857,7 @@ export const applyProjectDataToEngineAndStore = (data: any, tabName?: string, fi
     historyIndex: -1,
     bpm: data.bpm || 120,
     timeSignature: normalizeTimeSignature(data.timeSignature),
-    scaleLock: data.scaleLock || { enabled: false, root: 0, mode: 'major', accidental: 'sharp' },
+    scaleLock: data.scaleLock || { enabled: false, root: 0, mode: 'Major', accidental: 'sharp' },
     loopEnabled: !!data.loopEnabled,
     loopStart: data.loopStart || 0,
     loopEnd: data.loopEnd || 768,
@@ -2126,6 +2154,7 @@ export const useStore = create<AppState>((originalSet, get, api) => {
     exportRegionMode: false,
     exportRegions: [],
     timelineSelection: null,
+    regionPickMode: false,
     midiRemapData: {
       midi: null,
       filename: '',
@@ -2397,7 +2426,9 @@ if (firstTrack) {
     removeTrack: (id) => set((state) => {
       const newTracks = state.tracks.filter(t => t.id !== id)
       const automationCurves = { ...state.automationCurves }
-      delete automationCurves[id]
+      Object.keys(automationCurves).forEach(key => {
+        if (key === id || key.startsWith(`${id}::`)) delete automationCurves[key]
+      })
       const automationTargets = { ...state.automationTargets }
       delete automationTargets[id]
       const automationLanes = { ...state.automationLanes }
@@ -2425,7 +2456,9 @@ if (firstTrack) {
       const automationTargets = { ...state.automationTargets }
       const automationLanes = { ...state.automationLanes }
       ids.forEach(id => {
-        delete automationCurves[id]
+        Object.keys(automationCurves).forEach(key => {
+          if (key === id || key.startsWith(`${id}::`)) delete automationCurves[key]
+        })
         delete automationTargets[id]
         delete automationLanes[id]
       })
@@ -2509,9 +2542,13 @@ if (firstTrack) {
             })
           })
 
-          if (state.automationCurves[track.id]) {
-            newAutomationCurves[newTrackId] = JSON.parse(JSON.stringify(state.automationCurves[track.id]))
-          }
+          Object.entries(state.automationCurves).forEach(([key, points]) => {
+            if (key === track.id) {
+              newAutomationCurves[newTrackId] = JSON.parse(JSON.stringify(points))
+            } else if (key.startsWith(`${track.id}::`)) {
+              newAutomationCurves[`${newTrackId}::${key.slice(track.id.length + 2)}`] = JSON.parse(JSON.stringify(points))
+            }
+          })
           // A duplicated lane must mean the same thing as the lane it came from.
           if (state.automationTargets[track.id]) {
             newAutomationTargets[newTrackId] = state.automationTargets[track.id]
@@ -3523,46 +3560,95 @@ if (firstTrack) {
       return { automationLanes: lanes }
     }),
     bakeProceduralAutomation: (trackId, formula, preset, density) => set((state) => {
-      // Density: how many ticks between points (e.g., 48 = every 16th note, 12 = every 64th note)
-      // We will generate 4 bars of automation (768 * 4 = 3072 ticks)
-      const maxTicks = 3072
-      const points: AutomationPoint[] = []
+      // Density is a tick step: 48 = 16th notes, 12 = 64th notes. Guard it so a script
+      // calling density 0 cannot spin forever, and cap the point count for long projects.
+      const step = Math.max(1, Math.min(192, Math.round(Number.isFinite(density) ? density : 48)))
+      const signature = state.timeSignature || '4/4'
+      const firstBarTicks = Math.max(1, Math.round(getMeterPositionAtTick(state.meterMap, signature, 0).barTicks))
+      const projectEnd = state.notes.reduce((end, note) => Math.max(end, note.time + note.duration), 0)
+      const lastBar = getMeterPositionAtTick(state.meterMap, signature, projectEnd)
+      const projectEndTick = projectEnd > 0
+        ? Math.round(lastBar.barStartTick + lastBar.barTicks)
+        : firstBarTicks * 4
+      // Always cover at least four bars, then follow the project, without exploding the lane.
+      const maxTicks = Math.min(
+        Math.max(firstBarTicks * 4, projectEndTick),
+        Math.min(firstBarTicks * 128, step * 8192),
+      )
 
-      for (let t = 0; t <= maxTicks; t += density) {
-        let val = 0.5
+      const customFn = preset === 'custom'
+        ? compileFormula<(t: number, s: number, b: number, m: number, ticks: number, v: number) => number>(
+          formula || '64',
+          ['t', 's', 'b', 'm', 'ticks', 'v'],
+        )
+        : null
 
+      const evaluate = (tick: number): number => {
+        const beats = tick / 192
+        const bars = conductorBarsAtTick(state.meterMap, signature, tick)
+        if (preset === 'sine') return (Math.sin(beats * Math.PI) + 1) / 2
+        if (preset === 'square') return Math.floor(beats) % 2 === 0 ? 1 : 0
+        if (preset === 'noise') return Math.random()
+        if (preset === 'sidechain') {
+          // Duck at every conductor beat, including odd meters, and recover over half a beat.
+          const position = getMeterPositionAtTick(state.meterMap, signature, tick)
+          const intoBeat = Math.max(0, tick - position.beatStartTick)
+          return Math.min(1, intoBeat / Math.max(1, position.beatTicks * 0.5))
+        }
+        if (!customFn) return 64
+        const seconds = conductorSecondsAtTick(state.tempoMap, state.bpm, tick, state.meterMap, signature)
         try {
-          if (preset === 'sine') {
-            val = (Math.sin(t / (192 / Math.PI)) + 1) / 2
-          } else if (preset === 'square') {
-            val = Math.floor(t / 192) % 2 === 0 ? 1 : 0
-          } else if (preset === 'noise') {
-            val = Math.random()
-          } else if (preset === 'sidechain') {
-            // Duck on every downbeat (192 ticks)
-            const posInBeat = t % 192
-            val = posInBeat < 48 ? (posInBeat / 48) : 1
-          } else {
-            // Custom Math Evaluation (unsafe eval for extreme flexibility)
-            const mathFunc = new Function('t', 'Math', `return ${formula || '0.5'}`)
-            val = mathFunc(t, Math)
-            if (isNaN(val) || !isFinite(val)) val = 0.5
-            val = Math.max(0, Math.min(1, val))
-          }
-        } catch (e) {
-          console.error("Procedural formula error:", e)
-          val = 0.5
-        }
-
-        points.push({ id: `auto-${t}-${Date.now()}`, time: t, value: val })
-      }
-
-      return {
-        automationCurves: {
-          ...state.automationCurves,
-          [trackId]: points
+          const result = Number(customFn(tick, seconds, beats, bars, tick, 64))
+          return Number.isFinite(result) ? result : 64
+        } catch {
+          return 64
         }
       }
+
+      const samples: Array<{ time: number; raw: number }> = []
+      for (let tick = 0; tick <= maxTicks; tick += step) {
+        samples.push({ time: tick, raw: evaluate(tick) })
+      }
+      if (samples.length === 0 || samples[samples.length - 1].time < maxTicks) {
+        samples.push({ time: maxTicks, raw: evaluate(maxTicks) })
+      }
+
+      // Custom formulas may speak either normalised (0..1 or -1..1) or lane units (0..127).
+      // Presets are always normalised and expanded to the lane below.
+      let rawMin = Infinity
+      let rawMax = -Infinity
+      if (preset === 'custom') {
+        for (const sample of samples) {
+          if (!Number.isFinite(sample.raw)) continue
+          if (sample.raw < rawMin) rawMin = sample.raw
+          if (sample.raw > rawMax) rawMax = sample.raw
+        }
+      }
+      const normalized = preset !== 'custom' ||
+        (rawMax <= 1.05 && rawMin >= -0.05)
+      const bipolar = preset === 'custom' && !normalized && rawMax <= 1.05 && rawMin >= -1.05
+
+      const points: AutomationPoint[] = samples.map((sample, index) => {
+        let laneValue: number
+        if (bipolar) laneValue = ((sample.raw + 1) / 2) * 127
+        else if (normalized) laneValue = sample.raw * 127
+        else laneValue = sample.raw
+        if (!Number.isFinite(laneValue)) laneValue = 64
+        return {
+          id: `proc-${trackId}-${index}`,
+          time: Math.round(sample.time * 1000) / 1000,
+          value: Math.round(Math.max(0, Math.min(127, laneValue)) * 100) / 100,
+        }
+      })
+
+      const target = state.automationTargets[trackId] ?? 'velocity'
+      const key = getAutomationTargetKey(trackId, target)
+      const automationCurves = { ...state.automationCurves, [key]: points }
+      // The legacy unsuffixed key is read as the active target, so dropping it stops a stale
+      // bake from being applied a second time alongside the fresh curve.
+      delete automationCurves[trackId]
+
+      return { automationCurves }
     }),
 
     setShowConductor: (v) => set({ showConductor: v }),
@@ -3721,14 +3807,15 @@ if (firstTrack) {
     removeExportRegion: (id) => set(s => ({ exportRegions: s.exportRegions.filter(r => r.id !== id) })),
     updateExportRegionGap: (id, gap) => set(s => ({ exportRegions: s.exportRegions.map(r => r.id === id ? { ...r, gap } : r) })),
     setTimelineSelection: (selection) => set({ timelineSelection: selection }),
-    duplicateTimelineRange: (startTick, endTick, trackId) => set(state => {
+    setRegionPickMode: (active) => set({ regionPickMode: active }),
+    duplicateTimelineRange: (startTick, endTick, trackId, trackIds) => set(state => {
       const minT = Math.min(startTick, endTick)
       const maxT = Math.max(startTick, endTick)
       const rangeLen = maxT - minT
       if (rangeLen <= 0) return state
 
       const inRangeNotes = state.notes.filter(n =>
-        n.time >= minT && n.time < maxT && (!trackId || n.trackId === trackId)
+        n.time >= minT && n.time < maxT && rangeTrackMatch(n.trackId, trackId, trackIds)
       )
       if (inRangeNotes.length === 0) return state
 
@@ -3740,8 +3827,7 @@ if (firstTrack) {
 
       const newCurves = { ...state.automationCurves }
       Object.entries(newCurves).forEach(([key, pts]) => {
-        const keyTrackId = key.includes('::') ? key.split('::')[0] : key
-        if (!trackId || keyTrackId === trackId) {
+        if (rangeAutomationMatch(key, trackId, trackIds)) {
           const inRangePts = pts.filter(p => p.time >= minT && p.time < maxT)
           if (inRangePts.length > 0) {
             const dupPts = inRangePts.map(p => ({
@@ -3766,11 +3852,11 @@ if (firstTrack) {
         isDirty: true
       }
     }),
-    muteTimelineRange: (startTick, endTick, trackId) => set(state => {
+    muteTimelineRange: (startTick, endTick, trackId, trackIds) => set(state => {
       const minT = Math.min(startTick, endTick)
       const maxT = Math.max(startTick, endTick)
       const inRangeNotes = state.notes.filter(n =>
-        n.time >= minT && n.time < maxT && (!trackId || n.trackId === trackId)
+        n.time >= minT && n.time < maxT && rangeTrackMatch(n.trackId, trackId, trackIds)
       )
       if (inRangeNotes.length === 0) return state
 
@@ -3787,20 +3873,19 @@ if (firstTrack) {
         isDirty: true
       }
     }),
-    deleteTimelineRange: (startTick, endTick, trackId) => set(state => {
+    deleteTimelineRange: (startTick, endTick, trackId, trackIds) => set(state => {
       const minT = Math.min(startTick, endTick)
       const maxT = Math.max(startTick, endTick)
       const targetIds = new Set(
         state.notes
-          .filter(n => n.time >= minT && n.time < maxT && (!trackId || n.trackId === trackId))
+          .filter(n => n.time >= minT && n.time < maxT && rangeTrackMatch(n.trackId, trackId, trackIds))
           .map(n => n.id)
       )
       if (targetIds.size === 0) return state
 
       const newCurves = { ...state.automationCurves }
       Object.entries(newCurves).forEach(([key, pts]) => {
-        const keyTrackId = key.includes('::') ? key.split('::')[0] : key
-        if (!trackId || keyTrackId === trackId) {
+        if (rangeAutomationMatch(key, trackId, trackIds)) {
           newCurves[key] = pts.filter(p => !(p.time >= minT && p.time < maxT))
         }
       })
@@ -3817,7 +3902,7 @@ if (firstTrack) {
         isDirty: true
       }
     }),
-    splitTimelineRange: (startTick, endTick, trackId) => set(state => {
+    splitTimelineRange: (startTick, endTick, trackId, trackIds) => set(state => {
       const minT = Math.min(startTick, endTick)
       const maxT = Math.max(startTick, endTick)
       const cuts = [minT, maxT]
@@ -3825,7 +3910,7 @@ if (firstTrack) {
       let newNotes: Note[] = []
 
       state.notes.forEach(note => {
-        if (trackId && note.trackId !== trackId) {
+        if (!rangeTrackMatch(note.trackId, trackId, trackIds)) {
           newNotes.push(note)
           return
         }
@@ -3870,13 +3955,13 @@ if (firstTrack) {
         isDirty: true
       }
     }),
-    quantizeTimelineRange: (startTick, endTick, trackId) => set(state => {
+    quantizeTimelineRange: (startTick, endTick, trackId, trackIds) => set(state => {
       const minT = Math.min(startTick, endTick)
       const maxT = Math.max(startTick, endTick)
       const { snapResolution } = state
       const targetIds = new Set(
         state.notes
-          .filter(n => n.time >= minT && n.time < maxT && (!trackId || n.trackId === trackId))
+          .filter(n => n.time >= minT && n.time < maxT && rangeTrackMatch(n.trackId, trackId, trackIds))
           .map(n => n.id)
       )
       if (targetIds.size === 0) return state
@@ -3981,8 +4066,16 @@ if (firstTrack) {
             synced.synthSustain = source.synthSustain
             synced.synthRelease = source.synthRelease
             synced.synthOscillator = source.synthOscillator
+            synced.synthFormula = source.synthFormula
+            synced.synthPartialsCount = source.synthPartialsCount
+            synced.synthPartials = source.synthPartials
+            synced.synthFilterType = source.synthFilterType
             synced.synthFilterFreq = source.synthFilterFreq
             synced.synthFilterQ = source.synthFilterQ
+            synced.synthUnison = source.synthUnison
+            synced.synthDetuneSpread = source.synthDetuneSpread
+            synced.synthDetune = source.synthDetune
+            synced.synthPortamento = source.synthPortamento
             synced.synthDecayCurveType = source.synthDecayCurveType
             synced.synthDecayTension = source.synthDecayTension
             synced.synthDecayFormula = source.synthDecayFormula

@@ -129,7 +129,7 @@ interface EditorAPI {
   filterOddEven(keep: 'odd' | 'even'): void;
   filterVoice(voice: 'top' | 'bottom'): void;
   generateProgression(progressionIdOrName: string, spacingTicks?: number): void;
-  detectChord(pitches?: number[]): any;
+  detectChord(pitches?: number[], preferFlats?: boolean): any;
 }
 
 interface TransportAPI {
@@ -276,7 +276,7 @@ interface TuningAPI {
   setScalaScale(trackId: string, scaleName: string, cents: number[]): void;
   getAvailableScales(): string[];
   getGenreProgressions(): any[];
-  detectChord(pitches: number[]): any;
+  detectChord(pitches: number[], preferFlats?: boolean): any;
   detectScaleDegree(rootPc: number, scaleRoot?: number, scaleMode?: string): string | null;
 }
 

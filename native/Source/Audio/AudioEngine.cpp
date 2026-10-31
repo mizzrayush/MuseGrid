@@ -449,12 +449,45 @@ void AudioEngine::setTrackSynthParam(const juce::String& trackId, const juce::St
                 else if (type == 2) t->oscType = SynthVoice::OscType::Square;
                 else if (type == 3) t->oscType = SynthVoice::OscType::Saw;
                 else if (type == 4) t->oscType = SynthVoice::OscType::Noise;
+                // Any plain waveform leaves additive mode; partials for a custom
+                // oscillator are posted by setTrackPartials right after this command.
+                if (type != 5) t->synthPartialCount = 0;
                 t->synthPreset = "custom";
             }
             else if (param == "attack" || param == "synthAttack")   { t->attack = val; t->synthPreset = "custom"; }
             else if (param == "decay" || param == "synthDecay")     { t->decay = val; t->synthPreset = "custom"; }
             else if (param == "sustain" || param == "synthSustain") { t->sustain = val; t->synthPreset = "custom"; }
             else if (param == "release" || param == "synthRelease") { t->release = val; t->synthPreset = "custom"; }
+            else if (param == "filterFreq" || param == "synthFilterFreq" || param == "cutoff")
+            {
+                t->synthFilterFreq = juce::jlimit(20.0f, 20000.0f, val);
+                t->synthPreset = "custom";
+            }
+            else if (param == "filterQ" || param == "synthFilterQ" || param == "resonance")
+            {
+                t->synthFilterQ = juce::jlimit(0.5f, 12.0f, val);
+                t->synthPreset = "custom";
+            }
+            else if (param == "unison" || param == "synthUnison")
+            {
+                t->synthUnison = juce::jlimit(1, 16, (int)std::lround(val));
+                t->synthPreset = "custom";
+            }
+            else if (param == "detuneSpread" || param == "synthDetuneSpread")
+            {
+                t->synthDetuneSpread = juce::jlimit(0.0f, 100.0f, val);
+                t->synthPreset = "custom";
+            }
+            else if (param == "detune" || param == "synthDetune")
+            {
+                t->synthDetuneCents = juce::jlimit(-4800.0f, 4800.0f, val);
+                t->synthPreset = "custom";
+            }
+            else if (param == "portamento" || param == "synthPortamento")
+            {
+                t->synthPortamento = juce::jlimit(0.0f, 2.0f, val);
+                t->synthPreset = "custom";
+            }
             break;
         }
     }
@@ -468,6 +501,7 @@ void AudioEngine::setTrackSynthPreset(const juce::String& trackId, const juce::S
         if (t->id == trackId)
         {
             t->synthPreset = presetName;
+            if (presetName != "custom") t->synthPartialCount = 0;
             if (presetName == "piano") {
                 t->oscType = SynthVoice::OscType::Triangle;
                 t->attack = 0.004f; t->decay = 0.28f; t->sustain = 0.16f; t->release = 0.36f;
@@ -515,6 +549,47 @@ void AudioEngine::setTrackSynthPreset(const juce::String& trackId, const juce::S
             }
             break;
         }
+    }
+}
+
+void AudioEngine::setTrackFilter(const juce::String& trackId, const juce::String& filterType,
+                                 float cutoffHz, float resonance)
+{
+    std::lock_guard<std::recursive_mutex> lock(trackMutex);
+    for (auto& t : tracks)
+    {
+        if (t->id != trackId) continue;
+
+        const juce::String type = filterType.toLowerCase();
+        t->synthFilterType = type == "highpass" ? 1
+                           : type == "bandpass" ? 2
+                           : type == "notch" ? 3
+                                             : 0;
+        t->synthFilterFreq = juce::jlimit(20.0f, 20000.0f, cutoffHz);
+        t->synthFilterQ = juce::jlimit(0.5f, 12.0f, resonance);
+        t->synthPreset = "custom";
+        break;
+    }
+}
+
+void AudioEngine::setTrackSynthPartials(const juce::String& trackId, const float* data, int count)
+{
+    std::lock_guard<std::recursive_mutex> lock(trackMutex);
+    for (auto& t : tracks)
+    {
+        if (t->id != trackId) continue;
+
+        t->synthPartials.fill(0.0f);
+        t->synthPartialCount = data != nullptr ? juce::jlimit(0, 64, count) : 0;
+        for (int i = 0; i < t->synthPartialCount; ++i)
+            t->synthPartials[(size_t)i] = data[i];
+
+        if (t->synthPartialCount > 0)
+        {
+            t->oscType = SynthVoice::OscType::Custom;
+            t->synthPreset = "custom";
+        }
+        break;
     }
 }
 
@@ -1691,15 +1766,34 @@ void AudioEngine::playNote(const juce::String& trackId,
     }
     else // Default "synth"
     {
-        voiceManager.noteOnSynth(trackId, noteId, pitchMidi, velocity, durationSeconds,
+        // Patch portamento glides each new note from the previous one unless the note
+        // carries its own explicit glide target.
+        float startPitch = pitchMidi;
+        float glideTarget = targetPitchMidi;
+        float glideTime = slideTimeSeconds;
+        if (glideTarget < 0.0f && targetTrack->synthPortamento > 0.001f && targetTrack->hasLastSynthPitch)
+        {
+            startPitch = targetTrack->lastSynthPitch;
+            glideTarget = pitchMidi;
+            glideTime = targetTrack->synthPortamento;
+        }
+
+        voiceManager.noteOnSynth(trackId, noteId, startPitch, velocity, durationSeconds,
                                  targetTrack->synthPreset,
                                  targetTrack->oscType, targetTrack->attack, targetTrack->decay, targetTrack->sustain, targetTrack->release,
-                                 targetPitchMidi, slideTimeSeconds,
+                                 glideTarget, glideTime,
                                  vibratoDepthCents, vibratoRateHz,
                                  tremoloDepth, tremoloRateHz,
                                  filterStartHz, filterEndHz, filterSweepTimeSeconds,
                                  &targetTrack->decayCurve, &targetTrack->releaseCurve,
-                                 expression);
+                                 expression,
+                                 targetTrack->synthFilterType, targetTrack->synthFilterFreq, targetTrack->synthFilterQ,
+                                 targetTrack->synthUnison, targetTrack->synthDetuneSpread, targetTrack->synthDetuneCents,
+                                 targetTrack->synthPartialCount > 0 ? targetTrack->synthPartials.data() : nullptr,
+                                 targetTrack->synthPartialCount);
+
+        targetTrack->lastSynthPitch = pitchMidi;
+        targetTrack->hasLastSynthPitch = true;
     }
 }
 
@@ -1806,6 +1900,8 @@ void AudioEngine::allNotesOff()
     std::lock_guard<std::recursive_mutex> lock(trackMutex);
     for (auto& t : tracks)
     {
+        t->hasLastSynthPitch = false;
+
         if (t->samplerEnabled)
             t->sampleEngine.allNotesOff();
 
@@ -1845,6 +1941,8 @@ void AudioEngine::killAllNotesOnTrack(const juce::String& trackId)
     for (auto& t : tracks)
     {
         if (t->id != trackId) continue;
+
+        t->hasLastSynthPitch = false;
 
         if (t->samplerEnabled)
             t->sampleEngine.allNotesOff();

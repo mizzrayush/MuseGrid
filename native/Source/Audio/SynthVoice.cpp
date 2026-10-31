@@ -26,10 +26,48 @@ void SynthVoice::reset()
     tremPhase = 0.0;
     remainingDuration = -1.0f;
     filterState = 0.0f;
+    svfIc1 = 0.0f;
+    svfIc2 = 0.0f;
+    patchFilterCutoff = patchFilterTarget;
+    for (auto& phase : unisonPhases) phase = 0.0;
     fmPhase = 0.0;
     fmModEnvValue = 0.0f;
     stageElapsed = 0.0f;
     releaseStartLevel = 0.0f;
+}
+
+void SynthVoice::setFilter(int type, float cutoffHz, float resonance)
+{
+    const int mode = juce::jlimit(0, 3, type);
+    patchFilterMode = mode == 1 ? FilterMode::HighPass
+                     : mode == 2 ? FilterMode::BandPass
+                     : mode == 3 ? FilterMode::Notch
+                                 : FilterMode::LowPass;
+    patchFilterTarget = juce::jlimit(20.0f, 20000.0f, cutoffHz);
+    patchFilterCutoff = patchFilterTarget;
+    patchFilterResonance = juce::jlimit(0.5f, 12.0f, resonance);
+    // A lowpass at the top of the range is the "filter off" default; every other mode
+    // is an explicit colour choice and stays active.
+    patchFilterEnabled = patchFilterMode != FilterMode::LowPass || patchFilterTarget < 19500.0f;
+}
+
+void SynthVoice::setUnison(int voices, float spreadCents)
+{
+    unisonVoices = juce::jlimit(1, 16, voices);
+    unisonSpreadCents = juce::jlimit(0.0f, 100.0f, spreadCents);
+}
+
+void SynthVoice::setDetuneCents(float cents)
+{
+    detuneCents = juce::jlimit(-4800.0f, 4800.0f, cents);
+}
+
+void SynthVoice::setPartials(const float* data, int count)
+{
+    partialCount = data != nullptr ? juce::jlimit(0, 64, count) : 0;
+    partialAmplitudes.fill(0.0f);
+    for (int i = 0; i < partialCount; ++i)
+        partialAmplitudes[(size_t)i] = data[i];
 }
 
 void SynthVoice::setAdsr(float a, float d, float s, float r)
@@ -145,6 +183,18 @@ void SynthVoice::triggerNoteOn(int noteId,
     currentPitch = pitchMidi;
     noteVelocity = juce::jlimit(0.0f, 1.0f, velocity);
     active = true;
+
+    // Spread unison phases so stacked voices do not start perfectly in phase.
+    unisonPhases.fill(0.0);
+    {
+        const int voices = juce::jlimit(1, 16, unisonVoices);
+        for (int v = 1; v < voices; ++v)
+            unisonPhases[(size_t)v] = std::fmod((double)v / (double)voices
+                                                + (double)(noteId % 97) * 0.0137, 1.0);
+    }
+    patchFilterCutoff = patchFilterTarget;
+    svfIc1 = 0.0f;
+    svfIc2 = 0.0f;
 
     remainingDuration = durationSeconds > 0.0f ? durationSeconds : -1.0f;
 
@@ -281,7 +331,8 @@ void SynthVoice::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
 
         // Convert MIDI to Frequency: f = 440 * 2^((midi - 69) / 12)
         const float effectivePitch = currentPitch + pitchOffset;
-        const float freq = 440.0f * std::pow(2.0f, (effectivePitch - 69.0f) / 12.0f);
+        const float tunedPitch = effectivePitch + detuneCents / 100.0f;
+        const float freq = 440.0f * std::pow(2.0f, (tunedPitch - 69.0f) / 12.0f);
         const double phaseIncrement = (freq / currentSampleRate);
 
         // 4. Generate Raw Waveform
@@ -315,35 +366,73 @@ void SynthVoice::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
 
             const double fmModulator = (fmModIndex * fmModEnvValue) * std::sin(fmPhase * 2.0 * juce::MathConstants<double>::pi);
             rawSample = (float)std::sin(currentPhase * 2.0 * juce::MathConstants<double>::pi + fmModulator);
+
+            currentPhase += phaseIncrement;
+            if (currentPhase >= 1.0) currentPhase -= 1.0;
         }
         else
         {
-            switch (oscType)
+            const int voices = juce::jlimit(1, 16, unisonVoices);
+            const int customPartials = juce::jlimit(0, 64, partialCount);
+            float unisonSum = 0.0f;
+
+            for (int v = 0; v < voices; ++v)
             {
-                case OscType::Sine:
-                    rawSample = (float)std::sin(currentPhase * 2.0 * juce::MathConstants<double>::pi);
-                    break;
+                double& phase = unisonPhases[(size_t)v];
+                float centsOffset = 0.0f;
+                if (voices > 1 && unisonSpreadCents > 0.0f)
+                    centsOffset = unisonSpreadCents * (((float)v / (float)(voices - 1)) - 0.5f);
 
-                case OscType::Triangle:
-                    rawSample = (float)(4.0 * std::abs(currentPhase - 0.5) - 1.0);
-                    break;
+                float voiceSample = 0.0f;
+                if (oscType == OscType::Custom && customPartials > 0)
+                {
+                    double partialSum = 0.0;
+                    float amplitudeSum = 0.0f;
+                    for (int h = 0; h < customPartials; ++h)
+                    {
+                        const float amplitude = partialAmplitudes[(size_t)h];
+                        partialSum += amplitude * std::sin(2.0 * juce::MathConstants<double>::pi
+                                                          * (double)(h + 1) * phase);
+                        amplitudeSum += std::abs(amplitude);
+                    }
+                    voiceSample = amplitudeSum > 0.0001f ? (float)(partialSum / amplitudeSum) : 0.0f;
+                }
+                else
+                {
+                    const OscType shape = (oscType == OscType::Custom) ? OscType::Sine : oscType;
+                    switch (shape)
+                    {
+                        case OscType::Sine:
+                            voiceSample = (float)std::sin(phase * 2.0 * juce::MathConstants<double>::pi);
+                            break;
+                        case OscType::Triangle:
+                            voiceSample = (float)(4.0 * std::abs(phase - 0.5) - 1.0);
+                            break;
+                        case OscType::Square:
+                            voiceSample = phase < 0.5 ? 1.0f : -1.0f;
+                            break;
+                        case OscType::Saw:
+                            voiceSample = (float)(2.0 * phase - 1.0);
+                            break;
+                        case OscType::Noise:
+                            voiceSample = nextNoise();
+                            break;
+                        case OscType::Custom:
+                            break;
+                    }
+                }
 
-                case OscType::Square:
-                    rawSample = currentPhase < 0.5 ? 1.0f : -1.0f;
-                    break;
+                unisonSum += voiceSample;
 
-                case OscType::Saw:
-                    rawSample = (float)(2.0 * currentPhase - 1.0);
-                    break;
-
-                case OscType::Noise:
-                    rawSample = nextNoise();
-                    break;
+                const double voiceIncrement = phaseIncrement
+                    * std::pow(2.0, (double)centsOffset / 1200.0);
+                phase += voiceIncrement;
+                if (phase >= 1.0) phase -= std::floor(phase);
+                if (phase < 0.0) phase += 1.0;
             }
-        }
 
-        currentPhase += phaseIncrement;
-        if (currentPhase >= 1.0) currentPhase -= 1.0;
+            rawSample = unisonSum / (float)voices;
+        }
 
         // 5. Filter Sweep
         if (hasFilterSweep && filterSweepDuration > 0.0f)
@@ -358,6 +447,30 @@ void SynthVoice::renderBlock(float* leftOut, float* rightOut, int numSamples, fl
             const float coeff = 2.0f * juce::MathConstants<float>::pi * fc * sampleTime / (1.0f + 2.0f * juce::MathConstants<float>::pi * fc * sampleTime);
             filterState += coeff * (rawSample - filterState);
             rawSample = filterState;
+        }
+
+        // 5b. Patch filter (Synth Studio / .muzins): resonant state-variable filter.
+        if (patchFilterEnabled)
+        {
+            patchFilterCutoff += (patchFilterTarget - patchFilterCutoff) * 0.002f;
+            const float fc = juce::jlimit(20.0f, (float)(currentSampleRate * 0.45), patchFilterCutoff);
+            const float g = std::tan(juce::MathConstants<float>::pi * fc / (float)currentSampleRate);
+            const float k = 1.0f / juce::jmax(0.1f, patchFilterResonance);
+            const float a1 = 1.0f / (1.0f + g * (g + k));
+            const float a2 = g * a1;
+            const float v3 = rawSample - svfIc2;
+            const float band = a1 * svfIc1 + a2 * v3;
+            const float low = svfIc2 + a2 * svfIc1 + g * a2 * v3;
+            svfIc1 = 2.0f * band - svfIc1;
+            svfIc2 = 2.0f * low - svfIc2;
+
+            switch (patchFilterMode)
+            {
+                case FilterMode::LowPass:  rawSample = low; break;
+                case FilterMode::HighPass: rawSample = rawSample - k * band - low; break;
+                case FilterMode::BandPass: rawSample = band; break;
+                case FilterMode::Notch:    rawSample = rawSample - k * band; break;
+            }
         }
 
         // 6. ADSR Envelope Step

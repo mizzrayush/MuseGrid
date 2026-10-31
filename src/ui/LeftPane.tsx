@@ -3,13 +3,16 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Midi } from '@tonejs/midi'
 import * as Tone from 'tone'
-import { useStore, DEFAULT_DRUM_ROWS, DEFAULT_VOICE_PRESETS, defaultGrooveTemplates, isPluginDrum, isPluginSynth, getPluginInstrumentType, type Track, type DrumRowConfig, type CustomFxConfig, type Note, type VoicePreset } from '../engine/store'
+import { useStore, DEFAULT_DRUM_ROWS, DEFAULT_VOICE_PRESETS, defaultGrooveTemplates, isPluginDrum, isPluginSynth, getPluginInstrumentType, getTrackAutomationPoints, type Track, type DrumRowConfig, type CustomFxConfig, type Note, type VoicePreset } from '../engine/store'
 import { audioEngine, type AudioDeviceSetup } from '../engine/AudioEngine'
 import { getTrackFxInstances } from '../engine/fxDefaults'
 import { useContextMenuDismissal, useContextMenuPosition } from './useContextMenuDismissal'
 import { AppSlider, sliderProgress } from './AppSlider'
 import { NOTE_NAMES_SHARP, NOTE_NAMES_FLAT, CHORD_VOICINGS, snapTick, snapToScale, getDiatonicChord, SCALE_MODES, GENRE_PROGRESSIONS, type GenreProgression, CHORD_STAMPS } from '../utils/musicTheory'
 import { MAX_METER_BEATS, MAX_METER_DENOMINATOR, parseMeterSignature } from '../utils/conductor'
+import { generateCurveLut } from '../utils/envelopeCurves'
+import { trackFieldsFromMuzins } from '../utils/muzins'
+import { analyzeMelody, generateSynthCandidates, type MelodyProfile, type SoundCandidate } from '../utils/soundDesigner'
 
 import { createProceduralSuggestions, type ProceduralSuggestion, type SuggestionKind } from '../utils/proceduralSuggestions'
 import { applyAudioBufferFadeOut, mixAudioBuffers, normalizeAudioBuffer, renderProjectAudio, stitchAudioBuffers } from '../utils/audioRender'
@@ -23,6 +26,7 @@ import { saveFileWithDialog } from '../utils/fileExport'
 import { generateAiMelody, generateAiDrums, generateBeatMorph, generateAutoHarmony, generateHumanGroove, generatePianoGenieNote, resetPianoGenie } from '../utils/aiLab'
 import { detectFundamentalPitch, hzToMidi } from '../utils/micRecorder'
 import StemSplitterPane from './StemSplitterPane'
+import GenerativeMusicPane from './GenerativeMusicPane'
 import { MidiEditSection } from './MidiEditSection'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET, DRUM_KITS, SYNTH_PRESETS, type DrumKit, type SynthPreset } from '../utils/instruments'
 import {
@@ -683,6 +687,74 @@ function RealtimeTailBufferControl({
         onMouseDown={e => e.stopPropagation()}
         style={{ '--slider-color': color, '--slider-progress': progress, accentColor: color } as React.CSSProperties}
       />
+    </div>
+  )
+}
+
+/** Inline numeric readout that can be typed into; deliberately not clamped to the slider range. */
+function EditableValue({
+  value,
+  suffix = '',
+  color = '#888',
+  width = '38px',
+  onChange,
+}: {
+  value: number
+  suffix?: string
+  color?: string
+  width?: string
+  onChange: (value: number) => void
+}) {
+  const format = (v: number) => String(Math.round(v * 100) / 100)
+  const [text, setText] = useState(() => format(value))
+  const [prevValue, setPrevValue] = useState(value)
+  const [isFocused, setIsFocused] = useState(false)
+
+  if (value !== prevValue) {
+    setPrevValue(value)
+    if (!isFocused) setText(format(value))
+  }
+
+  const commit = () => {
+    const parsed = parseFloat(text)
+    if (Number.isFinite(parsed)) onChange(parsed)
+    else setText(format(value))
+  }
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '2px', flexShrink: 0 }}>
+      <input
+        type="text"
+        inputMode="decimal"
+        value={text}
+        onFocus={() => setIsFocused(true)}
+        onBlur={() => { setIsFocused(false); commit() }}
+        onChange={e => setText(e.target.value)}
+        onKeyDown={e => {
+          e.stopPropagation()
+          if (e.key === 'Enter') e.currentTarget.blur()
+          if (e.key === 'Escape') {
+            setText(format(value))
+            e.currentTarget.blur()
+          }
+        }}
+        onMouseDown={e => e.stopPropagation()}
+        onMouseUp={e => e.stopPropagation()}
+        style={{
+          fontSize: '10px',
+          color,
+          fontFamily: 'monospace',
+          fontWeight: 800,
+          background: 'rgba(255,255,255,0.03)',
+          border: `1px solid ${isFocused ? color : 'rgba(255,255,255,0.08)'}`,
+          borderRadius: '4px',
+          width,
+          textAlign: 'right',
+          outline: 'none',
+          padding: '1px 4px',
+        }}
+      />
+      {suffix && <span style={{ fontSize: '9px', color, fontWeight: 700, fontFamily: 'monospace' }}>{suffix}</span>}
     </div>
   )
 }
@@ -1817,9 +1889,13 @@ export default function LeftPane() {
   const removeNote = useStore(s => s.removeNote)
   const activeTrackId = useStore(s => s.activeTrackId)
   const selectedTrackIds = useStore(s => s.selectedTrackIds)
+  const timelineSelection = useStore(s => s.timelineSelection)
+  const regionPickMode = useStore(s => s.regionPickMode)
+  const setRegionPickMode = useStore(s => s.setRegionPickMode)
   const toggleTrackSelection = useStore(s => s.toggleTrackSelection)
   const activeTrack = tracks.find(t => t.id === activeTrackId)
   const setActiveTrackId = useStore(s => s.setActiveTrackId)
+  const setIsSynthStudioModalVisible = useStore(s => s.setIsSynthStudioModalVisible)
   const activeTool = useStore(s => s.activeTool)
   const setActiveTool = useStore(s => s.setActiveTool)
   const snapEnabled = useStore(s => s.snapEnabled)
@@ -1970,6 +2046,7 @@ export default function LeftPane() {
   const updateGroup = useStore(s => s.updateGroup)
   const syncTrackSettings = useStore(s => s.syncTrackSettings)
   const automationCurves = useStore(s => s.automationCurves)
+  const automationTargets = useStore(s => s.automationTargets)
   const automationLanes = useStore(s => s.automationLanes)
   const updateAutomationLane = useStore(s => s.updateAutomationLane)
 
@@ -1981,6 +2058,7 @@ export default function LeftPane() {
   const setLoopEnd = useStore(s => s.setLoopEnd)
   const globalBpm = useStore(s => s.bpm)
   const timeSignature = useStore(s => s.timeSignature)
+  const meterMap = useStore(s => s.meterMap)
   const setTimeSignature = useStore(s => s.setTimeSignature)
   const gridSplitOrder = useStore(s => s.gridSplitOrder)
   const setGridSplitOrder = useStore(s => s.setGridSplitOrder)
@@ -2022,7 +2100,7 @@ export default function LeftPane() {
   const [chordOctave, setChordOctave] = useState<number>(3)
   const [progressionSpacing, setProgressionSpacing] = useState<number>(192)
   const [suggestionKind, setSuggestionKind] = useState<SuggestionKind>('chords')
-  const [generationSourceMode, setGenerationSourceMode] = useState<'active' | 'all'>('active')
+  const [generationSourceMode, setGenerationSourceMode] = useState<'active' | 'selected' | 'all' | 'region'>('active')
   const [generationDestinationMode, setGenerationDestinationMode] = useState<'new' | 'current'>('current')
   const [aiStartPos, setAiStartPos] = useState<'playhead' | 'end' | 'start'>('playhead')
   const [aiWriteMode, setAiWriteMode] = useState<'overdub' | 'replace'>('overdub')
@@ -2038,16 +2116,117 @@ export default function LeftPane() {
   const [morphSteps, setMorphSteps] = useState<number>(3)
   const [isMorphing, setIsMorphing] = useState(false)
 
+  const generationRegion = useMemo(() => timelineSelection
+    ? {
+        start: Math.min(timelineSelection.startTick, timelineSelection.endTick),
+        end: Math.max(timelineSelection.startTick, timelineSelection.endTick),
+      }
+    : null, [timelineSelection])
+
+  const generationRegionTrackIds = useMemo(() => (
+    timelineSelection?.trackIds?.length
+      ? timelineSelection.trackIds
+      : timelineSelection?.trackId
+        ? [timelineSelection.trackId]
+        : []
+  ), [timelineSelection])
+
+  const generationSelectedIds = selectedTrackIds.length > 0
+    ? selectedTrackIds
+    : activeTrackId ? [activeTrackId] : []
+
+  const getGenerationSource = () => {
+    const trackIds = generationSourceMode === 'selected'
+      ? generationSelectedIds
+      : generationSourceMode === 'region'
+        ? generationRegionTrackIds
+        : generationSourceMode === 'all'
+          ? null
+          : activeTrackId ? [activeTrackId] : []
+    let pool = trackIds === null ? notes : notes.filter(n => trackIds.includes(n.trackId))
+    if (generationSourceMode === 'region' && generationRegion) {
+      pool = pool.filter(n => n.time >= generationRegion.start && n.time < generationRegion.end)
+    }
+    return { notes: pool, trackIds, region: generationRegion }
+  }
+
+  const filterSourceNotesForInstrument = (pool: Note[], instrument: 'synth' | 'drum') => {
+    const trackById = new Map(tracks.map(t => [t.id, t]))
+    return pool.filter(n => (trackById.get(n.trackId)?.instrument === 'drum') === (instrument === 'drum'))
+  }
+
+  const generationRegionMissing = generationSourceMode === 'region' && !generationRegion
+
+  const armGenerationRegion = () => {
+    setGenerationSourceMode('region')
+    setRegionPickMode(true)
+    showToast('Drag across the timeline to select a region. Ctrl/Shift-select tracks first to span several.', 'info')
+  }
+
+  const generationChipStyle = (active: boolean, accent = '#fff') => ({
+    flex: 1,
+    padding: '2px 4px',
+    borderRadius: '4px',
+    border: 'none',
+    background: active ? 'rgba(255,255,255,0.1)' : 'transparent',
+    color: active ? accent : '#666',
+    fontSize: '9px',
+    fontWeight: 600,
+    cursor: 'pointer',
+    transition: 'all 0.2s',
+    whiteSpace: 'nowrap' as const,
+  })
+
   const renderGenerationSettings = () => (
     <div style={{ background: 'rgba(0,0,0,0.15)', borderRadius: '8px', padding: '8px', marginBottom: '8px', border: '1px solid rgba(255,255,255,0.03)' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '5px' }}>
         <span style={{ fontSize: '10px', color: '#999', fontWeight: 600 }}>Source Notes</span>
-        <div style={{ display: 'flex', gap: '2px', background: 'rgba(0,0,0,0.4)', padding: '2px', borderRadius: '6px' }}>
-          <button onClick={() => setGenerationSourceMode('active')} style={{ padding: '2px 8px', borderRadius: '4px', border: 'none', background: generationSourceMode === 'active' ? 'rgba(255,255,255,0.1)' : 'transparent', color: generationSourceMode === 'active' ? '#fff' : '#666', fontSize: '9px', cursor: 'pointer', transition: 'all 0.2s' }}>Active Track</button>
-          <button onClick={() => setGenerationSourceMode('all')} style={{ padding: '2px 8px', borderRadius: '4px', border: 'none', background: generationSourceMode === 'all' ? 'rgba(255,255,255,0.1)' : 'transparent', color: generationSourceMode === 'all' ? '#fff' : '#666', fontSize: '9px', cursor: 'pointer', transition: 'all 0.2s' }}>All Tracks</button>
-        </div>
+        <span style={{ fontSize: '8.5px', color: '#666' }}>{getGenerationSource().notes.length} notes</span>
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <div style={{ display: 'flex', gap: '2px', background: 'rgba(0,0,0,0.4)', padding: '2px', borderRadius: '6px' }}>
+        <button onClick={() => { setGenerationSourceMode('active'); setRegionPickMode(false) }} title="Notes on the active track" style={generationChipStyle(generationSourceMode === 'active')}>Active</button>
+        <button onClick={() => { setGenerationSourceMode('selected'); setRegionPickMode(false) }} title="Notes on the tracks selected in the track list" style={generationChipStyle(generationSourceMode === 'selected')}>Selected</button>
+        <button onClick={() => { setGenerationSourceMode('all'); setRegionPickMode(false) }} title="Every note in the project" style={generationChipStyle(generationSourceMode === 'all')}>All</button>
+        <button onClick={armGenerationRegion} title="Notes inside a timeline region" style={generationChipStyle(generationSourceMode === 'region', '#eebefa')}>Region</button>
+      </div>
+
+      {generationSourceMode === 'region' && (
+        <div style={{ marginTop: '6px', padding: '6px 8px', borderRadius: '6px', background: 'rgba(218,119,242,0.06)', border: `1px solid ${generationRegion ? 'rgba(218,119,242,0.28)' : 'rgba(255,107,107,0.28)'}` }}>
+          {generationRegion ? (
+            <>
+              <div style={{ fontSize: '9.5px', color: '#eebefa', fontWeight: 700 }}>
+                {generationRegion.end - generationRegion.start} ticks · {Math.max(1, generationRegionTrackIds.length)} track{generationRegionTrackIds.length === 1 ? '' : 's'}
+              </div>
+              <div style={{ fontSize: '9px', color: '#9c7aa8', marginTop: '1px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {tracks.filter(t => generationRegionTrackIds.includes(t.id)).map(t => t.name).join(', ') || 'No track bound'}
+              </div>
+            </>
+          ) : (
+            <div style={{ fontSize: '9px', color: '#ffc9c9', lineHeight: 1.4 }}>
+              No region yet. Press <strong>Region</strong> again, then drag across the timeline.
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: '3px', marginTop: '5px' }}>
+            <button onClick={armGenerationRegion} style={{ ...generationChipStyle(regionPickMode, '#eebefa'), border: '1px solid rgba(218,119,242,0.3)', background: regionPickMode ? 'rgba(218,119,242,0.16)' : 'transparent' }}>
+              {regionPickMode ? 'Drag in timeline...' : 'Redraw Region'}
+            </button>
+            <button
+              onClick={() => {
+                setRegionPickMode(false)
+                useStore.getState().setTimelineSelection(null)
+              }}
+              style={{ ...generationChipStyle(false), border: '1px solid rgba(255,255,255,0.06)', color: '#ff8787' }}
+            >
+              Clear
+            </button>
+          </div>
+          <div style={{ fontSize: '8.5px', color: '#777', marginTop: '4px', lineHeight: 1.4 }}>
+            Ctrl/Shift-click tracks in the track list to span more than one.
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '6px' }}>
         <span style={{ fontSize: '10px', color: '#999', fontWeight: 600 }}>Destination</span>
         <div style={{ display: 'flex', gap: '2px', background: 'rgba(0,0,0,0.4)', padding: '2px', borderRadius: '6px' }}>
           <button onClick={() => setGenerationDestinationMode('new')} style={{ padding: '2px 8px', borderRadius: '4px', border: 'none', background: generationDestinationMode === 'new' ? 'rgba(255,255,255,0.1)' : 'transparent', color: generationDestinationMode === 'new' ? '#fff' : '#666', fontSize: '9px', cursor: 'pointer', transition: 'all 0.2s' }}>New Track</button>
@@ -2341,6 +2520,34 @@ export default function LeftPane() {
   const [aiOctaveShift, setAiOctaveShift] = useState(0)
   const [aiSemitoneShift, setAiSemitoneShift] = useState(0)
   const [aiSeedPitch, setAiSeedPitch] = useState<number | 'auto'>('auto')
+  const [aiVariation, setAiVariation] = useState(1)
+
+  // Sound Designer states
+  const [soundVariation, setSoundVariation] = useState(1)
+  const [soundProfile, setSoundProfile] = useState<MelodyProfile | null>(null)
+  const [soundCandidates, setSoundCandidates] = useState<SoundCandidate[]>([])
+  const [soundTargetId, setSoundTargetId] = useState<string | null>(null)
+  const [soundTargetName, setSoundTargetName] = useState('')
+  const [soundAppliedId, setSoundAppliedId] = useState<string | null>(null)
+  const [soundPreviewId, setSoundPreviewId] = useState<string | null>(null)
+  const soundPreviewSynthRef = useRef<Tone.PolySynth | null>(null)
+  const soundPreviewTimerRef = useRef<number | null>(null)
+
+  const stopSoundPreview = () => {
+    if (soundPreviewTimerRef.current !== null) {
+      window.clearTimeout(soundPreviewTimerRef.current)
+      soundPreviewTimerRef.current = null
+    }
+    soundPreviewSynthRef.current?.dispose()
+    soundPreviewSynthRef.current = null
+    setSoundPreviewId(null)
+  }
+
+  useEffect(() => () => {
+    if (soundPreviewTimerRef.current !== null) window.clearTimeout(soundPreviewTimerRef.current)
+    soundPreviewSynthRef.current?.dispose()
+  }, [])
+
   const projectExportData = useStore(s => s.projectExportData)
   const setProjectExportData = useStore(s => s.setProjectExportData)
   const midiRemapData = useStore(s => s.midiRemapData)
@@ -2418,20 +2625,34 @@ export default function LeftPane() {
   }
 
   const activeTrackNotes = notes.filter(note => note.trackId === activeTrackId)
-  const activeCurve = activeTrackId ? automationCurves[activeTrackId] ?? [] : []
+  const activeCurve = activeTrackId
+    ? getTrackAutomationPoints(automationCurves, activeTrackId, automationTargets[activeTrackId] ?? 'velocity')
+    : []
   const activeLane = activeTrackId ? automationLanes[activeTrackId] : undefined
   const editTargets = selectedNoteIds.length > 0
     ? notes.filter(note => selectedNoteIds.includes(note.id))
     : activeTrackNotes
   const editTargetLabel = selectedNoteIds.length > 0 ? `${selectedNoteIds.length} selected` : 'active track'
 
-  const suggestions = useMemo(() => createProceduralSuggestions(suggestionKind, {
-    notes,
-    tracks,
-    activeTrackId: generationSourceMode === 'all' ? null : activeTrackId,
-    scaleLock: activeTrack?.scaleOverride || scaleLock,
-    playheadPosition: playheadBar,
-  }), [suggestionKind, notes, tracks, activeTrackId, scaleLock, activeTrack?.scaleOverride, playheadBar, generationSourceMode])
+  const suggestions = useMemo(() => {
+    let sourceNotes = notes
+    if (generationSourceMode === 'selected') {
+      sourceNotes = selectedTrackIds.length > 0 ? notes.filter(n => selectedTrackIds.includes(n.trackId)) : notes
+    } else if (generationSourceMode === 'region') {
+      const ids = generationRegionTrackIds
+      const region = generationRegion
+      sourceNotes = region ? notes.filter(n => ids.includes(n.trackId) && n.time >= region.start && n.time < region.end) : []
+    }
+    return createProceduralSuggestions(suggestionKind, {
+      notes: sourceNotes,
+      tracks,
+      activeTrackId: generationSourceMode === 'active' ? activeTrackId : null,
+      scaleLock: activeTrack?.scaleOverride || scaleLock,
+      playheadPosition: playheadBar,
+      meterMap,
+      timeSignature,
+    })
+  }, [suggestionKind, notes, tracks, activeTrackId, selectedTrackIds, generationRegionTrackIds, generationRegion, scaleLock, activeTrack?.scaleOverride, playheadBar, generationSourceMode, meterMap, timeSignature])
 
   useEffect(() => {
     const handleMouseMove = (event: MouseEvent) => {
@@ -3112,8 +3333,15 @@ export default function LeftPane() {
 
   const generateDiatonicHarmony = (type: 'chord' | 'bass') => {
     if (!activeTrack || activeTrack.instrument !== 'synth') return
-    const targetNotes = generationSourceMode === 'all' ? notes : notes.filter(n => n.trackId === activeTrack.id)
-    const sourceNotes = editTargets.length > 0 ? editTargets.filter(n => generationSourceMode === 'all' || n.trackId === activeTrack.id) : targetNotes
+    if (generationRegionMissing) {
+      showToast('Select a timeline region first.', 'info')
+      return
+    }
+    const source = getGenerationSource()
+    const targetNotes = filterSourceNotesForInstrument(source.notes, 'synth')
+    const sourceNotes = editTargets.length > 0
+      ? editTargets.filter(n => source.notes.includes(n))
+      : targetNotes
     if (sourceNotes.length === 0) return
 
     sourceNotes.sort((a: Note, b: Note) => a.time - b.time)
@@ -3150,12 +3378,12 @@ export default function LeftPane() {
     timeMap.forEach((n: Note) => {
       if (type === 'chord') {
         const chordType = chordFamily === 'Sevenths' ? 'Seventh' : 'Triad'
-        const chordPitches = getDiatonicChord(n.pitch, scaleLock.root, scaleLock.mode, chordType)
+        const chordPitches = getDiatonicChord(n.pitch, scaleLock.root, scaleLock.mode, chordType, scaleLock.customIntervals)
         chordPitches.forEach(p => {
           newNotes.push({ id: newId(), trackId: targetTrackId, time: n.time, duration: n.duration, pitch: p, velocity: 80 })
         })
       } else {
-        const chordPitches = getDiatonicChord(n.pitch, scaleLock.root, scaleLock.mode, 'Triad')
+        const chordPitches = getDiatonicChord(n.pitch, scaleLock.root, scaleLock.mode, 'Triad', scaleLock.customIntervals)
         const rootPitch = chordPitches[0]
         const bassPitch = Math.max(12, rootPitch - 12)
         newNotes.push({ id: newId(), trackId: targetTrackId, time: n.time, duration: n.duration, pitch: bassPitch, velocity: 100 })
@@ -3317,10 +3545,10 @@ export default function LeftPane() {
       if (trackIds && trackIds.length > 0) {
         const selectedRenderTracks = tracks.filter(t => trackIds.includes(t.id)).map(t => ({ ...t, muted: false, soloed: false }))
         const selectedRenderNotes = notes.filter(n => trackIds.includes(n.trackId))
-        const selectedRenderAutomationCurves: Record<string, any> = {}
-        trackIds.forEach(id => {
-          selectedRenderAutomationCurves[id] = state.automationCurves[id] ?? []
-        })
+        const selectedIdSet = new Set(trackIds)
+        const selectedRenderAutomationCurves = Object.fromEntries(
+          Object.entries(state.automationCurves).filter(([key]) => selectedIdSet.has(key.split('::')[0]))
+        )
         renderState = {
           ...state,
           tracks: selectedRenderTracks,
@@ -3335,7 +3563,9 @@ export default function LeftPane() {
           ...state,
           tracks: [{ ...track, muted: false, soloed: false }],
           notes: trackNotes,
-          automationCurves: { [trackId]: state.automationCurves[trackId] ?? [] },
+          automationCurves: Object.fromEntries(
+            Object.entries(state.automationCurves).filter(([key]) => key.split('::')[0] === trackId)
+          ),
         }
       }
 
@@ -3879,9 +4109,14 @@ export default function LeftPane() {
     const track = tracks.find(t => t.id === activeTrackId)
     if (!track) return
 
+    if (generationRegionMissing) {
+      useStore.getState().showToast('Select a timeline region first, or switch the source to Active, Selected or All.', 'info')
+      return
+    }
+
     setIsAiLoading(true)
     try {
-      const activeNotes = notes.filter(n => n.trackId === activeTrackId)
+      const activeNotes = filterSourceNotesForInstrument(getGenerationSource().notes, track.instrument)
       const currentPlayhead = useStore.getState().playheadPosition
 
       // 1. Calculate effective start position based on user's choice
@@ -3900,7 +4135,9 @@ export default function LeftPane() {
       // 2. Dynamic Seed Notes: feed previous bars relative to effectiveStartTime
       const seedWindow = aiSeedBars * 192 * 4
       let seedNotes: Note[] = []
-      if (effectiveStartTime > 0) {
+      if (generationSourceMode === 'region') {
+        seedNotes = [...activeNotes].sort((a, b) => a.time - b.time).slice(0, 64)
+      } else if (effectiveStartTime > 0) {
         seedNotes = activeNotes.filter(n => n.time >= effectiveStartTime - seedWindow && n.time < effectiveStartTime)
         if (seedNotes.length === 0) {
           seedNotes = activeNotes.filter(n => n.time < effectiveStartTime).slice(-16)
@@ -3913,9 +4150,9 @@ export default function LeftPane() {
 
       let newNotes: any[] = []
       if (track.instrument === 'synth') {
-        newNotes = await generateAiMelody(seedNotes, aiLength, aiTemperature, aiDensity, aiOctaveShift, trackScale, effectiveStartTime, aiSeedPitch, aiSemitoneShift)
+        newNotes = await generateAiMelody(seedNotes, aiLength, aiTemperature, aiDensity, aiOctaveShift, trackScale, effectiveStartTime, aiSeedPitch, aiSemitoneShift, aiVariation)
       } else {
-        newNotes = await generateAiDrums(seedNotes, aiLength, aiTemperature, aiDensity, midiRemapData.drumMap, effectiveStartTime, aiSeedPitch)
+        newNotes = await generateAiDrums(seedNotes, aiLength, aiTemperature, aiDensity, midiRemapData.drumMap, effectiveStartTime, aiSeedPitch, aiVariation)
       }
 
       if (newNotes.length > 0) {
@@ -3981,6 +4218,26 @@ export default function LeftPane() {
 
   const handleGenerateFullArrangement = async () => {
     if (isAiLoading) return
+    if (generationRegionMissing) {
+      useStore.getState().showToast('Select a timeline region first, or switch the source to Active, Selected or All.', 'info')
+      return
+    }
+    const sourcePool = getGenerationSource().notes
+    let synthSources = filterSourceNotesForInstrument(sourcePool, 'synth')
+    let drumSources = filterSourceNotesForInstrument(sourcePool, 'drum')
+    if (generationSourceMode === 'active') {
+      // Preserve the legacy full-arrangement behavior: an Active source only
+      // covers the active track, so borrow instrument-matching notes elsewhere.
+      if (synthSources.length === 0) {
+        const synthId = tracks.find(t => t.instrument === 'synth')?.id
+        synthSources = notes.filter(n => n.trackId === synthId)
+      }
+      if (drumSources.length === 0) {
+        const drumId = tracks.find(t => t.instrument === 'drum')?.id
+        drumSources = notes.filter(n => n.trackId === drumId)
+      }
+    }
+
     setIsAiLoading(true)
     try {
       let synthTrack = tracks.find(t => t.instrument === 'synth')
@@ -4043,15 +4300,17 @@ export default function LeftPane() {
       const toAdd: any[] = []
 
       if (targetSynthId) {
-        const synthNotes = notes.filter(n => n.trackId === (generationDestinationMode === 'new' ? (tracks.find(t => t.instrument === 'synth')?.id || targetSynthId) : targetSynthId))
+        const synthNotes = synthSources
         let seedNotes: Note[] = []
-        if (effectiveStartTime > 0) {
+        if (generationSourceMode === 'region') {
+          seedNotes = [...synthNotes].sort((a, b) => a.time - b.time).slice(0, 64)
+        } else if (effectiveStartTime > 0) {
           seedNotes = synthNotes.filter(n => n.time >= effectiveStartTime - seedWindow && n.time < effectiveStartTime)
           if (seedNotes.length === 0) seedNotes = synthNotes.filter(n => n.time < effectiveStartTime).slice(-16)
         } else {
           seedNotes = synthNotes.filter(n => n.time < seedWindow).slice(0, 16)
         }
-        const melody = await generateAiMelody(seedNotes, aiLength, aiTemperature, aiDensity, aiOctaveShift, trackScale, effectiveStartTime, aiSeedPitch, aiSemitoneShift)
+        const melody = await generateAiMelody(seedNotes, aiLength, aiTemperature, aiDensity, aiOctaveShift, trackScale, effectiveStartTime, aiSeedPitch, aiSemitoneShift, aiVariation)
         melody.forEach(n => {
           toAdd.push({
             ...n,
@@ -4063,15 +4322,17 @@ export default function LeftPane() {
       }
 
       if (targetDrumId) {
-        const drumNotes = notes.filter(n => n.trackId === (generationDestinationMode === 'new' ? (tracks.find(t => t.instrument === 'drum')?.id || targetDrumId) : targetDrumId))
+        const drumNotes = drumSources
         let seedNotes: Note[] = []
-        if (effectiveStartTime > 0) {
+        if (generationSourceMode === 'region') {
+          seedNotes = [...drumNotes].sort((a, b) => a.time - b.time).slice(0, 64)
+        } else if (effectiveStartTime > 0) {
           seedNotes = drumNotes.filter(n => n.time >= effectiveStartTime - seedWindow && n.time < effectiveStartTime)
           if (seedNotes.length === 0) seedNotes = drumNotes.filter(n => n.time < effectiveStartTime).slice(-16)
         } else {
           seedNotes = drumNotes.filter(n => n.time < seedWindow).slice(0, 16)
         }
-        const drums = await generateAiDrums(seedNotes, aiLength, aiTemperature, aiDensity, midiRemapData.drumMap, effectiveStartTime, aiSeedPitch)
+        const drums = await generateAiDrums(seedNotes, aiLength, aiTemperature, aiDensity, midiRemapData.drumMap, effectiveStartTime, aiSeedPitch, aiVariation)
         drums.forEach(n => {
           toAdd.push({
             ...n,
@@ -4184,7 +4445,7 @@ export default function LeftPane() {
       if (seedNotes.length === 0) seedNotes = trackNotes
 
       const bpm = useStore.getState().bpm
-      const humanizedNotes = await generateHumanGroove(seedNotes, aiTemperature, bpm)
+      const humanizedNotes = await generateHumanGroove(seedNotes, aiTemperature, bpm, aiVariation)
 
       if (humanizedNotes.length > 0) {
         useStore.getState().commitHistory()
@@ -4271,10 +4532,14 @@ export default function LeftPane() {
       useStore.getState().showToast('Please select a Synth track with a melody first.', 'error')
       return
     }
+    if (generationRegionMissing) {
+      useStore.getState().showToast('Select a timeline region first, or switch the source to Active, Selected or All.', 'info')
+      return
+    }
 
     setIsAiLoading(true)
     try {
-      const activeNotes = generationSourceMode === 'all' ? notes : notes.filter(n => n.trackId === activeTrackId)
+      const activeNotes = filterSourceNotesForInstrument(getGenerationSource().notes, 'synth')
       const currentPlayhead = useStore.getState().playheadPosition
 
       // 1. Calculate effective start position
@@ -4292,7 +4557,9 @@ export default function LeftPane() {
 
       const seedWindow = aiSeedBars * 192 * 4
       let seedNotes: Note[] = []
-      if (effectiveStartTime > 0) {
+      if (generationSourceMode === 'region') {
+        seedNotes = [...activeNotes].sort((a, b) => a.time - b.time).slice(0, 64)
+      } else if (effectiveStartTime > 0) {
         seedNotes = activeNotes.filter(n => n.time >= effectiveStartTime - seedWindow && n.time < effectiveStartTime)
         if (seedNotes.length === 0) seedNotes = activeNotes.filter(n => n.time < effectiveStartTime).slice(-16)
       } else {
@@ -4312,7 +4579,7 @@ export default function LeftPane() {
       const trackScale = track.scaleOverride || scaleLock
 
       if (type === 'counterpoint') {
-        const { voice1, voice2, voice3 } = await generateAutoHarmony(seedNotes, aiTemperature)
+        const { voice1, voice2, voice3 } = await generateAutoHarmony(seedNotes, aiTemperature, undefined, 32, aiVariation)
 
         if (voice1.length || voice2.length || voice3.length) {
           useStore.getState().commitHistory()
@@ -4345,7 +4612,7 @@ export default function LeftPane() {
         }
       } else {
         const aiShift = type === 'bass' ? aiOctaveShift - 2 : aiOctaveShift
-        const generatedRoots = await generateAiMelody(seedNotes, aiLength, aiTemperature, aiDensity, aiShift, trackScale, effectiveStartTime, 'auto', aiSemitoneShift)
+        const generatedRoots = await generateAiMelody(seedNotes, aiLength, aiTemperature, aiDensity, aiShift, trackScale, effectiveStartTime, 'auto', aiSemitoneShift, aiVariation)
 
         if (generatedRoots.length > 0) {
           useStore.getState().commitHistory()
@@ -5165,6 +5432,119 @@ export default function LeftPane() {
     } catch (e) {
       console.error('Sequence preview failed', e)
     }
+  }
+
+  const handleMakeInstruments = () => {
+    if (!activeTrack) {
+      showToast('Select a synth track with notes first.', 'info')
+      return
+    }
+    if (activeTrack.instrument !== 'synth') {
+      showToast('Sound Designer reads synth tracks. Select a synth track with notes.', 'info')
+      return
+    }
+    const trackNotes = notes.filter(n => n.trackId === activeTrack.id)
+    // The track's target tempo overrides the project tempo, matching playback/export.
+    const profile = analyzeMelody(trackNotes, activeTrack.targetTempo ?? globalBpm)
+    if (!profile) {
+      showToast('Add some notes to the active track, then try Make Instrument.', 'info')
+      return
+    }
+    stopSoundPreview()
+    setSoundProfile(profile)
+    setSoundCandidates(generateSynthCandidates(profile, soundVariation))
+    setSoundTargetId(activeTrack.id)
+    setSoundTargetName(activeTrack.name)
+    setSoundAppliedId(null)
+  }
+
+  const handlePreviewCandidate = async (candidate: SoundCandidate) => {
+    if (!soundProfile) return
+    if (soundPreviewId === candidate.id) {
+      stopSoundPreview()
+      return
+    }
+    stopSoundPreview()
+    try {
+      await Tone.start()
+      const synth = new Tone.PolySynth(Tone.Synth, {
+        oscillator: { type: candidate.oscillator },
+        envelope: {
+          attack: candidate.attack,
+          decay: candidate.decay,
+          sustain: candidate.sustain,
+          release: candidate.release
+        }
+      }).toDestination()
+      synth.volume.value = -8
+      soundPreviewSynthRef.current = synth
+
+      const bpm = useStore.getState().bpm
+      const secondsPerTick = 60 / bpm / 192
+      const now = Tone.now() + 0.08
+      let end = 0
+      soundProfile.previewNotes
+        .map(n => ({ ...n, offset: (n.time - soundProfile.startTime) * secondsPerTick }))
+        .filter(n => n.offset <= 2.5)
+        .slice(0, 8)
+        .forEach(note => {
+          const duration = Math.max(0.08, Math.min(2, note.duration * secondsPerTick))
+          synth.triggerAttackRelease(
+            Tone.Frequency(Math.round(note.pitch), 'midi').toNote(),
+            duration,
+            now + note.offset,
+            Math.max(0.15, Math.min(1, note.velocity / 127))
+          )
+          end = Math.max(end, note.offset + duration)
+        })
+
+      setSoundPreviewId(candidate.id)
+      soundPreviewTimerRef.current = window.setTimeout(() => {
+        synth.dispose()
+        if (soundPreviewSynthRef.current === synth) soundPreviewSynthRef.current = null
+        soundPreviewTimerRef.current = null
+        setSoundPreviewId(null)
+      }, (end + 1.4) * 1000)
+    } catch (e) {
+      console.error('Sound Designer preview failed', e)
+      showToast('Preview failed. Check the audio engine and try again.', 'error')
+    }
+  }
+
+  const handleApplyCandidate = (candidate: SoundCandidate) => {
+    const store = useStore.getState()
+    const track = store.tracks.find(t => t.id === soundTargetId)
+    if (!track) {
+      showToast('The analyzed track is gone. Click Make Instrument again.', 'info')
+      return
+    }
+    store.commitHistory()
+    store.updateTrack(track.id, {
+      synthPreset: 'custom',
+      synthMode: 'synth',
+      synthOscillator: candidate.oscillator,
+      synthFormula: undefined,
+      synthPartialsCount: undefined,
+      synthPartials: undefined,
+      synthAttack: candidate.attack,
+      synthDecay: candidate.decay,
+      synthSustain: candidate.sustain,
+      synthRelease: candidate.release,
+      synthDecayCurveType: candidate.curveType,
+      synthDecayTension: 0,
+      synthDecayFormula: 'exp(-4.8 * x)',
+      customMuxins: undefined
+    })
+    audioEngine.createInstrument(track.id, 'synth')
+    audioEngine.setTrackCurve(track.id, candidate.curveType, 0, generateCurveLut(candidate.curveType, 0, 'exp(-4.8 * x)', 256))
+    setSoundAppliedId(candidate.id)
+    store.showToast(`"${candidate.name}" added to ${track.name}`, 'success')
+  }
+
+  const handleOpenSoundStudio = () => {
+    if (!soundTargetId) return
+    setActiveTrackId(soundTargetId)
+    setIsSynthStudioModalVisible(true)
   }
 
   const handleExportPatch = async () => {
@@ -7287,7 +7667,15 @@ export default function LeftPane() {
             </div>
           )}
         </Section>
+        </MasterGroupSection>
 
+        <MasterGroupSection
+          title="AI & Generative"
+          icon={<IconWand size={15} />}
+          accentColor="#da77f2"
+          badge="4 Modules"
+          defaultOpen={false}
+        >
         <Section title="Suggestions" defaultOpen={false}>
           {renderGenerationSettings()}
           <div style={{ display: 'flex', gap: '4px', marginBottom: '8px' }}>
@@ -7311,6 +7699,10 @@ export default function LeftPane() {
               </div>
             ))}
           </div>
+        </Section>
+
+        <Section title="Generative Music" defaultOpen={false}>
+          <GenerativeMusicPane />
         </Section>
 
         <Section title="Audio Stem Splitter" defaultOpen={false}>
@@ -7566,6 +7958,24 @@ export default function LeftPane() {
                 color="#e599f7"
                 onChange={v => setAiDensity(v)}
               />
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                <span
+                  style={{ fontSize: '11px', color: '#aaa' }}
+                  title="Keeps density thinning and velocity jitter consistent per note across runs. The neural note choices still vary."
+                >
+                  Jitter Variation
+                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <EditableValue value={aiVariation} color="#e599f7" width="44px" onChange={setAiVariation} />
+                  <button
+                    onClick={() => setAiVariation(Math.floor(Math.random() * 9000) + 1)}
+                    title="Roll a new jitter variation"
+                    style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', color: '#ccc', borderRadius: '4px', fontSize: '9px', fontWeight: 700, padding: '3px 7px', cursor: 'pointer' }}
+                  >
+                    Roll
+                  </button>
+                </div>
+              </div>
               {activeTrack?.instrument === 'synth' && (
                 <>
                   <SliderRow
@@ -7653,9 +8063,10 @@ export default function LeftPane() {
               <IconZap size={11} color="#e599f7" /> GENERATE FULL ARRANGEMENT (SYNTH + DRUMS)
             </button>
 
+            {renderGenerationSettings()}
+
             {activeTrack?.instrument === 'synth' && (
               <>
-                {renderGenerationSettings()}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '5px' }}>
                   <button
                     onClick={() => handleGenerateAiHarmony('chord')}
@@ -7878,6 +8289,99 @@ export default function LeftPane() {
           badge={activeTrack ? activeTrack.instrument.toUpperCase() : "STUDIO"}
           defaultOpen={false}
         >
+        <Section title="Sound Designer" defaultOpen={true}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <div style={{ fontSize: '10px', color: '#888', lineHeight: 1.5 }}>
+              Reads the active synth track's melody, note rate and tempo, then writes five playable patches. Fast material gets sharper, shorter envelopes; slow material blooms longer and softer. Preview any candidate, then add it to the track.
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: '11px', color: '#aaa' }} title="The same variation and melody reproduce the same five patches.">
+                Variation
+              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <EditableValue value={soundVariation} color="#ff9900" width="44px" onChange={setSoundVariation} />
+                <button
+                  onClick={() => setSoundVariation(Math.floor(Math.random() * 9000) + 1)}
+                  title="Roll a new variation"
+                  style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', color: '#ccc', borderRadius: '4px', fontSize: '9px', fontWeight: 700, padding: '3px 7px', cursor: 'pointer' }}
+                >
+                  Roll
+                </button>
+              </div>
+            </div>
+
+            <button
+              onClick={handleMakeInstruments}
+              style={{ width: '100%', padding: '7px', borderRadius: '5px', border: '1px solid rgba(255,153,0,0.35)', background: 'rgba(255,153,0,0.1)', color: '#ff9900', cursor: 'pointer', fontSize: '10px', fontWeight: 800, letterSpacing: '0.04em', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '5px' }}
+            >
+              <IconWand size={12} /> MAKE INSTRUMENT
+            </button>
+
+            {soundProfile ? (
+              <>
+                <div style={{ fontSize: '10px', color: '#777', lineHeight: 1.5 }}>
+                  <span style={{ color: '#ff9900', fontWeight: 700 }}>{soundTargetName}</span>
+                  {` / ${soundProfile.summary}`}
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  {soundCandidates.map(candidate => {
+                    const applied = soundAppliedId === candidate.id
+                    const playing = soundPreviewId === candidate.id
+                    return (
+                      <div
+                        key={candidate.id}
+                        style={{ background: applied ? 'rgba(255,153,0,0.08)' : 'rgba(255,255,255,0.03)', border: `1px solid ${applied ? 'rgba(255,153,0,0.35)' : 'rgba(255,255,255,0.06)'}`, borderRadius: '6px', padding: '8px', display: 'flex', flexDirection: 'column', gap: '5px' }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+                          <span style={{ fontSize: '9px', color: '#ff9900', background: 'rgba(255,153,0,0.1)', border: '1px solid rgba(255,153,0,0.2)', borderRadius: '4px', padding: '1px 5px', fontWeight: 800, textTransform: 'uppercase', flexShrink: 0 }}>
+                            {candidate.role}
+                          </span>
+                          <span style={{ fontSize: '11px', color: '#fff', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {candidate.name}
+                          </span>
+                          {applied && <span style={{ marginLeft: 'auto', fontSize: '9px', color: '#69db7c', fontWeight: 800, flexShrink: 0 }}>ON TRACK</span>}
+                        </div>
+                        <div style={{ fontSize: '9px', color: '#777', fontFamily: 'monospace' }}>{candidate.summary}</div>
+                        <div style={{ fontSize: '10px', color: '#999', lineHeight: 1.4 }}>{candidate.fit}</div>
+                        <div style={{ display: 'flex', gap: '4px' }}>
+                          <button
+                            onClick={() => handlePreviewCandidate(candidate)}
+                            style={{ flex: 1, padding: '4px', borderRadius: '4px', border: '1px solid rgba(0,230,255,0.25)', background: playing ? 'rgba(0,230,255,0.16)' : 'rgba(0,230,255,0.06)', color: '#00e6ff', cursor: 'pointer', fontSize: '9px', fontWeight: 800 }}
+                          >
+                            {playing ? 'STOP' : 'PREVIEW'}
+                          </button>
+                          <button
+                            onClick={() => handleApplyCandidate(candidate)}
+                            style={{ flex: 1, padding: '4px', borderRadius: '4px', border: `1px solid ${applied ? 'rgba(105,219,124,0.4)' : 'rgba(255,153,0,0.25)'}`, background: applied ? 'rgba(105,219,124,0.14)' : 'rgba(255,153,0,0.08)', color: applied ? '#69db7c' : '#ff9900', cursor: 'pointer', fontSize: '9px', fontWeight: 800 }}
+                          >
+                            {applied ? 'ON TRACK' : 'ADD TO TRACK'}
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+                {soundAppliedId && (
+                  <button
+                    onClick={handleOpenSoundStudio}
+                    style={{ width: '100%', padding: '6px', borderRadius: '5px', border: '1px solid rgba(77,171,247,0.3)', background: 'rgba(77,171,247,0.08)', color: '#4dabf7', cursor: 'pointer', fontSize: '10px', fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '5px' }}
+                  >
+                    <IconSliders size={12} /> OPEN SYNTH STUDIO
+                  </button>
+                )}
+                <div style={{ fontSize: '9px', color: '#666', lineHeight: 1.5 }}>
+                  Patches write the oscillator, envelope and decay curve — fields both the native and web engines play. Open Synth Studio to add filter, unison/detune, portamento or partials, then export the patch as .muzins; FM/Mono topologies and custom scripts stay web-only.
+                </div>
+              </>
+            ) : (
+              <div style={{ fontSize: '10px', color: '#666', lineHeight: 1.5, fontStyle: 'italic' }}>
+                Select a synth track with notes, then click Make Instrument. Candidates are derived from register, density, note length, articulation and tempo — the track's target tempo, or the project tempo when it has none.
+              </div>
+            )}
+          </div>
+        </Section>
+
         <Section title="Instrument Lab" defaultOpen={false}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
             {/* Header Switch Tabs */}
@@ -9930,16 +10434,22 @@ export default function LeftPane() {
 
             {autoPreset === 'custom' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                <span style={{ fontSize: '10px', color: '#aaa' }}>Formula (t = ticks)</span>
+                <span style={{ fontSize: '10px', color: '#aaa' }}>Formula — t ticks · s sec · b beats · m bars</span>
                 <input
                   value={autoFormula}
                   onChange={(e) => setAutoFormula(e.target.value)}
                   style={{ background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(177,151,252,0.3)', color: '#b197fc', padding: '4px', borderRadius: '4px', fontSize: '11px', outline: 'none', fontFamily: 'monospace' }}
                 />
+                <span style={{ fontSize: '9px', color: '#777', lineHeight: 1.4 }}>
+                  0–1 or −1–1 results fill the 0–127 lane; larger values are used as lane units. Helpers: sin, cos, clamp, lerp, smoothstep, pi.
+                </span>
               </div>
             )}
 
-            <SliderRow label="Density (Ticks)" value={autoDensity} min={12} max={192} step={12} color="#b197fc" onChange={setAutoDensity} />
+            <SliderRow label="Step (Ticks)" value={autoDensity} min={12} max={192} step={12} color="#b197fc" onChange={setAutoDensity} />
+            <span style={{ fontSize: '9px', color: '#666', lineHeight: 1.4 }}>
+              Bakes the active lane across the project (minimum 4 bars), following conductor tempo and meter.
+            </span>
 
             <button
               onClick={() => {
@@ -11176,7 +11686,7 @@ for (let channel = 0; channel < input.length; channel++) {
                       <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '2px 8px 6px' }}>
                         <span style={{ fontSize: '9px', fontWeight: 700, color: '#666', width: '22px' }}>VOL</span>
                         <AppSlider value={groupVolume} min={0} max={1} step={0.01} color={group.color} compact onChange={v => updateGroup(group.id, { volume: v })} />
-                        <span style={{ fontSize: '9px', color: '#888', width: '28px', textAlign: 'right' }}>{Math.round(groupVolume * 100)}%</span>
+                        <EditableValue value={Math.round(groupVolume * 100)} suffix="%" color="#888" width="30px" onChange={v => updateGroup(group.id, { volume: v / 100 })} />
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '0 8px 6px' }}>
                         <span style={{ fontSize: '9px', fontWeight: 700, color: '#666', width: '22px' }}>CLR</span>
@@ -11333,6 +11843,9 @@ for (let channel = 0; channel < input.length; channel++) {
           const renderTrack = (track: any, index: number, isSubtrack = false) => {
             const isActive = activeTrackId === track.id
             const isSelected = selectedTrackIds.includes(track.id)
+            const regionTrackIds = timelineSelection?.trackIds
+              ?? (timelineSelection?.trackId ? [timelineSelection.trackId] : [])
+            const inRegion = regionTrackIds.includes(track.id)
             const isHighlighted = isActive || isSelected
 
             const getFXSetting = (inst: any, key: string, fallback: number) => {
@@ -11565,7 +12078,8 @@ for (let channel = 0; channel < input.length; channel++) {
                 }}
                 style={{
                   background: isHighlighted ? 'rgba(255,255,255,0.06)' : 'transparent',
-                  border: `1px solid ${isHighlighted ? track.color + (isActive ? '88' : '55') : 'rgba(255,255,255,0.06)'}`,
+                  border: `1px solid ${isHighlighted ? track.color + (isActive ? '88' : '55') : inRegion ? 'rgba(255,169,77,0.45)' : 'rgba(255,255,255,0.06)'}`,
+                  boxShadow: inRegion ? 'inset 2px 0 0 #ffa94d' : undefined,
                   borderRadius: '8px',
                   padding: isSubtrack ? '8px 10px' : '10px',
                   marginBottom: isSubtrack ? '6px' : '8px',
@@ -11745,10 +12259,17 @@ for (let channel = 0; channel < input.length; channel++) {
                                                   audioEngine.createInstrument(track.id, 'synth')
                                                 }, 50)
                                               } else {
+                                                const patchFields = trackFieldsFromMuzins(parsed)
                                                 updateTrack(track.id, {
                                                   synthPreset: 'custom',
+                                                  ...patchFields,
                                                   customMuxins: parsed
                                                 })
+                                                const env = parsed.config.envelope || {}
+                                                if (env.curveType) {
+                                                  const lut = generateCurveLut(env.curveType, env.tension ?? 0, env.formula ?? '', 256)
+                                                  audioEngine.setTrackCurve(track.id, env.curveType, env.tension ?? 0, lut)
+                                                }
                                               }
                                               useStore.getState().showToast(`Loaded Custom Instrument: ${parsed.name}`, 'success')
                                             } else {
@@ -12724,7 +13245,7 @@ for (let channel = 0; channel < input.length; channel++) {
                                 <span style={{ fontSize: '10px', color: '#aaa' }}>Oscillator</span>
                                 <StopPropSelect
                                   value={track.synthOscillator ?? 'triangle'}
-                                  onChange={e => updateTrack(track.id, { synthOscillator: e.target.value as any })}
+                                  onChange={e => updateTrack(track.id, { synthOscillator: e.target.value as any, synthPartials: undefined })}
                                   style={{ background: '#1e1e2e', color: 'white', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '4px', padding: '2px', fontSize: '10px', width: '80px' }}
                                 >
                                   <option value="sine">Sine</option>
@@ -13272,7 +13793,9 @@ for (let channel = 0; channel < input.length; channel++) {
                                 newClips.push({ ...c, id: newId(), trackId: targetId })
                               })
 
-                              delete automationCurves[sourceId]
+                              Object.keys(automationCurves).forEach(key => {
+                                if (key === sourceId || key.startsWith(`${sourceId}::`)) delete automationCurves[key]
+                              })
                             })
                             newSelectedTrackIds = newSelectedTrackIds.filter(id => !sourceIds.includes(id))
                           })
@@ -13509,7 +14032,9 @@ for (let channel = 0; channel < input.length; channel++) {
                           });
 
                           const automationCurves = { ...currentState.automationCurves }
-                          delete automationCurves[sourceId]
+                          Object.keys(automationCurves).forEach(key => {
+                            if (key === sourceId || key.startsWith(`${sourceId}::`)) delete automationCurves[key]
+                          })
 
                           const newSelectedTrackIds = currentState.selectedTrackIds.filter(id => id !== sourceId)
 
@@ -13861,9 +14386,14 @@ for (let channel = 0; channel < input.length; channel++) {
                   <IconDownload size={20} style={{ color: '#4dabf7' }} />
                 </div>
                 <div>
-                  <h2 style={{ margin: 0, fontSize: '18px', fontWeight: 900, color: '#fff', letterSpacing: '-0.5px' }}>Render Project</h2>
+                  <h2 style={{ margin: 0, fontSize: '18px', fontWeight: 900, color: '#fff', letterSpacing: '-0.5px' }}>{projectExportData.displayLabel ? 'Export Region' : 'Render Project'}</h2>
                   <p style={{ margin: '2px 0 0', fontSize: '11px', color: '#666', fontWeight: 500 }}>
-                    {projectExportData.trackId ? `Stem: ${tracks.find(t => t.id === projectExportData.trackId)?.name}` : 'Project Master Mix'}
+                    {projectExportData.displayLabel
+                      ?? (projectExportData.trackId
+                        ? `Stem: ${tracks.find(t => t.id === projectExportData.trackId)?.name}`
+                        : projectExportData.trackIds && projectExportData.trackIds.length > 0
+                          ? `Selected Mix: ${projectExportData.trackIds.length} tracks`
+                          : 'Project Master Mix')}
                   </p>
                 </div>
               </div>
@@ -14738,7 +15268,7 @@ for (let channel = 0; channel < input.length; channel++) {
                         width="80px"
                         onChange={val => setSheetImportData(d => d ? { ...d, defaultVelocity: val } : null)}
                       />
-                      <span style={{ width: '24px', textAlign: 'right', fontWeight: 800, fontSize: '12px', color: '#20c997' }}>{sheetImportData.defaultVelocity}</span>
+                      <EditableValue value={sheetImportData.defaultVelocity} color="#20c997" width="30px" onChange={val => setSheetImportData(d => d ? { ...d, defaultVelocity: val } : null)} />
                     </div>
                   </div>
                 </div>

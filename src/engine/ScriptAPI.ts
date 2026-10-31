@@ -1,4 +1,4 @@
-import { useStore, deduplicateNotes, EXPRESSION_LANE_TARGETS } from './store';
+import { useStore, deduplicateNotes, getTrackAutomationPoints, EXPRESSION_LANE_TARGETS } from './store';
 import type { CustomFxConfig, Note, Track, VoicePreset, Clip, TrackGroup, AutomationPoint, AutomationLane, AutomationTarget, ExpressionLaneTarget, ScaleLock, GrooveTemplate } from './store';
 import { audioEngine } from './AudioEngine';
 import { recordingEngine } from './RecordingEngine';
@@ -864,9 +864,10 @@ export const ScriptAPI = {
         selectedNoteIds: newNotes.map(n => n.id)
       });
     },
-    detectChord: (pitches?: number[]): DetectedChord | null => {
+    detectChord: (pitches?: number[], preferFlats?: boolean): DetectedChord | null => {
       const p = pitches || ScriptAPI.editor.getTargetNotes().map(n => n.pitch);
-      return detectChord(p);
+      const flats = preferFlats ?? (useStore.getState().scaleLock.accidental === 'flat');
+      return detectChord(p, flats);
     }
   },
 
@@ -957,22 +958,24 @@ export const ScriptAPI = {
     },
     getAvailableScales: (): string[] => SCALE_MODES,
     getGenreProgressions: (): GenreProgression[] => GENRE_PROGRESSIONS,
-    detectChord: (pitches: number[]): DetectedChord | null => detectChord(pitches),
+    detectChord: (pitches: number[], preferFlats?: boolean): DetectedChord | null =>
+      detectChord(pitches, preferFlats ?? (useStore.getState().scaleLock.accidental === 'flat')),
     detectScaleDegree: (rootPc: number, scaleRoot?: number, scaleMode?: string): string | null => {
       const state = useStore.getState();
       const r = scaleRoot !== undefined ? scaleRoot : state.scaleLock.root;
       const m = scaleMode !== undefined ? scaleMode : state.scaleLock.mode;
-      return detectScaleDegree(rootPc, r, m);
+      return detectScaleDegree(rootPc, r, m, state.scaleLock.customIntervals);
     }
   },
 
   midi: {
-    detectChord: (pitches: number[]): DetectedChord | null => detectChord(pitches),
+    detectChord: (pitches: number[], preferFlats?: boolean): DetectedChord | null =>
+      detectChord(pitches, preferFlats ?? (useStore.getState().scaleLock.accidental === 'flat')),
     detectScaleDegree: (rootPc: number, scaleRoot?: number, scaleMode?: string): string | null => {
       const state = useStore.getState();
       const r = scaleRoot !== undefined ? scaleRoot : state.scaleLock.root;
       const m = scaleMode !== undefined ? scaleMode : state.scaleLock.mode;
-      return detectScaleDegree(rootPc, r, m);
+      return detectScaleDegree(rootPc, r, m, state.scaleLock.customIntervals);
     },
     getProgressions: (): GenreProgression[] => GENRE_PROGRESSIONS,
     getScales: (): string[] => SCALE_MODES,
@@ -1046,7 +1049,8 @@ export const ScriptAPI = {
   // ==========================================
   automation: {
     getCurve: (trackId: string): AutomationPoint[] => {
-      return useStore.getState().automationCurves[trackId] || [];
+      const state = useStore.getState();
+      return getTrackAutomationPoints(state.automationCurves, trackId, state.automationTargets[trackId] ?? 'velocity');
     },
     setCurve: (trackId: string, points: AutomationPoint[]) => {
       const state = useStore.getState();
@@ -1390,10 +1394,10 @@ export const ScriptAPI = {
           .filter(t => renderOptions.trackIds!.includes(t.id))
           .map(t => ({ ...t, muted: false, soloed: false }));
         const selectedRenderNotes = state.notes.filter(n => renderOptions.trackIds!.includes(n.trackId));
-        const selectedRenderAutomationCurves: Record<string, any> = {};
-        renderOptions.trackIds.forEach(id => {
-          selectedRenderAutomationCurves[id] = state.automationCurves[id] ?? [];
-        });
+        const selectedIdSet = new Set(renderOptions.trackIds);
+        const selectedRenderAutomationCurves = Object.fromEntries(
+          Object.entries(state.automationCurves).filter(([key]) => selectedIdSet.has(key.split('::')[0]))
+        );
         renderState = {
           ...state,
           tracks: selectedRenderTracks,
@@ -1408,7 +1412,9 @@ export const ScriptAPI = {
           ...state,
           tracks: [{ ...track, muted: false, soloed: false }],
           notes: trackNotes,
-          automationCurves: { [renderOptions.trackId]: state.automationCurves[renderOptions.trackId] ?? [] },
+          automationCurves: Object.fromEntries(
+            Object.entries(state.automationCurves).filter(([key]) => key.split('::')[0] === renderOptions.trackId)
+          ),
         };
       }
 

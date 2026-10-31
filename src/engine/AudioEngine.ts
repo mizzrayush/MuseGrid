@@ -1,9 +1,11 @@
 import * as Tone from 'tone'
-import { useStore } from './store'
+import { useStore, getTrackAutomationPoints } from './store'
 import type { Track, MetronomeSettings, VoicePreset, DrumPadSample, SynthSamplerConfig, InstrumentOverride } from './store'
 import { DEFAULT_DRUM_KIT, DEFAULT_SYNTH_PRESET, type DrumKit, type SynthPreset } from '../utils/instruments'
 import { getLaneValueAtTick, modulateFxParam } from '../utils/automation'
+import { compileFormula } from '../utils/formulaMath'
 import { calculateFourierPartials } from '../utils/mathWaveform'
+import { generateCurveLut } from '../utils/envelopeCurves'
 import { getTrackFxInstances, getTrackFxSetting as readTrackFxSetting } from './fxDefaults'
 import { getEffectiveTrackLevel } from '../utils/groupAudio'
 import { buildNativeNoteOnCommand } from './nativeNoteCommand'
@@ -1953,13 +1955,8 @@ export class PhysicalModelVoice {
     const impulseBuffer = ctx.createBuffer(1, bufferLength, sampleRate)
     const channelData = impulseBuffer.getChannelData(0)
 
-    let exciterFn: Function
-    try {
-      exciterFn = new Function('t', 'b', 'm', 'ticks', 'f', 'v', `return ${formula}`)
-    } catch (e) {
-      console.warn("Invalid exciter formula, fallback to noise", e)
-      exciterFn = (t: number) => Math.exp(-t * 20) * (Math.random() * 2 - 1)
-    }
+    const exciterFn = compileFormula(formula, ['t', 'b', 'm', 'ticks', 'f', 'v']) ??
+      ((t: number) => Math.exp(-t * 20) * (Math.random() * 2 - 1))
 
     for (let i = 0; i < bufferLength; i++) {
       const t = i / sampleRate
@@ -3774,12 +3771,10 @@ class AudioEngine {
 
           let fn = this.formulaCache.get(mod.formula)
           if (!fn) {
-            try {
-              fn = new Function('t', 'b', 'm', 'ticks', `return ${mod.formula}`)
-              this.formulaCache.set(mod.formula, fn)
-            } catch (e) {
-              return
-            }
+            const compiled = compileFormula(mod.formula, ['t', 'b', 'm', 'ticks'])
+            if (!compiled) return
+            fn = compiled
+            this.formulaCache.set(mod.formula, fn)
           }
 
           let result: number
@@ -4175,6 +4170,67 @@ class AudioEngine {
           trackId: track.id,
           param: 'release',
           value: track.synthRelease
+        });
+      }
+      // setTrackPreset resets the envelope shape, so restore the stored decay curve
+      // whenever a full patch sync runs (project load, instrument change, any track edit).
+      if (track.synthDecayCurveType !== undefined) {
+        (window as any).juceAudioBridge.postCommand({
+          type: 'setTrackCurve',
+          trackId: track.id,
+          curveType: track.synthDecayCurveType,
+          tension: track.synthDecayTension ?? 0,
+          lut: track.synthDecayFormula
+            ? generateCurveLut(track.synthDecayCurveType, track.synthDecayTension ?? 0, track.synthDecayFormula, 256)
+            : undefined
+        });
+      }
+      if (track.synthDetune !== undefined) {
+        (window as any).juceAudioBridge.postCommand({
+          type: 'setTrackParam',
+          trackId: track.id,
+          param: 'detune',
+          value: track.synthDetune
+        });
+      }
+      if (track.synthPortamento !== undefined) {
+        (window as any).juceAudioBridge.postCommand({
+          type: 'setTrackParam',
+          trackId: track.id,
+          param: 'portamento',
+          value: track.synthPortamento
+        });
+      }
+      if (track.synthUnison !== undefined) {
+        (window as any).juceAudioBridge.postCommand({
+          type: 'setTrackParam',
+          trackId: track.id,
+          param: 'unison',
+          value: track.synthUnison
+        });
+      }
+      if (track.synthDetuneSpread !== undefined) {
+        (window as any).juceAudioBridge.postCommand({
+          type: 'setTrackParam',
+          trackId: track.id,
+          param: 'detuneSpread',
+          value: track.synthDetuneSpread
+        });
+      }
+      if (track.synthFilterType !== undefined || track.synthFilterFreq !== undefined || track.synthFilterQ !== undefined) {
+        (window as any).juceAudioBridge.postCommand({
+          type: 'setTrackFilter',
+          trackId: track.id,
+          filterType: track.synthFilterType ?? 'lowpass',
+          frequency: track.synthFilterFreq ?? 20000,
+          resonance: track.synthFilterQ ?? 0.7
+        });
+      }
+      if (track.synthOscillator === 'custom' && track.synthPartials && track.synthPartials.length > 0) {
+        (window as any).juceAudioBridge.postCommand({
+          type: 'setTrackPartials',
+          trackId: track.id,
+          partials: track.synthPartials
         });
       }
       if (track.drumKit) {
@@ -4721,15 +4777,33 @@ class AudioEngine {
       if (track.synthRelease !== undefined) synth.set({ envelope: { release: track.synthRelease } })
 
       if (track.synthOscillator !== undefined) {
-        if (track.synthOscillator === 'custom' && track.synthFormula) {
+        if (track.synthOscillator === 'custom' && (track.synthPartials?.length || track.synthFormula)) {
           try {
-            const partials = calculateFourierPartials(track.synthFormula, track.synthPartialsCount || 16)
+            const partials = track.synthPartials?.length
+              ? track.synthPartials
+              : calculateFourierPartials(track.synthFormula!, track.synthPartialsCount || 16)
             synth.set({ oscillator: { type: 'custom', partials } as any })
           } catch (e) {
             console.warn('Failed to set custom formula oscillator:', e)
           }
         } else if (track.synthOscillator !== 'custom') {
-          synth.set({ oscillator: { type: track.synthOscillator } })
+          const voices = Math.max(1, Math.min(16, Math.round(track.synthUnison ?? 1)))
+          try {
+            if (voices > 1) {
+              synth.set({
+                oscillator: {
+                  type: `fat${track.synthOscillator}`,
+                  count: voices,
+                  spread: track.synthDetuneSpread ?? 12
+                } as any
+              })
+            } else {
+              synth.set({ oscillator: { type: track.synthOscillator } })
+            }
+          } catch (e) {
+            console.warn('Failed to set unison oscillator:', e)
+            synth.set({ oscillator: { type: track.synthOscillator } })
+          }
         }
       }
       if (track.synthDetune !== undefined) synth.set({ detune: track.synthDetune })
@@ -4738,6 +4812,14 @@ class AudioEngine {
       // Filter logic is slightly more complex as it depends on the synth type
       // But we can usually set it if the synth has a filter property
       const anySynth = synth as any
+      if (track.synthFilterType !== undefined) {
+        try {
+          if (anySynth.filter) anySynth.filter.type = track.synthFilterType
+          else if (anySynth.options?.filter) (synth as any).set({ filter: { type: track.synthFilterType } })
+        } catch (e) {
+          console.warn('Failed to set filter type:', e)
+        }
+      }
       if (track.synthFilterFreq !== undefined || track.synthFilterQ !== undefined) {
         if (anySynth.filter) {
           if (track.synthFilterFreq !== undefined) anySynth.filter.frequency.value = track.synthFilterFreq
@@ -5312,8 +5394,8 @@ class AudioEngine {
           ? (isMicrotonal ? Tone.Frequency(note.pitchEnd + transpose, "midi").toFrequency() : Tone.Frequency(note.pitchEnd + transpose, "midi").toNote())
           : undefined
 
-        const automationPoints = state.automationCurves[note.trackId] || []
         const automationTarget = state.automationTargets[note.trackId] ?? 'velocity'
+        const automationPoints = getTrackAutomationPoints(state.automationCurves, note.trackId, automationTarget)
         const laneValue = getLaneValueAtTick({
           points: automationPoints,
           lane: state.automationLanes?.[note.trackId],
@@ -5441,11 +5523,12 @@ class AudioEngine {
       if (state.studioSettings.velocityCurveFormula && state.studioSettings.velocityCurveFormula !== 'v') {
         let fn = this.formulaCache.get(state.studioSettings.velocityCurveFormula)
         if (!fn) {
-          try {
-            fn = new Function('v', `return ${state.studioSettings.velocityCurveFormula}`)
+          const compiled = compileFormula(state.studioSettings.velocityCurveFormula, ['v'])
+          if (compiled) {
+            fn = compiled
             this.formulaCache.set(state.studioSettings.velocityCurveFormula, fn)
-          } catch (e) {
-            console.warn("Velocity curve compilation failed", e)
+          } else {
+            console.warn("Velocity curve compilation failed")
           }
         }
         if (fn) {
@@ -5487,11 +5570,12 @@ class AudioEngine {
     if (state.studioSettings.velocityCurveFormula && state.studioSettings.velocityCurveFormula !== 'v') {
       let fn = this.formulaCache.get(state.studioSettings.velocityCurveFormula)
       if (!fn) {
-        try {
-          fn = new Function('v', `return ${state.studioSettings.velocityCurveFormula}`)
+        const compiled = compileFormula(state.studioSettings.velocityCurveFormula, ['v'])
+        if (compiled) {
+          fn = compiled
           this.formulaCache.set(state.studioSettings.velocityCurveFormula, fn)
-        } catch (e) {
-          console.warn("Velocity curve compilation failed", e)
+        } else {
+          console.warn("Velocity curve compilation failed")
         }
       }
       if (fn) {
@@ -5877,7 +5961,7 @@ class AudioEngine {
       if (!target || !target.startsWith('vst3:')) continue
       const index = Number(target.slice(5))
       if (!Number.isInteger(index) || index < 0) continue
-      const points = state.automationCurves[track.id]
+      const points = getTrackAutomationPoints(state.automationCurves, track.id, target)
       const lane = state.automationLanes?.[track.id]
       // A formula lane needs no drawn points to be worth streaming.
       if ((!points || points.length === 0) && lane?.source !== 'formula') continue
@@ -6158,11 +6242,12 @@ class AudioEngine {
     if (state.studioSettings.velocityCurveFormula && state.studioSettings.velocityCurveFormula !== 'v') {
       let fn = this.formulaCache.get(state.studioSettings.velocityCurveFormula)
       if (!fn) {
-        try {
-          fn = new Function('v', `return ${state.studioSettings.velocityCurveFormula}`)
+        const compiled = compileFormula(state.studioSettings.velocityCurveFormula, ['v'])
+        if (compiled) {
+          fn = compiled
           this.formulaCache.set(state.studioSettings.velocityCurveFormula, fn)
-        } catch (e) {
-          console.warn("Velocity curve compilation failed", e)
+        } else {
+          console.warn("Velocity curve compilation failed")
         }
       }
       if (fn) {

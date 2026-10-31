@@ -9,7 +9,7 @@ import { CHROMATIC_SAMPLE_PRESETS, bufferToDataUri, type ChromaticSamplePreset }
 import { QuickMicRecorder } from '../utils/micRecorder'
 import { resolveSamplerLoopMode, resolveSamplerRegion } from '../utils/audioPlayback'
 import type { SynthSamplerConfig } from '../engine/store'
-import { evaluateMathExpression, MATH_FORMULA_PRESETS } from '../utils/mathWaveform'
+import { evaluateMathExpression, calculateFourierPartials, MATH_FORMULA_PRESETS } from '../utils/mathWaveform'
 import {
   generateCurveLut,
   sampleCurveLut,
@@ -484,8 +484,11 @@ export const SynthStudioModal: React.FC = () => {
     if (targetTrack.synthDecay !== undefined) setDecay(targetTrack.synthDecay)
     if (targetTrack.synthSustain !== undefined) setSustain(targetTrack.synthSustain)
     if (targetTrack.synthRelease !== undefined) setRelease(targetTrack.synthRelease)
+    if (targetTrack.synthFilterType) setFilterType(targetTrack.synthFilterType)
     if (targetTrack.synthFilterFreq !== undefined) setFilterFreq(targetTrack.synthFilterFreq)
     if (targetTrack.synthFilterQ !== undefined) setFilterQ(targetTrack.synthFilterQ)
+    if (targetTrack.synthUnison !== undefined) setUnison(targetTrack.synthUnison)
+    if (targetTrack.synthDetuneSpread !== undefined) setDetuneSpread(targetTrack.synthDetuneSpread)
     if (targetTrack.synthPortamento !== undefined) setPortamento(targetTrack.synthPortamento)
     if (targetTrack.synthDetune !== undefined) setFineDetune(targetTrack.synthDetune)
     if (targetTrack.synthDecayCurveType) setDecayCurveType(targetTrack.synthDecayCurveType)
@@ -533,18 +536,34 @@ export const SynthStudioModal: React.FC = () => {
       (targetTrack.synthPreset === 'physical' || targetTrack.synthPreset === 'vocal')
     const savedPreset = keepSpecializedPreset ? targetTrack.synthPreset! : 'custom'
 
+    let partials: number[] | undefined
+    if (oscType === 'custom' && synthFormula) {
+      try { partials = calculateFourierPartials(synthFormula, synthPartialsCount || 16) } catch { partials = undefined }
+    }
+
     updateTrack(targetTrack.id, {
       synthPreset: savedPreset,
       synthMode: samplerMode ? 'sampler' : 'synth',
+      // Flat fields are now the portable patch; drop a stale imported subtractive blob so
+      // the web engine does not keep playing an older .muzins config. FM/Mono imports keep
+      // their config because that engine topology cannot be expressed by flat fields.
+      customMuxins: !samplerMode &&
+        (targetTrack.customMuxins?.engineType === 'FMSynth' || targetTrack.customMuxins?.engineType === 'MonoSynth')
+        ? targetTrack.customMuxins
+        : undefined,
       synthOscillator: oscType,
       synthFormula: oscType === 'custom' ? synthFormula : undefined,
       synthPartialsCount: oscType === 'custom' ? synthPartialsCount : undefined,
+      synthPartials: partials,
       synthAttack: attack,
       synthDecay: decay,
       synthSustain: sustain,
       synthRelease: release,
+      synthFilterType: filterType,
       synthFilterFreq: filterFreq,
       synthFilterQ: filterQ,
+      synthUnison: unison,
+      synthDetuneSpread: detuneSpread,
       synthPortamento: portamento,
       synthDetune: fineDetune,
       synthDecayCurveType: decayCurveType,

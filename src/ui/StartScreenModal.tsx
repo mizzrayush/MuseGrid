@@ -1106,7 +1106,7 @@ export default function StartScreenModal({ onNewProject, onOpenProject, onProjec
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px', marginBottom: '28px' }}>
                 <div
                   onClick={() => {
-                    useStore.getState().setScaleLock({ enabled: false, root: 0, mode: 'major', accidental: 'sharp' })
+                    useStore.getState().setScaleLock({ enabled: false, root: 0, mode: 'Major', accidental: 'sharp' })
                     onNewProject()
                     setIsStartScreenOpen(false)
                     enterDawFullscreen()

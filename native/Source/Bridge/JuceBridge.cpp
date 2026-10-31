@@ -970,7 +970,8 @@ void JuceBridge::handleAudioCommand(const juce::Array<juce::var>& args, juce::We
                 else if (s == "triangle") oscNum = 1.0f;
                 else if (s == "square") oscNum = 2.0f;
                 else if (s == "saw" || s == "sawtooth") oscNum = 3.0f;
-                else if (s == "noise" || s == "custom") oscNum = 4.0f;
+                else if (s == "noise") oscNum = 4.0f;
+                else if (s == "custom") oscNum = 5.0f;
                 audioEngine.setTrackSynthParam(trackId, "oscType", oscNum);
             }
             else
@@ -1067,6 +1068,27 @@ void JuceBridge::handleAudioCommand(const juce::Array<juce::var>& args, juce::We
         {
             audioEngine.setTrackDecayCurveType(trackId, curveType, tension);
         }
+    }
+    else if (type == "setTrackFilter")
+    {
+        const juce::String trackId = obj->getProperty("trackId").toString();
+        const juce::String filterType = obj->getProperty("filterType").toString();
+        const float frequency = obj->hasProperty("frequency") ? (float)obj->getProperty("frequency") : 20000.0f;
+        const float resonance = obj->hasProperty("resonance") ? (float)obj->getProperty("resonance") : 0.7f;
+        audioEngine.setTrackFilter(trackId, filterType, frequency, resonance);
+    }
+    else if (type == "setTrackPartials")
+    {
+        const juce::String trackId = obj->getProperty("trackId").toString();
+        std::vector<float> partials;
+        if (obj->hasProperty("partials") && obj->getProperty("partials").isArray())
+        {
+            auto* arr = obj->getProperty("partials").getArray();
+            partials.reserve(arr->size());
+            for (auto& item : *arr) partials.push_back((float)item);
+        }
+        audioEngine.setTrackSynthPartials(trackId, partials.empty() ? nullptr : partials.data(),
+                                          (int)partials.size());
     }
     else if (type == "setPadCurve")
     {

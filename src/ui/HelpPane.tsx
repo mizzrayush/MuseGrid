@@ -88,6 +88,7 @@ export default function HelpPane() {
     { id: 'shortcuts', label: 'Keyboard Shortcuts', icon: <IconAlign size={14} /> },
     { id: 'synth_lab', label: 'Synth & Drum Synthesis', icon: <IconMusic size={14} /> },
     { id: 'neural_ai', label: 'Neural AI Composer', icon: <IconPlay size={14} /> },
+    { id: 'generative_music', label: 'Generative Music Engine', icon: <IconSliders size={14} /> },
     { id: 'midi_remap', label: 'MIDI Import & Remap Lab', icon: <IconAlign size={14} /> },
     { id: 'stem_splitter_onnx', label: 'AI Stem Splitter & ONNX', icon: <IconSettings size={14} /> },
     { id: 'score_sheet_preview', label: 'Score & Sheet Music Preview', icon: <IconMusic size={14} /> },
@@ -649,6 +650,9 @@ export default function HelpPane() {
                   <li><strong>Create your own</strong>: In <strong>Extract Groove from MIDI</strong>, choose Active Track or All Tracks, name the template, and click <strong>Extract &amp; Save Groove</strong>. The timing and velocity feel of the selected notes becomes a reusable template in the dropdown.</li>
                   <li><strong>Bar length</strong>: Extraction and application assume a 16-step, 4/4 bar (768 ticks). Templates therefore follow straight 16ths, not odd meters or meter changes.</li>
                 </ul>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Generative Music</h3>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>A collapsible section below the track tools that develops new material from your notes with five seed-based engines (Motif, Pulse, Choir, Arrange, Respond). Source it from the active track, selected tracks, all tracks, or a multi-track timeline region, preview the result, then apply to a new track or into the current one. See the Generative Music Engine help section for the complete workflow.</p>
               </div>
             )}
 
@@ -663,7 +667,7 @@ export default function HelpPane() {
                   <li><strong>Erase Mode (Eraser / E)</strong>: Click a note to delete it.</li>
                   <li><strong>Select Mode (Cursor / V)</strong>: Box-select or lasso multiple notes. Drag to move or delete together.</li>
                   <li><strong>Slice Mode (Knife / C)</strong>: Click and drag vertically across notes to slice them cleanly.</li>
-                  <li><strong>Timeline Region Selection (Ruler Header)</strong>: Click and drag along the top ruler header to highlight a time range across all tracks (or single track). A floating action bar appears with quick actions to Duplicate, Mute/Unmute, Split, Quantize, or Delete notes in the selected span.</li>
+                  <li><strong>Timeline Region Selection (Ruler Header)</strong>: Click and drag along the top ruler header to highlight a time range. It is scoped to the active track by default; Ctrl/Shift-click track headers first to span multiple tracks — the orange overlay then shows a color stripe per selected track and the label counts them. A floating action bar appears with quick actions to Duplicate, Mute/Unmute, Split, Quantize, or Delete notes in the selected span, and right-clicking the region adds <strong>Export Region...</strong>.</li>
                 </ul>
 
                 <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Ghost Notes Suite & Track Jumping</h3>
@@ -797,14 +801,18 @@ export default function HelpPane() {
             {activeSection === 'right_pane' && (
               <div>
                 <h1 style={{ margin: '0 0 20px', color: '#fff' }}>Note Inspector & Advanced Tools (Right Pane)</h1>
-                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>The Right Pane contains note-level MPE controls, real-time harmonic analysis, and generative matrix algorithms.</p>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>The Right Pane is the note inspector: MPE expression controls, articulation presets, the live Chord Detective and drum voice analysis. Generative tools live in the Left Pane (Pattern Clips, Groove Pool and Generative Music).</p>
 
                 <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Real-Time Chord Detective & Scale Degree Analyzer</h3>
                 <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>When you select multiple notes on a synth track, the live Harmonic Inspector instantly detects and displays:</p>
                 <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
-                  <li><strong>Full Chord Name</strong>: Identifies exact chords such as C, Am7, G9, F#dim, Bbaug, Dsus4, and slash chords like C / E.</li>
-                  <li><strong>Inversion Analysis</strong>: Identifies Root Position, 1st Inversion, 2nd Inversion, 3rd Inversion, or Open Voicing based on the lowest sounding bass note.</li>
-                  <li><strong>Scale Degree Roman Numerals</strong>: Analyzes the chord root relative to the project key (e.g. I, ii, IV, vi, or b7 Altered).</li>
+                  <li><strong>Full Chord Name</strong>: Identifies triads, sevenths, 6ths, minor 6/9, 9ths, 11ths and 13ths, altered dominants (7alt, 7b9, 7#9, 7#11, 7b9b13, 7#9b13), 7sus2 and 7sus4, augmented, diminished, half-diminished and diminished-major shapes, major 7 b5, minor #5, no-3rd and no-5th shells, dyads, and slash chords like C / E. Spelling follows the project's global sharp/flat preference, so a flat key reports B♭maj7 rather than A♯maj7.</li>
+                  <li><strong>Polychords</strong>: When the notes stack into two separate chords, the voicing is split at its widest register gap and named "upper / lower" (for example F♯ major over C major reads as F♯ / C). When the union happens to spell a known extended chord, that name wins instead — C major under D major is a D11 third inversion, not a polychord. This is tried before the nearest-shell or cluster fallback.</li>
+                  <li><strong>Added and omitted tones</strong>: A voicing one note away from a known chord is labelled with the deviation, such as C7 (add 4) or Cmaj7 (no 5). More distant collections still fall back to a cluster description.</li>
+                  <li><strong>Inversion Analysis</strong>: Walks the chord-tone order (root, 3rd, 5th, 7th …) so inversions are reported against the lowest sounding bass note; extensions in the bass are honestly labelled Open Voicing.</li>
+                  <li><strong>Scale Degree Roman Numerals</strong>: Quality is derived from the scale itself by stacking 3rds and 5ths, so harmonic minor gets V and vii°, melodic minor and the church modes keep their real case, and Locrian reads i° instead of a guessed minor. A root a fifth above a diatonic degree that carries a major or dominant quality is labelled as a secondary dominant — a D major chord in C major reads V/V, and a chromatic root such as A major in C major reads V/ii. Borrowed colours keep their real case, so F minor in C major reads iv instead of IV. Other out-of-key notes use chromatic labels such as ♭III, ♯IV or ♭VII (Altered).</li>
+                  <li><strong>Spelling rules</strong>: Chord names always use the project's global accidental preference. The analyzer cannot know whether a written pitch was meant as C♯ or D♭ in a particular harmonic context, because both are the same MIDI pitch; only the global preference decides the printed spelling. Slash and polychord names follow the same rule.</li>
+                  <li><strong>Key tracking limit</strong>: Every chord is analyzed against the project key. Modulation and mid-song key changes are not tracked, so a chord borrowed from a new key is read as a secondary dominant or a chromatic label instead.</li>
                   <li><strong>Drum Voice Distribution</strong>: On drum tracks, switches to a percussion hit breakdown (e.g. Kick: 8, Snare: 4, Closed Hat: 16).</li>
                 </ul>
 
@@ -828,10 +836,11 @@ export default function HelpPane() {
                   <li><strong>Clear</strong>: The Clear button in the Articulation row resets those expression fields without touching pitch, timing or the note's drum tuning.</li>
                 </ul>
 
-                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Generative Matrix</h3>
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Where the generative tools live</h3>
                 <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
-                  <li><strong>Euclidean Rhythm</strong>: Mathematically generates evenly spaced rhythmic pulses across steps.</li>
-                  <li><strong>Cellular Automata</strong>: Generates evolving algorithmic melodies based on Conway's Game of Life.</li>
+                  <li><strong>Pattern Clips (Generative)</strong>: Left Pane section. Turns a clip into a Euclidean, cellular-automata or random pattern and bakes the result into notes.</li>
+                  <li><strong>Groove Pool</strong>: Left Pane section. Extracts timing and velocity feel from a performance and applies it to other notes.</li>
+                  <li><strong>Generative Music</strong>: Left Pane section. Five seed-based engines — Motif, Pulse, Choir, Arrange and Respond — driven by the Active track, Selected tracks, All tracks or a multi-track timeline Region. See the Generative Music Engine help section for the full workflow.</li>
                 </ul>
               </div>
             )}
@@ -960,6 +969,19 @@ export default function HelpPane() {
                   <li>Filter cutoff is followed <strong>continuously inside each note</strong> — the lane's own shape is fed to the engine's
                     per-sample filter curve. Vibrato, tremolo, detune and glide are taken once per note, at the note's centre, the same way velocity has always behaved.</li>
                   <li>A formula lane needs no drawn points. Turning it off returns the lane to the points you drew, untouched.</li>
+                  <li>Every formula can use <code>Math</code> or the short helpers <code>sin</code>, <code>cos</code>, <code>pow</code>, <code>min</code>, <code>max</code>, <code>pi</code>, <code>rand</code>, plus <code>clamp(x, lo, hi)</code>, <code>lerp(a, b, t)</code> and <code>smoothstep(edge0, edge1, x)</code>.</li>
+                </ul>
+
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Baking a Procedural Curve</h3>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>
+                  The left panel's <em>Automation (Procedural)</em> section bakes a shape into points on the track's
+                  <strong> active automation target</strong>. The bake always covers at least four bars, extends to the end of the project,
+                  and follows the conductor: the sidechain preset ducks on real conductor beats, and custom formulas receive tempo/meter time.
+                </p>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li>Custom variables: <code>t</code> ticks, <code>s</code> seconds along the tempo map, <code>b</code> beats, <code>m</code> bars, <code>ticks</code>, and <code>v</code> (64, the lane midpoint).</li>
+                  <li>Results in 0–1 (or −1–1) are treated as normalised and expanded across the full 0–127 lane. Larger results are used as lane units directly.</li>
+                  <li>The step slider sets point spacing from 1/64 notes to whole beats. Every bake replaces the previous bake and removes the legacy duplicate curve so playback applies it exactly once.</li>
                 </ul>
 
                 <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Advanced Math & Optimization (For DSP Nerds)</h3>
@@ -1094,8 +1116,8 @@ export default function HelpPane() {
                 <div style={{ background: 'rgba(255,255,255,0.03)', padding: '15px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.05)', marginBottom: '15px' }}>
                   <h4 style={{ margin: '0 0 10px', color: '#4dabf7' }}>Music Theory & Analysis API (<code>Muse.midi</code>)</h4>
                   <ul style={{ color: '#ccc', lineHeight: 1.6, fontSize: '13px', margin: 0 }}>
-                    <li><code>Muse.midi.detectChord(pitches)</code>: Analyzes pitch array and returns chord name, quality, inversion, and bass note.</li>
-                    <li><code>Muse.midi.detectScaleDegree(rootPc, scaleRoot?, scaleMode?)</code>: Returns Roman numeral degree (e.g. 'I', 'vi', 'b7 (Altered)').</li>
+                    <li><code>Muse.midi.detectChord(pitches, preferFlats?)</code>: Analyzes pitch array and returns chord name, quality, inversion, and bass note. Flat spelling follows the project accidental unless you pass <code>true</code> or <code>false</code>.</li>
+                    <li><code>Muse.midi.detectScaleDegree(rootPc, scaleRoot?, scaleMode?)</code>: Returns a quality-aware Roman numeral (e.g. 'I', 'vi', 'vii°', 'III+'), a secondary-dominant label such as 'V/V' when the quality is known to be major/dominant, or a chromatic label such as '♭VII (Altered)'. The scripting helper passes the root only, so it reports the diatonic degree or an altered label rather than a secondary dominant.</li>
                     <li><code>Muse.midi.getProgressions()</code>: Returns dictionary of all 6 genre chord progressions with step offsets.</li>
                     <li><code>Muse.midi.getScales()</code>: Returns array of all 32 world, microtonal, maqam, raga, and modal scale names.</li>
                   </ul>
@@ -1248,6 +1270,14 @@ MuseState.showToast('Batch Render Complete!', 'success');`}
                   <li><strong>Include Metronome</strong> places the click in the file using the sound, gain, downbeat and upbeat settings from the Click panel.</li>
                 </ul>
 
+                <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>Exporting a Timeline Region</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li>Select a time range in the timeline, then right-click the region and choose <strong>Export Region...</strong>.</li>
+                  <li>The standard export dialog opens with the region's <strong>start and end ticks already filled in</strong> — it never falls back to zero — and the region's track scope preserved. The header reads <em>Export Region</em> with a label such as <code>Region · 2 tracks · ticks 0–768</code>.</li>
+                  <li>The dialog offers the same formats and options as a full mix export (WAV/MP3, MIDI, MusicXML and bounce modes); only the selected span is rendered.</li>
+                  <li>If the region spans several tracks, those tracks are the exported selection. Track and selected-mix exports, including <strong>Real-Time (1:1 Recording)</strong>, automatically solo the tracks being exported and restore your previous solo/mute state afterwards, so unrelated tracks never bleed into the file.</li>
+                </ul>
+
                 <h3 style={{ color: '#4dabf7', marginTop: '20px' }}>MIDI Export, Tempo &amp; Odd Time Signatures</h3>
                 <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
                   <li><strong>Tempo</strong>: The exported MIDI contains the conductor's tempo map, not just the project BPM, so tempo automation arrives in the file as tempo events.</li>
@@ -1332,7 +1362,7 @@ MuseState.showToast('Batch Render Complete!', 'success');`}
                 <h3 style={{ color: '#ffd43b', marginTop: '24px', marginBottom: '10px' }}>Timeline &amp; Region Editing</h3>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
                   <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '13px', listStyleType: 'none', padding: 0, margin: 0 }}>
-                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Click &amp; Drag</kbd> or <kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Shift + Drag</kbd> Ruler: Select a time range (strictly scoped to the active track by default)</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Click &amp; Drag</kbd> or <kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Shift + Drag</kbd> Ruler: Select a time range (active track by default; Ctrl/Shift-click track headers first to span multiple tracks)</li>
                     <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + D</kbd> with Region: Duplicate timeline region forward in time</li>
                     <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>M</kbd> with Region: Mute / Unmute all notes inside the selected region</li>
                     <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + C</kbd> with Region: Copy all notes within region to clipboard</li>
@@ -1343,7 +1373,7 @@ MuseState.showToast('Batch Render Complete!', 'success');`}
                     <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + E</kbd> with Region: Split notes at start and end region boundaries</li>
                     <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Ctrl + L</kbd> with Region: Set playback loop markers to match region</li>
                     <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Q</kbd> with Region: Quantize all notes inside selected region</li>
-                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Right-Click</kbd> Timeline: Open Region Action menu (split, duplicate, mute, cut)</li>
+                    <li style={{ marginBottom: '8px' }}><kbd style={{ background: '#383015', color: '#ffd43b', border: '1px solid rgba(255,212,59,0.3)', padding: '2px 6px', borderRadius: '4px' }}>Right-Click</kbd> Timeline: Open Region Action menu (split, duplicate, mute, cut, loop and <strong>Export Region</strong>)</li>
                   </ul>
                 </div>
 
@@ -1398,6 +1428,25 @@ MuseState.showToast('Batch Render Complete!', 'success');`}
                 <h1 style={{ margin: '0 0 20px', color: '#fff' }}>Instrument Design & Synthesis Lab</h1>
                 <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>Every track in MuseGrid runs a dedicated synthesizer model or a physical drum modeler. Access these via the Instrument Lab accordion in the Left Pane.</p>
 
+                <h3 style={{ color: '#ff9900', marginTop: '20px' }}>Sound Designer</h3>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>The Sound Designer reads the active synth track's melody and proposes five patches: Bass, Lead, Pluck, Pad and Bells. It profiles the note register, pitch span, density, gate length, articulation and tempo, so each candidate is biased toward the line rather than being a blind random patch.</p>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Tempo shaping</strong>: The profile uses the track's target tempo when it has one, otherwise the project tempo. Fast material (128 BPM or more, or four notes per second or faster) gets shorter attacks, tighter decays, brighter waveforms and exponential decays. Slow material (84 BPM or less, or one note per second or slower) gets longer attacks and tails, softer waveforms and smoother curves. Changing the tempo changes the generated patches.</li>
+                  <li><strong>Variation</strong>: The same variation, melody and tempo reproduce the same five patches. Type any number or press <strong>Roll</strong> for a different set.</li>
+                  <li><strong>Preview</strong>: Auditions the candidate with the analyzed melody through a temporary voice. It does not change the track.</li>
+                  <li><strong>Add to Track</strong>: Writes the patch as the track's custom synth (oscillator, ADSR and decay curve) in one undoable step. The candidate name appears in the confirmation toast.</li>
+                  <li><strong>Open Synth Studio</strong>: Appears after a patch is applied, so you can fine-tune it and export it as a <strong>.muzins</strong> patch.</li>
+                  <li><strong>Engine scope</strong>: the Sound Designer itself writes oscillator, ADSR and decay-curve parameters, which both engines play. Imported <strong>.muzins</strong> files can carry more; see the next section for what the native engine now honors.</li>
+                </ul>
+
+                <h3 style={{ color: '#ff9900', marginTop: '20px' }}>.muzins Portable Patch Surface</h3>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>Loading a <strong>.muzins</strong> file folds its config into the track's portable patch fields, so the native JUCE engine and the web engine play the same settings.</p>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Native and web</strong>: oscillator type, Fourier formula (converted to up to 64 partial amplitudes), ADSR, decay curve type, tension and formula, filter type (lowpass, highpass, bandpass, notch), cutoff, resonance, unison voice count, detune spread, global/fine detune and portamento. Unison is rendered as a real detuned oscillator stack in the native voice, and portamento glides from the previous note on that track.</li>
+                  <li><strong>Web only</strong>: FM and MonoSynth topologies (harmonicity, modulation index, modulation envelope), scripted DSP classes, and any extra Tone.js options that have no native equivalent. These still import and play through WebAudio, but the native synth falls back to its subtractive voice.</li>
+                  <li><strong>Saving from Synth Studio</strong>: the studio writes the flat patch fields and drops a stale subtractive <strong>.muzins</strong> blob, so later edits are heard natively. FM/Mono imports keep their topology blob because flat fields cannot express it.</li>
+                </ul>
+
                 <h3 style={{ color: '#00e6ff', marginTop: '20px' }}>Synthesizer Models</h3>
                 <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
                   <li><strong>Subtractive Synth</strong>: Combines dual oscillators (Sine, Square, Sawtooth, Triangle) fed into a resonant lowpass filter. Features standard ADSR envelopes.</li>
@@ -1435,6 +1484,13 @@ MuseState.showToast('Batch Render Complete!', 'success');`}
                   <li><strong>Temperature (0.1 - 2.0)</strong>: Controls randomness. Low values are strict, while higher values generate experimental sequences.</li>
                   <li><strong>Density</strong>: Controls how many notes or rests are populated in the generated grid.</li>
                   <li><strong>Seed Memory</strong>: Sets the number of preceding measures the model analyzes to form its pattern.</li>
+                  <li><strong>Jitter Variation</strong>: A number that keeps density thinning and velocity jitter consistent per note, so the same note keeps the same treatment across runs; it also fixes the procedural fallback. Type any number or press <strong>Roll</strong> for a new variation. The model's own note choices still vary.</li>
+                </ul>
+
+                <h3 style={{ color: '#da77f2', marginTop: '20px' }}>Choosing the Source</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Active</strong>, <strong>Selected</strong>, <strong>All</strong>, <strong>Region</strong>: the same four source modes used by Generative Music. <strong>Region</strong> reads only the notes inside the timeline selection; arm it, then drag across the timeline. Ctrl/Shift-click tracks first to span several tracks.</li>
+                  <li>Generators read only the source notes that match the destination instrument: melody, chord, and bass tools read pitched tracks, while drum tools read drum tracks. The card shows the live source-note count.</li>
                 </ul>
 
                 <h3 style={{ color: '#da77f2', marginTop: '20px' }}>AI Composer Models</h3>
@@ -1444,6 +1500,62 @@ MuseState.showToast('Batch Render Complete!', 'success');`}
                   <li><strong>Chord & Counterpoint Generator</strong>: Populates jazz voicings, diatonic chords, or standard voice-leading counterpoint lines (Alto, Tenor, Bass) under an active melody.</li>
                   <li><strong>Piano Genie</strong>: An interactive 8-button interface allowing live diatonic solos.</li>
                   <li><strong>Arrangement Suggestions</strong>: Analyzes track densities and displays tips for improving session structures.</li>
+                </ul>
+                <p style={{ color: '#888', lineHeight: 1.6, fontSize: '13px', marginTop: '16px' }}>For deterministic, seed-based pattern development with region sourcing, see the <strong>Generative Music Engine</strong> section below.</p>
+              </div>
+            )}
+
+            {activeSection === 'generative_music' && (
+              <div>
+                <h1 style={{ margin: '0 0 20px', color: '#fff' }}>Generative Music Engine</h1>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>The <strong>Generative Music</strong> panel (left pane, below the track tools) develops new material from what is already in your project. Every result is deterministic for a given seed, so rolling a seed you like gives the same notes again.</p>
+
+                <h3 style={{ color: '#ff922b', marginTop: '20px' }}>Choosing the Source</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Active</strong>: reads only the active track's notes — the same four source modes also power the AI Lab generators.</li>
+                  <li><strong>Selected</strong>: reads every note on the tracks selected in the track list.</li>
+                  <li><strong>All</strong>: pools notes from every track in the project.</li>
+                  <li><strong>Region</strong>: reads only the notes inside the current timeline region. Press <strong>Region</strong> to arm region picking, then drag in the ruler or grid; Ctrl/Shift-drag also creates a region. The region block shows its length in ticks and the track count, and <strong>Redraw Region</strong> re-arms picking while <strong>Clear</strong> removes it.</li>
+                  <li><strong>Multi-track regions</strong>: Ctrl/Shift-click track headers to add tracks to the selection, then draw the region. The orange overlay gains a color stripe per selected track and the label reads e.g. <code>768t · 2 tracks</code>. Region editing (duplicate, mute, delete, split, quantize, copy/cut) applies to all selected tracks.</li>
+                  <li><strong>Mixed selections</strong>: when the source spans drum and pitched tracks, melodic engines read the pitched notes and the Pulse engine reads the drum notes, so one region can feed either kind of generator.</li>
+                  <li>The footer shows the source note count, whether it is drum or pitched, and the detected anchor pitch.</li>
+                </ul>
+
+                <h3 style={{ color: '#ff922b', marginTop: '20px' }}>The Five Engines</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Motif</strong>: derives a cell from the source, then applies inversion, retrograde, transposition, displacement and octave shifts, with optional afterimage echoes. Works with pitched sources.</li>
+                  <li><strong>Pulse</strong>: Euclidean drum rows (kick, snare, hats, open hat, clap, ride) or a learned map of the source groove, with ghost hits and rotation. Reads drum sources.</li>
+                  <li><strong>Choir</strong>: voice-led 2–5 voice chords under the source melody, or a genre progression when no melody exists. Tension adds 7ths and 9ths.</li>
+                  <li><strong>Arrange</strong>: produces three parts — Lead, Pad/Bass and Beat — following a section intensity arc (intro, build, drop, breakdown, outro).</li>
+                  <li><strong>Respond</strong>: call and response — the call bars stay open and the answer appears on the next bar using a transformed cell.</li>
+                </ul>
+
+                <h3 style={{ color: '#ff922b', marginTop: '20px' }}>Placement, Shape and Seed</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Destination</strong>: <em>New Track(s)</em> creates one track per part with matching instrument routing and a name you can edit, or <em>Into &lt;track&gt;</em> writes into the active track using <strong>Overdub</strong> or <strong>Replace Span</strong> (clears notes inside the generated span first).</li>
+                  <li><strong>Start Position</strong>: <em>Playhead</em>, <em>Region</em> (the region's start tick; disabled without a region) or <em>End</em> (after the last note). The exact start tick is shown below the buttons.</li>
+                  <li><strong>Bars</strong>: 1–32 bars. Bar windows follow the conductor meter map, so generation works in odd meters and across meter changes rather than assuming 4/4.</li>
+                  <li><strong>Shape</strong>: Density, Complexity, Motion, Tension, Velocity, Register (octave), Humanize (timing/velocity jitter), Swing and Afterimage (echo repeats). Velocity is written to the project as MIDI velocity (1–127) when you apply.</li>
+                  <li><strong>Grid Snap / Note Sizes</strong>: both on by default and tied to the project snap resolution shown beside each toggle (e.g. 1/16). Grid Snap rounds every generated start time onto the grid; Note Sizes rounds durations to whole grid steps with a one-step minimum, so notes are grid multiples. Turn either off to keep the engine's free timing or lengths. With Grid Snap on, Swing offsets fold onto the grid, so disable it when you want swung timing.</li>
+                  <li><strong>Editable values</strong>: every slider in the panel has a value box — click it, type any number and press Enter. Values are not clamped to the slider range; Escape cancels the edit.</li>
+                  <li><strong>Seed</strong>: type a number or press <strong>Roll</strong>; the same settings and seed always produce the same notes. <strong>Surprise</strong> rolls a new seed and randomises the shape at once.</li>
+                  <li><strong>Scale Snap</strong>: on by default; choose a root and mode (project scale modes) and every generated pitch is snapped to that scale. Turn it off to allow chromatic notes.</li>
+                </ul>
+
+                <h3 style={{ color: '#ff922b', marginTop: '20px' }}>Preview and Apply</h3>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li>The preview is a miniature piano roll of the generated result. Multi-part engines show a chip per part (Lead, Pad/Bass, Beat) so you can inspect each one.</li>
+                  <li>Nothing touches the project until you press <strong>Apply</strong>. Applying commits an undo step, creates any new tracks, removes notes in a Replace Span, inserts the generated notes and selects the first created track.</li>
+                  <li>A toast reports how many notes were generated across how many parts.</li>
+                </ul>
+
+                <h3 style={{ color: '#ff922b', marginTop: '20px' }}>Suggestions Panel</h3>
+                <p style={{ color: '#ccc', lineHeight: 1.6, fontSize: '14px' }}>The <strong>Suggestions</strong> section offers three clearly-labelled starting points — Chords, Bass and Rhythm — and inserts the one you pick as notes at the next bar.</p>
+                <ul style={{ color: '#ddd', lineHeight: 1.6, fontSize: '14px' }}>
+                  <li><strong>Chords and Bass follow the active scale</strong>: the three progressions are built from the scale's own degrees rather than fixed major/minor templates. The engine targets tonic, fifth, sixth, fourth and second and snaps each to the nearest degree in the scale, so pentatonic, modal, harmonic minor, exotic and custom scales receive progressions made only from their own notes. Titles show the resulting Roman numerals.</li>
+                  <li><strong>Chord voicing</strong>: each chord stacks scale degrees 1-3-5 (degree +0, +2, +4), so unusual scales produce the intervals their own structure implies rather than a forced triad.</li>
+                  <li><strong>Rhythm</strong>: three drum patterns (four-on-the-floor, syncopated push and half-time pocket) written to one bar of the current meter.</li>
+                  <li><strong>Placement</strong>: everything lands at the next bar line from the playhead, using the conductor meter map, so odd meters and meter changes are respected.</li>
                 </ul>
               </div>
             )}

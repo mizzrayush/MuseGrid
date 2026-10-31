@@ -268,7 +268,7 @@ export const DAW_TEMPLATES: DawTemplate[] = [
     keyName: 'E♭ Major 7',
     badgeColor: '#da77f2',
     tags: ['Electric Piano', 'Vinyl Swing', 'Chorus'],
-    scaleLock: { enabled: true, root: 3, mode: 'major', accidental: 'sharp' },
+    scaleLock: { enabled: true, root: 3, mode: 'Major', accidental: 'sharp' },
     tracks: [
       {
         id: 'track_synth',
@@ -565,7 +565,7 @@ export const DAW_TEMPLATES: DawTemplate[] = [
     keyName: '19-EDO Neutral',
     badgeColor: '#20c997',
     tags: ['19-EDO Tuning', 'Microtonal Grid', 'Harmonics'],
-    scaleLock: { enabled: false, root: 0, mode: 'major', accidental: 'sharp' },
+    scaleLock: { enabled: false, root: 0, mode: 'Major', accidental: 'sharp' },
     tracks: [
       {
         id: 'track_synth',
@@ -624,7 +624,7 @@ export const DAW_TEMPLATES: DawTemplate[] = [
     keyName: 'C Major',
     badgeColor: '#74c0fc',
     tags: ['Karplus-Strong', 'Physical Decay', 'Acoustic Wood'],
-    scaleLock: { enabled: true, root: 0, mode: 'major', accidental: 'sharp' },
+    scaleLock: { enabled: true, root: 0, mode: 'Major', accidental: 'sharp' },
     tracks: [
       {
         id: 'track_synth',

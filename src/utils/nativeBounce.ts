@@ -1,4 +1,4 @@
-import type { AppState, Track } from '../engine/store'
+import { getTrackAutomationPoints, type AppState, type Track } from '../engine/store'
 import * as Tone from 'tone'
 import { mapNoteToScheduledEvent, TICKS_PER_BEAT } from '../engine/Scheduler'
 import { buildNativeNoteOnCommand, type NativeNoteOnCommand } from '../engine/nativeNoteCommand'
@@ -179,7 +179,7 @@ export function buildNativeBouncePayload(state: AppState, request: NativeBounceR
     if (!target || !target.startsWith('vst3:')) return
     const index = Number(target.slice(5))
     if (!Number.isInteger(index) || index < 0) return
-    const points = state.automationCurves[track.id]
+    const points = getTrackAutomationPoints(state.automationCurves, track.id, target)
     const lane = state.automationLanes?.[track.id]
     if ((!points || points.length === 0) && lane?.source !== 'formula') return
 

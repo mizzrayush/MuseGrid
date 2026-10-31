@@ -1,9 +1,6 @@
 import type { Note, ScaleLock, Track } from '../engine/store'
-import { NOTE_NAMES, SCALE_INTERVALS } from './musicTheory'
-
-const BEAT = 192
-const BAR = BEAT * 4
-const STEP = 48
+import { NOTE_NAMES, SCALE_INTERVALS, getScaleIntervals, resolveScaleMode, detectScaleDegree } from './musicTheory'
+import { getMeterPositionAtTick, getNextBarTick, type MeterPoint } from './conductor'
 
 export type SuggestionKind = 'chords' | 'bassline' | 'rhythm'
 
@@ -22,30 +19,62 @@ interface SuggestionContext {
   activeTrackId: string | null
   scaleLock: ScaleLock
   playheadPosition: number
+  meterMap?: MeterPoint[]
+  timeSignature?: string
 }
 
-const MAJOR_PROGRESSIONS = [
-  { name: 'I - V - vi - IV', degrees: [0, 4, 5, 3] },
-  { name: 'I - vi - IV - V', degrees: [0, 5, 3, 4] },
-  { name: 'ii - V - I - vi', degrees: [1, 4, 0, 5] },
-]
+/**
+ * Progressions are derived from the scale itself, not from fixed major/minor templates.
+ * Each shape targets the functional intervals (tonic, fifth, sixth, fourth, second) and
+ * snaps them to the nearest scale degree, so pentatonic, modal, exotic and custom scales
+ * get chords built only from their own notes.
+ */
+function harmonicProgressions(scaleLock: ScaleLock): Array<{ name: string; degrees: number[] }> {
+  const raw = getScaleIntervals(scaleLock.mode, scaleLock.customIntervals) ?? SCALE_INTERVALS.Major
+  const intervals = Array.from(new Set(
+    raw.filter(value => Number.isFinite(value) && value >= 0 && value < 12)
+  )).sort((a, b) => a - b)
+  if (intervals.length < 3) {
+    return [{ name: 'I - V - I', degrees: [0, 1, 0] }]
+  }
 
-const MINOR_PROGRESSIONS = [
-  { name: 'i - VI - III - VII', degrees: [0, 5, 2, 6] },
-  { name: 'i - iv - VII - III', degrees: [0, 3, 6, 2] },
-  { name: 'i - VII - VI - V', degrees: [0, 6, 5, 4] },
-]
+  const degreeFor = (target: number, used: Set<number>): number => {
+    const order = intervals
+      .map((interval, index) => ({
+        index,
+        distance: Math.min(Math.abs(interval - target), 12 - Math.abs(interval - target))
+      }))
+      .sort((a, b) => a.distance - b.distance || a.index - b.index)
+    return (order.find(candidate => !used.has(candidate.index)) ?? order[0]).index
+  }
 
-function modeFeelsMinor(mode: string): boolean {
-  return ['Natural Minor', 'Dorian', 'Phrygian', 'Locrian', 'Pentatonic Minor', 'Blues'].includes(mode)
+  const build = (targets: number[]): number[] => {
+    const used = new Set<number>()
+    return targets.map(target => {
+      const degree = degreeFor(target, used)
+      used.add(degree)
+      return degree
+    })
+  }
+
+  // I-V-vi-IV, I-vi-IV-V and ii-V-I-vi analogues in whatever scale is active.
+  const shapes = [build([0, 7, 9, 5]), build([0, 9, 5, 7]), build([2, 7, 0, 9])]
+
+  return shapes.map(degrees => ({
+    degrees,
+    name: degrees
+      .map(degree => detectScaleDegree(
+        intervals[((degree % intervals.length) + intervals.length) % intervals.length],
+        0,
+        scaleLock.mode,
+        scaleLock.customIntervals
+      ) ?? `${degree + 1}`)
+      .join(' - ')
+  }))
 }
 
-function getModeIntervals(scaleLock: ScaleLock): number[] {
-  return SCALE_INTERVALS[scaleLock.mode] ?? SCALE_INTERVALS.Major
-}
-
-function scalePitch(degree: number, root: number, mode: string, octaveBase: number): number {
-  const intervals = SCALE_INTERVALS[mode] ?? SCALE_INTERVALS.Major
+function scalePitch(degree: number, root: number, mode: string, octaveBase: number, customIntervals?: number[]): number {
+  const intervals = getScaleIntervals(mode, customIntervals) ?? SCALE_INTERVALS.Major
   const index = ((degree % intervals.length) + intervals.length) % intervals.length
   const octave = Math.floor(degree / intervals.length)
   return octaveBase + root + intervals[index] + octave * 12
@@ -53,14 +82,21 @@ function scalePitch(degree: number, root: number, mode: string, octaveBase: numb
 
 function makeTriad(degree: number, scaleLock: ScaleLock, octaveBase: number): number[] {
   return [
-    scalePitch(degree, scaleLock.root, scaleLock.mode, octaveBase),
-    scalePitch(degree + 2, scaleLock.root, scaleLock.mode, octaveBase),
-    scalePitch(degree + 4, scaleLock.root, scaleLock.mode, octaveBase),
+    scalePitch(degree, scaleLock.root, scaleLock.mode, octaveBase, scaleLock.customIntervals),
+    scalePitch(degree + 2, scaleLock.root, scaleLock.mode, octaveBase, scaleLock.customIntervals),
+    scalePitch(degree + 4, scaleLock.root, scaleLock.mode, octaveBase, scaleLock.customIntervals),
   ].filter(pitch => pitch >= 0 && pitch < 96)
 }
 
-function startAtNextBar(playheadPosition: number): number {
-  return Math.max(0, Math.round(playheadPosition / BAR) * BAR)
+function startAtNextBar(context: SuggestionContext): number {
+  const signature = context.timeSignature || '4/4'
+  return Math.max(0, getNextBarTick(context.meterMap, signature, Math.max(0, context.playheadPosition)))
+}
+
+function barTicksAt(context: SuggestionContext, tick: number): number {
+  const signature = context.timeSignature || '4/4'
+  const position = getMeterPositionAtTick(context.meterMap, signature, tick)
+  return Math.max(1, Math.round(position.barTicks))
 }
 
 function inferMelodyCenter(notes: Note[], activeTrackId: string | null): number {
@@ -71,46 +107,64 @@ function inferMelodyCenter(notes: Note[], activeTrackId: string | null): number 
 }
 
 function chordSuggestions(context: SuggestionContext): ProceduralSuggestion[] {
-  const start = startAtNextBar(context.playheadPosition)
-  const progressions = modeFeelsMinor(context.scaleLock.mode) ? MINOR_PROGRESSIONS : MAJOR_PROGRESSIONS
+  const start = startAtNextBar(context)
+  const progressions = harmonicProgressions(context.scaleLock)
   const rootName = NOTE_NAMES[context.scaleLock.root] ?? 'C'
 
-  return progressions.map((progression, index) => ({
-    id: `chords-${index}`,
-    kind: 'chords',
-    title: progression.name,
-    subtitle: `${rootName} ${context.scaleLock.mode}, one chord per bar`,
-    targetInstrument: 'synth',
-    notes: progression.degrees.flatMap((degree, barIndex) =>
-      makeTriad(degree, context.scaleLock, 60).map((pitch, noteIndex) => ({
-        time: start + barIndex * BAR,
-        duration: BAR,
-        pitch,
-        velocity: 96 - noteIndex * 8,
-      })),
-    ),
-  }))
+  return progressions.map((progression, index) => {
+    let cursor = start
+    const notes: Array<Omit<Note, 'id' | 'trackId'>> = []
+    progression.degrees.forEach(degree => {
+      const barTicks = barTicksAt(context, cursor)
+      makeTriad(degree, context.scaleLock, 60).forEach((pitch, noteIndex) => {
+        notes.push({
+          time: cursor,
+          duration: barTicks,
+          pitch,
+          velocity: 96 - noteIndex * 8,
+        })
+      })
+      cursor += barTicks
+    })
+
+    return {
+      id: `chords-${index}`,
+      kind: 'chords' as const,
+      title: progression.name,
+      subtitle: `${rootName} ${context.scaleLock.mode}, one chord per bar`,
+      targetInstrument: 'synth' as const,
+      notes,
+    }
+  })
 }
 
 function basslineSuggestions(context: SuggestionContext): ProceduralSuggestion[] {
-  const start = startAtNextBar(context.playheadPosition)
-  const progressions = modeFeelsMinor(context.scaleLock.mode) ? MINOR_PROGRESSIONS : MAJOR_PROGRESSIONS
+  const start = startAtNextBar(context)
+  const progressions = harmonicProgressions(context.scaleLock)
   const center = inferMelodyCenter(context.notes, context.activeTrackId)
   const octaveBase = center > 64 ? 48 : 36
 
   return progressions.slice(0, 3).map((progression, index) => {
-    const notes = progression.degrees.flatMap((degree, barIndex) => {
-      const root = scalePitch(degree, context.scaleLock.root, context.scaleLock.mode, octaveBase)
-      const fifth = scalePitch(degree + 4, context.scaleLock.root, context.scaleLock.mode, octaveBase)
+    const notes: Array<Omit<Note, 'id' | 'trackId'>> = []
+    let cursor = start
+    progression.degrees.forEach(degree => {
+      const barTicks = barTicksAt(context, cursor)
+      const root = scalePitch(degree, context.scaleLock.root, context.scaleLock.mode, octaveBase, context.scaleLock.customIntervals)
+      const fifth = scalePitch(degree + 4, context.scaleLock.root, context.scaleLock.mode, octaveBase, context.scaleLock.customIntervals)
       const octave = root + 12
       const pattern = [root, root, fifth, root, octave, fifth, root, fifth]
-
-      return pattern.map((pitch, stepIndex) => ({
-        time: start + barIndex * BAR + stepIndex * (BEAT / 2),
-        duration: BEAT / 2,
-        pitch: Math.max(0, Math.min(95, pitch)),
-        velocity: stepIndex % 2 === 0 ? 100 : 82,
-      }))
+      // One step per eighth note in the active meter (8 steps in 4/4, 7 in 7/8, 10 in 5/4).
+      const steps = Math.max(1, Math.round(barTicks / 96))
+      const stepTicks = barTicks / steps
+      for (let stepIndex = 0; stepIndex < steps; stepIndex += 1) {
+        notes.push({
+          time: Math.round(cursor + stepIndex * stepTicks),
+          duration: Math.max(1, Math.round(stepTicks)),
+          pitch: Math.max(0, Math.min(95, pattern[stepIndex % pattern.length])),
+          velocity: stepIndex % 2 === 0 ? 100 : 82,
+        })
+      }
+      cursor += barTicks
     })
 
     return {
@@ -125,7 +179,9 @@ function basslineSuggestions(context: SuggestionContext): ProceduralSuggestion[]
 }
 
 function rhythmSuggestions(context: SuggestionContext): ProceduralSuggestion[] {
-  const start = startAtNextBar(context.playheadPosition)
+  const start = startAtNextBar(context)
+  const barTicks = barTicksAt(context, start)
+  const stepTicks = barTicks / 16
   const patterns = [
     {
       title: 'Four Floor Lift',
@@ -167,8 +223,8 @@ function rhythmSuggestions(context: SuggestionContext): ProceduralSuggestion[] {
     subtitle: pattern.subtitle,
     targetInstrument: 'drum',
     notes: pattern.hits.map(hit => ({
-      time: start + hit.step * STEP,
-      duration: STEP,
+      time: Math.round(start + hit.step * stepTicks),
+      duration: Math.max(1, Math.round(stepTicks)),
       pitch: hit.pitch,
       velocity: hit.velocity,
     })),
@@ -180,7 +236,7 @@ export function createProceduralSuggestions(kind: SuggestionKind, context: Sugge
     ...context,
     scaleLock: {
       ...context.scaleLock,
-      mode: getModeIntervals(context.scaleLock).length > 0 ? context.scaleLock.mode : 'Major',
+      mode: resolveScaleMode(context.scaleLock.mode) ?? context.scaleLock.mode,
     },
   }
 

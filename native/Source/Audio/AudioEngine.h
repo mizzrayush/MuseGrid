@@ -103,6 +103,19 @@ struct TrackState
     EnvelopeCurve decayCurve;
     EnvelopeCurve releaseCurve;
 
+    // Patch-level synth shaping (Synth Studio / .muzins). These used to be WebAudio-only.
+    int synthFilterType = 0; // 0 lowpass, 1 highpass, 2 bandpass, 3 notch
+    float synthFilterFreq = 20000.0f;
+    float synthFilterQ = 0.7f;
+    int synthUnison = 1;
+    float synthDetuneSpread = 0.0f;
+    float synthDetuneCents = 0.0f;
+    float synthPortamento = 0.0f;
+    std::array<float, 64> synthPartials {};
+    int synthPartialCount = 0;
+    float lastSynthPitch = 60.0f;
+    bool hasLastSynthPitch = false;
+
     // FX units
     EQEffect eq;
     FilterEffect filter;
@@ -237,6 +250,8 @@ public:
     void setTrackSolo(const juce::String& trackId, bool solo);
     void setTrackSynthParam(const juce::String& trackId, const juce::String& param, float val);
     void setTrackSynthPreset(const juce::String& trackId, const juce::String& presetName);
+    void setTrackFilter(const juce::String& trackId, const juce::String& filterType, float cutoffHz, float resonance);
+    void setTrackSynthPartials(const juce::String& trackId, const float* data, int count);
     void setTrackFxParam(const juce::String& trackId, const juce::String& fxType, const juce::String& param, float val);
     void setTrackDrumKit(const juce::String& trackId, const juce::String& kitName);
 

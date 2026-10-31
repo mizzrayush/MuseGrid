@@ -57,7 +57,15 @@ void VoiceManager::noteOnSynth(const juce::String& trackId,
                                float filterSweepTimeSeconds,
                                const EnvelopeCurve* customDecayCurve,
                                const EnvelopeCurve* customReleaseCurve,
-                               const musegrid::NoteExpression& expression)
+                               const musegrid::NoteExpression& expression,
+                               int filterType,
+                               float filterCutoffHz,
+                               float filterResonance,
+                               int unison,
+                               float unisonSpreadCents,
+                               float detuneCents,
+                               const float* partials,
+                               int partialCount)
 {
     // Find free voice or round-robin steal
     int index = -1;
@@ -95,6 +103,11 @@ void VoiceManager::noteOnSynth(const juce::String& trackId,
         tv.voice.setDecayCurve(*customDecayCurve);
     if (customReleaseCurve)
         tv.voice.setReleaseCurve(*customReleaseCurve);
+
+    tv.voice.setFilter(filterType, filterCutoffHz, filterResonance);
+    tv.voice.setUnison(unison, unisonSpreadCents);
+    tv.voice.setDetuneCents(detuneCents);
+    tv.voice.setPartials(partials, partialCount);
 
     tv.voice.triggerNoteOn(noteId, pitchMidi, velocity, durationSeconds,
                            targetPitchMidi, slideTimeSeconds,

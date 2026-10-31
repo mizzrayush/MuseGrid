@@ -647,10 +647,10 @@ export const RightPane: React.FC = () => {
   const detectedChordInfo = useMemo(() => {
     if (isDrum || selectedNotes.length === 0) return null
     const pitches = selectedNotes.map(n => n.pitch)
-    const chord = detectChord(pitches)
+    const chord = detectChord(pitches, scaleLock.accidental === 'flat')
     if (!chord) return null
 
-    const degree = detectScaleDegree(chord.rootPitch, scaleLock.root, scaleLock.mode)
+    const degree = detectScaleDegree(chord.rootPitch, scaleLock.root, scaleLock.mode, scaleLock.customIntervals, chord.quality)
     return {
       ...chord,
       degree

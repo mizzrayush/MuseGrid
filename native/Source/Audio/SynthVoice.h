@@ -9,7 +9,7 @@
 class SynthVoice
 {
 public:
-    enum class OscType { Sine, Triangle, Square, Saw, Noise };
+    enum class OscType { Sine, Triangle, Square, Saw, Noise, Custom };
 
     SynthVoice();
 
@@ -46,6 +46,12 @@ public:
     void setReleaseCurve(const EnvelopeCurve& curve) { releaseCurve = curve; }
     void setFmParams(bool enabled, float harmonicity, float modIndex,
                      float modA = 0.01f, float modD = 0.2f, float modS = 0.1f, float modR = 0.2f);
+
+    // Patch-level tone shaping shared by Synth Studio and .muzins imports.
+    void setFilter(int type, float cutoffHz, float resonance);
+    void setUnison(int voices, float spreadCents);
+    void setDetuneCents(float cents);
+    void setPartials(const float* data, int count);
 
     // Audio generation per sample block
     void renderBlock(float* leftOut, float* rightOut, int numSamples, float trackPan, float trackVol);
@@ -110,6 +116,24 @@ private:
     float filterSweepElapsed = 0.0f;
     float currentFilterCutoff = 20000.0f;
     float filterState = 0.0f;
+
+    // Patch filter, always in series after any per-note sweep.
+    enum class FilterMode { LowPass = 0, HighPass = 1, BandPass = 2, Notch = 3 };
+    bool patchFilterEnabled = false;
+    FilterMode patchFilterMode = FilterMode::LowPass;
+    float patchFilterCutoff = 20000.0f;
+    float patchFilterTarget = 20000.0f;
+    float patchFilterResonance = 0.7f;
+    float svfIc1 = 0.0f;
+    float svfIc2 = 0.0f;
+
+    // Patch-level unison, tuning and custom wavetable partials.
+    int unisonVoices = 1;
+    float unisonSpreadCents = 0.0f;
+    float detuneCents = 0.0f;
+    std::array<double, 16> unisonPhases {};
+    std::array<float, 64> partialAmplitudes {};
+    int partialCount = 0;
 
     // Note duration tracker (for auto release if duration provided)
     float remainingDuration = -1.0f;

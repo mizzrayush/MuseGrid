@@ -1616,10 +1616,26 @@ interface SliderRowProps {
   onChange: (v: number) => void
 }
 
+const formatSliderText = (value: number) => String(Math.round(value * 100) / 100)
+
 const SliderRow: React.FC<SliderRowProps> = ({
   label, value, min, max, step = 1, suffix = '', color = '#4dabf7', onChange
 }) => {
   const progress = sliderProgress(value, min, max)
+  const [text, setText] = useState(() => formatSliderText(value))
+  const [prevValue, setPrevValue] = useState(value)
+  const [focused, setFocused] = useState(false)
+
+  if (value !== prevValue) {
+    setPrevValue(value)
+    if (!focused) setText(formatSliderText(value))
+  }
+
+  const commit = () => {
+    const parsed = parseFloat(text)
+    if (Number.isFinite(parsed)) onChange(parsed)
+    else setText(formatSliderText(value))
+  }
 
   return (
     <div
@@ -1644,9 +1660,38 @@ const SliderRow: React.FC<SliderRowProps> = ({
           '--slider-progress': progress,
         } as React.CSSProperties & Record<string, string | number>}
       />
-      <span style={{ fontSize: '10px', color: color, fontWeight: 800, minWidth: '36px', textAlign: 'right', fontFamily: 'monospace' }}>
-        {value}{suffix}
-      </span>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '2px', minWidth: '36px' }}>
+        <input
+          type="text"
+          inputMode="decimal"
+          value={text}
+          onFocus={() => setFocused(true)}
+          onBlur={() => { setFocused(false); commit() }}
+          onChange={e => setText(e.target.value)}
+          onKeyDown={e => {
+            e.stopPropagation()
+            if (e.key === 'Enter') e.currentTarget.blur()
+            if (e.key === 'Escape') {
+              setText(formatSliderText(value))
+              e.currentTarget.blur()
+            }
+          }}
+          style={{
+            width: '38px',
+            textAlign: 'right',
+            fontSize: '10px',
+            color,
+            fontWeight: 800,
+            fontFamily: 'monospace',
+            background: 'rgba(0,0,0,0.3)',
+            border: `1px solid ${focused ? color : 'rgba(255,255,255,0.08)'}`,
+            borderRadius: '3px',
+            padding: '1px 3px',
+            outline: 'none',
+          }}
+        />
+        {suffix && <span style={{ fontSize: '9px', color, fontWeight: 700, fontFamily: 'monospace' }}>{suffix}</span>}
+      </div>
     </div>
   )
 }

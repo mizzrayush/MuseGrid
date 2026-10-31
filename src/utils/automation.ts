@@ -12,6 +12,7 @@ import {
   type MeterPoint,
   type TempoPoint,
 } from './conductor'
+import { cachedFormula, compileFormula } from './formulaMath'
 
 const MIN_VELOCITY = 1
 const MAX_VELOCITY = 127
@@ -191,15 +192,8 @@ const modulationCache = new Map<string, ModulationEquation | null>()
 export function compileModulationEquation(equation: string): ModulationEquation | null {
   const key = (equation || '').trim()
   if (!key) return null
-  if (modulationCache.has(key)) return modulationCache.get(key) ?? null
-  let fn: ModulationEquation | null = null
-  try {
-    fn = new Function('t', 'b', 'm', 'ticks', `return ${key}`) as ModulationEquation
-  } catch {
-    fn = null
-  }
-  modulationCache.set(key, fn)
-  return fn
+  return cachedFormula(modulationCache, key, () =>
+    compileFormula<ModulationEquation>(key, ['t', 'b', 'm', 'ticks']))
 }
 
 /** Override / add / multiply, matching the lane and FX modulator combine modes. */
@@ -249,16 +243,8 @@ export function modulateFxParam(
 export function compileLaneEquation(equation: string): LaneEquation | null {
   const key = (equation || '').trim()
   if (!key) return null
-  if (laneEquationCache.has(key)) return laneEquationCache.get(key) ?? null
-
-  let fn: LaneEquation | null = null
-  try {
-    fn = new Function('t', 'b', 'm', 'ticks', 'v', `return ${key}`) as LaneEquation
-  } catch {
-    fn = null
-  }
-  laneEquationCache.set(key, fn)
-  return fn
+  return cachedFormula(laneEquationCache, key, () =>
+    compileFormula<LaneEquation>(key, ['t', 'b', 'm', 'ticks', 'v']))
 }
 
 export function laneEquationIsValid(equation: string): boolean {

@@ -3,7 +3,7 @@ import * as Tone from 'tone'
 import {
   IconPin, IconPlus, IconTrash, IconChevronLeft, IconMusic, IconDrum, IconSettings,
   IconVolume, IconVolumeX, IconCopy, IconPaste, IconScissors, IconZap,
-  IconLayers, IconArrowUp, IconArrowDown, IconSparkles, IconShuffle, IconList, IconAlign
+  IconLayers, IconArrowUp, IconArrowDown, IconSparkles, IconShuffle, IconList, IconAlign, IconDownload
 } from '../ui/Icons'
 import { useContextMenuDismissal, useContextMenuPosition } from '../ui/useContextMenuDismissal'
 import ConductorLane from './ConductorLane'
@@ -466,6 +466,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
 
   const timelineSelection = useStore(state => state.timelineSelection)
   const setTimelineSelection = useStore(state => state.setTimelineSelection)
+  const regionPickMode = useStore(state => state.regionPickMode)
   const duplicateTimelineRange = useStore(state => state.duplicateTimelineRange)
   const muteTimelineRange = useStore(state => state.muteTimelineRange)
   const deleteTimelineRange = useStore(state => state.deleteTimelineRange)
@@ -767,6 +768,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
       // Timeline Selection Shortcuts
       if (store.timelineSelection) {
         const { startTick, endTick } = store.timelineSelection
+        const regionTrackIds = store.timelineSelection.trackIds
         const minT = Math.min(startTick, endTick)
         const maxT = Math.max(startTick, endTick)
 
@@ -777,27 +779,27 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         }
         if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
           e.preventDefault()
-          store.duplicateTimelineRange(startTick, endTick, targetTrackId)
+          store.duplicateTimelineRange(startTick, endTick, targetTrackId, regionTrackIds)
           return
         }
         if (!e.ctrlKey && !e.metaKey && (e.key.toLowerCase() === 'm' || (e.altKey && e.key.toLowerCase() === 'm'))) {
           e.preventDefault()
-          store.muteTimelineRange(startTick, endTick, targetTrackId)
+          store.muteTimelineRange(startTick, endTick, targetTrackId, regionTrackIds)
           return
         }
         if (e.key === 'Delete' || e.key === 'Backspace') {
           e.preventDefault()
-          store.deleteTimelineRange(startTick, endTick, targetTrackId)
+          store.deleteTimelineRange(startTick, endTick, targetTrackId, regionTrackIds)
           return
         }
         if ((e.ctrlKey || e.metaKey) && e.key === 'e') {
           e.preventDefault()
-          store.splitTimelineRange(startTick, endTick, targetTrackId)
+          store.splitTimelineRange(startTick, endTick, targetTrackId, regionTrackIds)
           return
         }
         if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'q') {
           e.preventDefault()
-          store.quantizeTimelineRange(startTick, endTick, targetTrackId)
+          store.quantizeTimelineRange(startTick, endTick, targetTrackId, regionTrackIds)
           return
         }
         if ((e.ctrlKey || e.metaKey) && e.key === 'l') {
@@ -809,7 +811,9 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         }
         if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
           e.preventDefault()
-          const notesToCopy = allNotes.filter(n => n.time >= minT && n.time < maxT && (!targetTrackId || n.trackId === targetTrackId))
+          const notesToCopy = allNotes.filter(n => n.time >= minT && n.time < maxT && (regionTrackIds?.length
+            ? regionTrackIds.includes(n.trackId)
+            : (!targetTrackId || n.trackId === targetTrackId)))
           if (notesToCopy.length > 0) {
             store.setClipboard(notesToCopy)
             store.showToast(`Copied ${notesToCopy.length} note${notesToCopy.length === 1 ? '' : 's'} in region`, 'info')
@@ -818,10 +822,12 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         }
         if ((e.ctrlKey || e.metaKey) && e.key === 'x') {
           e.preventDefault()
-          const notesToCopy = allNotes.filter(n => n.time >= minT && n.time < maxT && (!targetTrackId || n.trackId === targetTrackId))
+          const notesToCopy = allNotes.filter(n => n.time >= minT && n.time < maxT && (regionTrackIds?.length
+            ? regionTrackIds.includes(n.trackId)
+            : (!targetTrackId || n.trackId === targetTrackId)))
           if (notesToCopy.length > 0) {
             store.setClipboard(notesToCopy)
-            store.deleteTimelineRange(startTick, endTick, targetTrackId)
+            store.deleteTimelineRange(startTick, endTick, targetTrackId, regionTrackIds)
             store.showToast(`Cut ${notesToCopy.length} note${notesToCopy.length === 1 ? '' : 's'} in region`, 'info')
           }
           return
@@ -1187,6 +1193,22 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
   const getWorldXFromPointer = (clientX: number, rect: DOMRect) =>
     (clientX - rect.left - SIDEBAR_WIDTH - getEffectivePanX(rect.width)) / zoom
 
+  // A region can span several tracks when the user has multi-selected them; the pane
+  // the region is drawn in is always included so a plain drag still targets that track.
+  const regionTrackIds = (): string[] | undefined => {
+    const state = useStore.getState()
+    const ids = state.selectedTrackIds.length > 1 ? [...state.selectedTrackIds] : []
+    if (targetTrackId && !ids.includes(targetTrackId)) ids.push(targetTrackId)
+    return ids.length > 0 ? ids : undefined
+  }
+
+  const makeTimelineSelection = (startTick: number, endTick: number) => ({
+    startTick,
+    endTick,
+    trackId: targetTrackId,
+    trackIds: regionTrackIds(),
+  })
+
   // STICKY TIMELINE RENDER LOOP
   useEffect(() => {
     if (!timelineCanvasRef.current || instrumentTracks.length === 0) return
@@ -1356,14 +1378,27 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
           ctx.lineWidth = 1.5
           ctx.strokeRect(sxStart, 0, sWidth, height)
 
+          const regionTrackIds = storeState.timelineSelection.trackIds
+            ?? (storeState.timelineSelection.trackId ? [storeState.timelineSelection.trackId] : [])
+          if (regionTrackIds.length > 1) {
+            const byId = new Map(storeState.tracks.map(t => [t.id, t]))
+            regionTrackIds.slice(0, 4).forEach((id, index) => {
+              ctx.fillStyle = byId.get(id)?.color ?? '#ffa94d'
+              ctx.fillRect(sxStart, index * 3, sWidth, 3)
+            })
+          }
+
           if (sWidth > 24) {
+            const regionLabel = regionTrackIds.length > 1
+              ? `${maxT - minT}t · ${regionTrackIds.length} tracks`
+              : `${maxT - minT}t Range`
             ctx.fillStyle = '#ffa94d'
-            ctx.fillRect(sxStart, 0, Math.min(sWidth, 64), 11)
+            ctx.fillRect(sxStart, 0, Math.min(sWidth, regionTrackIds.length > 1 ? 96 : 64), 11)
             ctx.fillStyle = '#14141c'
             ctx.font = 'bold 8.5px "Inter", sans-serif'
             ctx.textAlign = 'left'
             ctx.textBaseline = 'middle'
-            ctx.fillText(`${maxT - minT}t Range`, sxStart + 4, 6)
+            ctx.fillText(regionLabel, sxStart + 4, 6)
           }
         }
       }
@@ -1719,6 +1754,16 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
           ctx.moveTo(sxStart, 0); ctx.lineTo(sxStart, TIMELINE_HEIGHT + gridHeight)
           ctx.moveTo(sxEnd, 0); ctx.lineTo(sxEnd, TIMELINE_HEIGHT + gridHeight)
           ctx.stroke()
+
+          const regionTrackIds = storeState.timelineSelection.trackIds
+            ?? (storeState.timelineSelection.trackId ? [storeState.timelineSelection.trackId] : [])
+          if (regionTrackIds.length > 1) {
+            const byId = new Map(storeState.tracks.map(t => [t.id, t]))
+            regionTrackIds.slice(0, 4).forEach((id, index) => {
+              ctx.fillStyle = byId.get(id)?.color ?? '#ffa94d'
+              ctx.fillRect(sxStart, index * (3 / zoom), sWidth, 3 / zoom)
+            })
+          }
         }
       }
 
@@ -2349,7 +2394,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
 
           // Key text
           if (scaleFoldEnabled) {
-            const degree = detectScaleDegree(soundingPitch, scaleLock.root, scaleLock.mode)
+            const degree = detectScaleDegree(soundingPitch, scaleLock.root, scaleLock.mode, scaleLock.customIntervals)
             const isRoot = ((soundingPitch - scaleLock.root + 1200) % 12) === 0
             if (isRoot) {
               ctx.fillStyle = '#00e6ff'
@@ -3188,10 +3233,10 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         startTick,
         isRight: false
       }
-      if (e.ctrlKey || e.shiftKey) {
+      if (e.ctrlKey || e.shiftKey || regionPickMode) {
         setDragMode('draw_timeline_range')
         setTimelineRangeStart(startTick)
-        setTimelineSelection({ startTick, endTick: startTick, trackId: targetTrackId })
+        setTimelineSelection(makeTimelineSelection(startTick, startTick))
         return
       }
 
@@ -3235,7 +3280,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         setTimelineRangeStart(sTick)
         const rawTick = xToTick(x)
         const curTick = snapEnabled ? snapTick(rawTick, snapResolution) : Math.round(rawTick)
-        setTimelineSelection({ startTick: sTick, endTick: curTick, trackId: targetTrackId })
+        setTimelineSelection(makeTimelineSelection(sTick, curTick))
         e.currentTarget.style.cursor = 'crosshair'
         return
       }
@@ -3245,7 +3290,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
       e.currentTarget.style.cursor = 'crosshair'
       const rawTick = xToTick(x)
       const curTick = snapEnabled ? snapTick(rawTick, snapResolution) : Math.round(rawTick)
-      setTimelineSelection({ startTick: timelineRangeStart, endTick: curTick, trackId: targetTrackId })
+      setTimelineSelection(makeTimelineSelection(timelineRangeStart, curTick))
       return
     }
 
@@ -3287,6 +3332,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
       if (currentSel && Math.abs(currentSel.endTick - currentSel.startTick) < (snapEnabled ? Math.max(6, snapResolution / 4) : 6)) {
         setTimelineSelection(null)
       }
+      if (useStore.getState().regionPickMode) useStore.getState().setRegionPickMode(false)
       setTimelineRangeStart(null)
       setDragMode('none')
       timelineDragStateRef.current = null
@@ -3446,10 +3492,10 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
           const startTick = snapEnabled ? snapTick(rawTick, snapResolution) : Math.round(rawTick)
           gridTimelineDragRef.current = { startX: x, startClientX: e.clientX, startTick }
 
-          if (e.ctrlKey || e.shiftKey) {
+          if (e.ctrlKey || e.shiftKey || regionPickMode) {
             setDragMode('draw_timeline_range')
             setTimelineRangeStart(startTick)
-            setTimelineSelection({ startTick, endTick: startTick, trackId: targetTrackId })
+            setTimelineSelection(makeTimelineSelection(startTick, startTick))
           } else {
             setDragMode('scrub_playhead')
             setPlayheadFromWorldX(x)
@@ -3572,7 +3618,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
         const rawTick = xToTick(x)
         const startTick = snapEnabled ? snapTick(rawTick, snapResolution) : Math.round(rawTick)
         setTimelineRangeStart(startTick)
-        setTimelineSelection({ startTick, endTick: startTick, trackId: targetTrackId })
+        setTimelineSelection(makeTimelineSelection(startTick, startTick))
         return
       }
 
@@ -3920,7 +3966,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
           setTimelineRangeStart(sTick)
           const rawTick = xToTick(x)
           const curTick = snapEnabled ? snapTick(rawTick, snapResolution) : Math.round(rawTick)
-          setTimelineSelection({ startTick: sTick, endTick: curTick, trackId: targetTrackId })
+          setTimelineSelection(makeTimelineSelection(sTick, curTick))
           e.currentTarget.style.cursor = 'crosshair'
           return
         }
@@ -3931,7 +3977,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
       e.currentTarget.style.cursor = 'crosshair'
       const rawTick = xToTick(x)
       const curTick = snapEnabled ? snapTick(rawTick, snapResolution) : Math.round(rawTick)
-      setTimelineSelection({ startTick: timelineRangeStart, endTick: curTick, trackId: targetTrackId })
+      setTimelineSelection(makeTimelineSelection(timelineRangeStart, curTick))
       return
     } else if (dragMode === 'box_select') {
       e.currentTarget.style.cursor = 'cell'
@@ -3991,6 +4037,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
       if (currentSel && Math.abs(currentSel.endTick - currentSel.startTick) < (snapEnabled ? Math.max(6, snapResolution / 4) : 6)) {
         setTimelineSelection(null)
       }
+      if (useStore.getState().regionPickMode) useStore.getState().setRegionPickMode(false)
       setTimelineRangeStart(null)
       setDragMode('none')
       gridTimelineDragRef.current = null
@@ -5261,7 +5308,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                 style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
                 onClick={() => {
                   if (timelineSelection) {
-                    duplicateTimelineRange(timelineSelection.startTick, timelineSelection.endTick, targetTrackId)
+                    duplicateTimelineRange(timelineSelection.startTick, timelineSelection.endTick, targetTrackId, timelineSelection.trackIds)
                   }
                   setContextMenu(null)
                 }}
@@ -5278,7 +5325,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                 style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
                 onClick={() => {
                   if (timelineSelection) {
-                    muteTimelineRange(timelineSelection.startTick, timelineSelection.endTick, targetTrackId)
+                    muteTimelineRange(timelineSelection.startTick, timelineSelection.endTick, targetTrackId, timelineSelection.trackIds)
                   }
                   setContextMenu(null)
                 }}
@@ -5299,10 +5346,12 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                   if (timelineSelection) {
                     const minT = Math.min(timelineSelection.startTick, timelineSelection.endTick)
                     const maxT = Math.max(timelineSelection.startTick, timelineSelection.endTick)
-                    const notesToCopy = allNotes.filter(n => n.time >= minT && n.time < maxT && (!targetTrackId || n.trackId === targetTrackId))
+                    const notesToCopy = allNotes.filter(n => n.time >= minT && n.time < maxT && (timelineSelection.trackIds?.length
+                      ? timelineSelection.trackIds.includes(n.trackId)
+                      : (!targetTrackId || n.trackId === targetTrackId)))
                     if (notesToCopy.length > 0) {
                       useStore.getState().setClipboard(notesToCopy)
-                      deleteTimelineRange(timelineSelection.startTick, timelineSelection.endTick, targetTrackId)
+                      deleteTimelineRange(timelineSelection.startTick, timelineSelection.endTick, targetTrackId, timelineSelection.trackIds)
                       useStore.getState().showToast(`Cut ${notesToCopy.length} notes in region`, 'info')
                     }
                   }
@@ -5323,7 +5372,9 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                   if (timelineSelection) {
                     const minT = Math.min(timelineSelection.startTick, timelineSelection.endTick)
                     const maxT = Math.max(timelineSelection.startTick, timelineSelection.endTick)
-                    const notesToCopy = allNotes.filter(n => n.time >= minT && n.time < maxT && (!targetTrackId || n.trackId === targetTrackId))
+                    const notesToCopy = allNotes.filter(n => n.time >= minT && n.time < maxT && (timelineSelection.trackIds?.length
+                      ? timelineSelection.trackIds.includes(n.trackId)
+                      : (!targetTrackId || n.trackId === targetTrackId)))
                     if (notesToCopy.length > 0) {
                       useStore.getState().setClipboard(notesToCopy)
                       useStore.getState().showToast(`Copied ${notesToCopy.length} notes in region`, 'info')
@@ -5344,7 +5395,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                 style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#ff3366', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontWeight: 600 }}
                 onClick={() => {
                   if (timelineSelection) {
-                    deleteTimelineRange(timelineSelection.startTick, timelineSelection.endTick, targetTrackId)
+                    deleteTimelineRange(timelineSelection.startTick, timelineSelection.endTick, targetTrackId, timelineSelection.trackIds)
                   }
                   setContextMenu(null)
                 }}
@@ -5363,7 +5414,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                 style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
                 onClick={() => {
                   if (timelineSelection) {
-                    splitTimelineRange(timelineSelection.startTick, timelineSelection.endTick, targetTrackId)
+                    splitTimelineRange(timelineSelection.startTick, timelineSelection.endTick, targetTrackId, timelineSelection.trackIds)
                   }
                   setContextMenu(null)
                 }}
@@ -5380,7 +5431,7 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                 style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
                 onClick={() => {
                   if (timelineSelection) {
-                    quantizeTimelineRange(timelineSelection.startTick, timelineSelection.endTick, targetTrackId)
+                    quantizeTimelineRange(timelineSelection.startTick, timelineSelection.endTick, targetTrackId, timelineSelection.trackIds)
                   }
                   setContextMenu(null)
                 }}
@@ -5412,6 +5463,49 @@ export default function GridCanvas({ instrument }: GridCanvasProps) {
                   <IconMusic size={13} style={{ color: '#4dabf7' }} /> Set as Loop Range
                 </div>
                 <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>Ctrl+L</span>
+              </button>
+
+              <button
+                style={{ width: '100%', padding: '7px 12px', background: 'none', border: 'none', color: '#eee', cursor: 'pointer', textAlign: 'left', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                onClick={() => {
+                  if (timelineSelection) {
+                    const state = useStore.getState()
+                    const minT = Math.min(timelineSelection.startTick, timelineSelection.endTick)
+                    const maxT = Math.max(timelineSelection.startTick, timelineSelection.endTick)
+                    const knownIds = new Set(state.tracks.map(t => t.id))
+                    const regionTracks = (timelineSelection.trackIds
+                      ?? (timelineSelection.trackId ? [timelineSelection.trackId] : []))
+                      .filter(id => knownIds.has(id))
+                    state.setProjectExportData({
+                      type: 'wav',
+                      trackIds: regionTracks.length > 0 ? regionTracks : undefined,
+                      octaveOffset: 0,
+                      semitoneOffset: 0,
+                      normalize: true,
+                      includeMetronome: false,
+                      autoFade: true,
+                      isRendering: false,
+                      progress: 0,
+                      renderElapsedSeconds: 0,
+                      renderTotalSeconds: 0,
+                      startTick: minT,
+                      endTick: Math.max(minT + 1, maxT),
+                      includeProceduralFx: state.studioSettings.proceduralFxEnabled,
+                      mp3Kbps: 320,
+                      bounceMode: 'hybrid',
+                      realtimeTailSeconds: 2,
+                      displayLabel: `Region · ${regionTracks.length || 1} ${(regionTracks.length || 1) === 1 ? 'track' : 'tracks'} · ticks ${minT}–${maxT}`
+                    })
+                  }
+                  setContextMenu(null)
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                onMouseLeave={e => e.currentTarget.style.background = 'none'}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <IconDownload size={13} style={{ color: '#69db7c' }} /> Export Region...
+                </div>
+                <span style={{ fontSize: '10px', color: '#666', fontWeight: 500 }}>WAV / MIDI</span>
               </button>
 
               <div style={{ height: '1px', background: 'rgba(255,255,255,0.06)', margin: '4px 0' }} />

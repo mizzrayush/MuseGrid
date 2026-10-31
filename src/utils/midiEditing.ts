@@ -1,5 +1,5 @@
 import type { Note } from '../engine/store'
-import { snapToScale, SCALE_INTERVALS } from './musicTheory'
+import { snapToScale, SCALE_INTERVALS, getScaleIntervals } from './musicTheory'
 
 export function newId(): string {
   return Math.random().toString(36).substring(2, 11)
@@ -569,7 +569,7 @@ export function applyModalTranspose(
   mode: string,
   customIntervals?: number[]
 ): Note[] {
-  const intervals = mode === 'Custom' && customIntervals ? customIntervals : SCALE_INTERVALS[mode]
+  const intervals = getScaleIntervals(mode, customIntervals)
   if (!intervals || intervals.length === 0) return applyTranspose(notes, degreeOffset)
 
   return notes.map(note => {
@@ -621,7 +621,7 @@ export function applyHarmonize(
   mode: string,
   customIntervals?: number[]
 ): Note[] {
-  const intervals = mode === 'Custom' && customIntervals ? customIntervals : SCALE_INTERVALS[mode] || SCALE_INTERVALS['Major']
+  const intervals = getScaleIntervals(mode, customIntervals) ?? SCALE_INTERVALS['Major']
   const result: Note[] = []
 
   notes.forEach(note => {

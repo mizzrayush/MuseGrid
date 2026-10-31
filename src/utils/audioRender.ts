@@ -12,6 +12,7 @@ import { getActiveDPreverbInstances, getTrackFxInstances, getTrackFxSetting as r
 import { createTrackChannel } from './toneChannel'
 import { drumSampleShouldLoop, getSamplerPlayPlan, resolveSamplerLoopMode, resolveSamplerRegion } from './audioPlayback'
 import { buildConductorBeats, conductorBarsAtTick, conductorDurationSeconds, conductorSecondsAtTick, getTempoAtTick } from './conductor'
+import { calculateFourierPartials } from './mathWaveform'
 
 const PPQ = 192
 
@@ -787,11 +788,43 @@ function renderTrackNotesWithTransform(
       if (track.synthSustain !== undefined) synth.set({ envelope: { sustain: track.synthSustain } })
       if (track.synthRelease !== undefined) synth.set({ envelope: { release: track.synthRelease } })
 
-      if (track.synthOscillator !== undefined) synth.set({ oscillator: { type: track.synthOscillator } })
+      if (track.synthOscillator !== undefined) {
+        if (track.synthOscillator === 'custom' && (track.synthPartials?.length || track.synthFormula)) {
+          try {
+            const partials = track.synthPartials?.length
+              ? track.synthPartials
+              : calculateFourierPartials(track.synthFormula!, track.synthPartialsCount || 16)
+            synth.set({ oscillator: { type: 'custom', partials } as any })
+          } catch (e) {
+            console.warn('Failed to set custom formula oscillator:', e)
+          }
+        } else if (track.synthOscillator !== 'custom') {
+          const voices = Math.max(1, Math.min(16, Math.round(track.synthUnison ?? 1)))
+          try {
+            if (voices > 1) {
+              synth.set({
+                oscillator: {
+                  type: `fat${track.synthOscillator}`,
+                  count: voices,
+                  spread: track.synthDetuneSpread ?? 12
+                } as any
+              })
+            } else {
+              synth.set({ oscillator: { type: track.synthOscillator } })
+            }
+          } catch {
+            synth.set({ oscillator: { type: track.synthOscillator } })
+          }
+        }
+      }
       if (track.synthDetune !== undefined) synth.set({ detune: track.synthDetune })
       if (track.synthPortamento !== undefined) synth.set({ portamento: track.synthPortamento })
 
       const anySynth = synth as any
+      if (track.synthFilterType !== undefined) {
+        if (anySynth.filter) anySynth.filter.type = track.synthFilterType
+        else if (anySynth.options?.filter) (synth as any).set({ filter: { type: track.synthFilterType } })
+      }
       if (track.synthFilterFreq !== undefined || track.synthFilterQ !== undefined) {
         if (anySynth.filter) {
           if (track.synthFilterFreq !== undefined) anySynth.filter.frequency.value = track.synthFilterFreq
@@ -1563,7 +1596,7 @@ async function renderWithOfflineCustomFx(
       tracks: baseTracks,
       notes: state.notes.filter(note => !note.muted && baseTrackIds.has(note.trackId)),
       automationCurves: Object.fromEntries(
-        baseTracks.map(track => [track.id, state.automationCurves[track.id] ?? []])
+        Object.entries(state.automationCurves).filter(([key]) => baseTrackIds.has(key.split('::')[0]))
       )
     }
 
@@ -1583,7 +1616,9 @@ async function renderWithOfflineCustomFx(
       ...state,
       tracks: [track],
       notes: state.notes.filter(note => !note.muted && note.trackId === track.id),
-      automationCurves: { [track.id]: state.automationCurves[track.id] ?? [] }
+      automationCurves: Object.fromEntries(
+        Object.entries(state.automationCurves).filter(([key]) => key.split('::')[0] === track.id)
+      )
     }
 
     try {

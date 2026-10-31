@@ -4,6 +4,8 @@
  * and meter points always start a new bar.
  */
 
+import { cachedFormula, compileFormula } from './formulaMath'
+
 export const CONDUCTOR_PPQ = 192
 export const MIN_CONDUCTOR_BPM = 20
 export const MAX_CONDUCTOR_BPM = 999
@@ -76,6 +78,10 @@ export const parseMeterSignature = (signature: string): { numerator: number; den
   }
 }
 
+type TempoFormula = (t: number, b: number, m: number, ticks: number, v: number) => number
+// Never recompile inside the 128-step numerical integration that formula curves use.
+const tempoFormulaCache = new Map<string, TempoFormula | null>()
+
 const evaluateTempoFormula = (
   point: TempoPoint,
   next: TempoPoint,
@@ -88,9 +94,11 @@ const evaluateTempoFormula = (
   const beats = tick / CONDUCTOR_PPQ
   // Bars follow the conductor's meters, so 7/8 and 5/4 lines up with the bar ruler.
   const bars = conductorBarsAtTick(meterMap, timeSignature, tick)
+  const source = point.formula || 'v'
+  const fn = cachedFormula(tempoFormulaCache, source, () =>
+    compileFormula<TempoFormula>(source, ['t', 'b', 'm', 'ticks', 'v']))
+  if (!fn) return clampConductorBpm(linear)
   try {
-    const fn = new Function('t', 'b', 'm', 'ticks', 'v', `return (${point.formula || 'v'});`) as
-      (t: number, b: number, m: number, ticks: number, v: number) => number
     return clampConductorBpm(Number(fn(t, beats, bars, tick, linear)))
   } catch {
     return clampConductorBpm(linear)
